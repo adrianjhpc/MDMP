@@ -33,7 +33,7 @@ namespace llvm {
         MDMPPragmaPass() : ModulePass(ID) {}
         
         bool runOnModule(Module &M) override;
-        bool runOnFunction(Function &F) override;
+        bool runOnFunction(Function &F);
         
     private:
         void processPragmaDirectives(Function &F);
@@ -50,11 +50,12 @@ namespace llvm {
         void handleCommunicationEnd();
         void handleSync();
 	void handleWait();
-        void handSend();
-	void handRecv();
+        void handleSend();
+	void handleRecv();
         void handleOptimize(int level);
         void handleNoOpt();
         void handleRank();
+	void handleSize();
         void handleReduce(int op, void* src, void* dst, size_t size);
         void handleBarrier();
         void handleBroadcast(void* data, size_t size, int root);

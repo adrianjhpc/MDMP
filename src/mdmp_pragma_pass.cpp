@@ -1,5 +1,5 @@
 // MDMPPragmaPass.cpp
-#include "MDMPPragmaPass.h"
+#include "mdmp_pragma_pass.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
@@ -49,7 +49,7 @@ void MDMPPragmaPass::processPragmaDirectives(Function &F) {
                 CallInst *CI = cast<CallInst>(&I);
                 Function *called = CI->getCalledFunction();
                 
-                if (called && called->getName().startswith("mdmp_pragma")) {
+                if (called && called->getName().starts_with("mdmp_pragma")) {
                     // This is a pragma call, process it
                     // Extract pragma information from arguments
                 }
@@ -80,7 +80,7 @@ void MDMPPragmaPass::transformPragmasToCalls(Function &F) {
                 CallInst *CI = cast<CallInst>(Inst);
                 Function *called = CI->getCalledFunction();
                 
-                if (called && called->getName().startswith("mdmp_pragma")) {
+                if (called && called->getName().starts_with("mdmp_pragma")) {
                     // This is where the transformation happens
                 }
             }
@@ -91,8 +91,8 @@ void MDMPPragmaPass::transformPragmasToCalls(Function &F) {
 // Helper function to parse pragma directives
 bool MDMPPragmaPass::parseMDMPPragma(const std::string &pragma_line) {
     // Parse MDMP pragma directives
-    std::regex overlap_begin_pattern(R"(MDMP_COMMREGION_BEGIN\(\))");
-    std::regex overlap_end_pattern(R"(MDMP_COMMREGION_END\(\))");
+    std::regex commregion_begin_pattern(R"(MDMP_COMMREGION_BEGIN\(\))");
+    std::regex commregion_end_pattern(R"(MDMP_COMMREGION_END\(\))");
     std::regex sync_pattern(R"(MDMP_COMM_SYNC\(\))");
     std::regex wait_pattern(R"(MDMP_COMM_WAIT\(\))");
     std::regex send_pattern(R"(MDMP_COMM_SEND\(\))");
@@ -103,7 +103,7 @@ bool MDMPPragmaPass::parseMDMPPragma(const std::string &pragma_line) {
     std::regex noopt_pattern(R"(MDMP_COMM_NOOPT\(\))");
     
     if (std::regex_match(pragma_line, commregion_begin_pattern)) {
-        handleCommuniacationBegin();
+        handleCommunicationBegin();
         return true;
     } else if (std::regex_match(pragma_line, commregion_end_pattern)) {
         handleCommunicationEnd();
