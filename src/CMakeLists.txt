@@ -8,10 +8,22 @@ include_directories(${MPI_INCLUDE_PATH})
 # Add definitions from LLVM
 add_definitions(${LLVM_DEFINITIONS})
 
+
+# Ensure Analysis and ScalarOpts are included
+llvm_map_components_to_libnames(llvm_libs 
+  Support 
+  Core 
+  Analysis 
+  ScalarOpts 
+  TransformUtils
+)
+
 # Create the MDMP pragma pass library
 add_library(mdmp_pragma_pass SHARED
     mdmp_pragma_pass.cpp
+    mdmp_managed_pass.cpp
 )
+
 
 # Link against LLVM libraries
 target_link_libraries(mdmp_pragma_pass 
@@ -41,7 +53,6 @@ install(TARGETS mdmp_pragma_pass
 
 # Install headers
 install(FILES 
-    mdmp_runtime.h
     mdmp_runtime.h
     DESTINATION include
     COMPONENT Headers
