@@ -16,10 +16,11 @@ add_executable(mdmp_test
     test_mdmp.cpp
 )
 
-
 # Link against MDMP pass and MPI
 target_link_libraries(mdmp_test 
     mdmp_pragma_pass
+    ${llvm_libs} 
+    ${CLANG_LIBRARIES}
     ${MPI_LIBRARIES}
 )
 

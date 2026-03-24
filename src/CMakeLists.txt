@@ -27,6 +27,14 @@ add_library(mdmp_pragma_pass SHARED
 
 # Link against LLVM libraries
 target_link_libraries(mdmp_pragma_pass 
+    clangAST
+    clangASTMatchers
+    clangBasic
+    clangLex
+    clangRewrite         # The engine
+    clangRewriteFrontend # The plugin hooks
+    clangFrontend
+    clangTooling
     ${LLVM_LIBRARIES}
     ${MPI_LIBRARIES}
 )

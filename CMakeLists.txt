@@ -11,11 +11,18 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 
 # Find required packages
 find_package(LLVM REQUIRED CONFIG)
+find_package(MLIR REQUIRED CONFIG)
+find_package(Clang REQUIRED CONFIG)
 find_package(MPI REQUIRED C)
 
 # Check if we have the required LLVM components
 if(NOT LLVM_ENABLE_PROJECTS)
     set(LLVM_ENABLE_PROJECTS "clang;lld")
+endif()
+
+if(NOT LLVM_ENABLE_RTTI)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-rtti")
+    message(STATUS "LLVM RTTI is disabled. Disabling RTTI for MDMP.")
 endif()
 
 # Include LLVM directories
