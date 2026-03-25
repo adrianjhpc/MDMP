@@ -50,8 +50,11 @@ endfunction()
 # Register Example Programs Below
 # ==============================================================================
 
-# 1. The Heat Equation (Pure C, requires the math library: -lm)
+# Heat equation (Pure C, requires the math library: -lm)
 add_comparison_example(heat c -lm)
 
-# 2. The Circuit Satisfiability Problem (Standard C++)
+# Circuit satisfiability problem (Standard C++)
 add_comparison_example(satisfy cpp)
+
+# Parallel Solution of the 1D Wave Equation
+add_comparison_example(wave cpp)
