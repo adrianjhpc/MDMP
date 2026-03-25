@@ -160,7 +160,7 @@ void update ( int id, int p )
   double k = 0.000001;
   double time;
   double time_delta;
-  double time_max = 100.0;
+  double time_max = 10.0;
   double time_min = 0.0;
   double time_new;
   double *x;
