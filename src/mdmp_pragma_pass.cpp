@@ -30,23 +30,32 @@ void MDMPPragmaPass::transformPragmasToCalls(Function &F, AAResults &AA) {
     Module *M = F.getParent();
     LLVMContext &Ctx = M->getContext();
 
+    // Define all Runtime Functions
     FunctionCallee runtime_begin = M->getOrInsertFunction("mdmp_commregion_begin", Type::getVoidTy(Ctx));
     FunctionCallee runtime_end   = M->getOrInsertFunction("mdmp_commregion_end", Type::getVoidTy(Ctx));
     FunctionCallee runtime_sync  = M->getOrInsertFunction("mdmp_sync", Type::getVoidTy(Ctx));
-    FunctionCallee runtime_wait  = M->getOrInsertFunction("mdmp_wait_all", Type::getVoidTy(Ctx));
     FunctionCallee runtime_init  = M->getOrInsertFunction("mdmp_init", Type::getVoidTy(Ctx));
     FunctionCallee runtime_final = M->getOrInsertFunction("mdmp_final", Type::getVoidTy(Ctx));
     FunctionCallee runtime_get_rank = M->getOrInsertFunction("mdmp_get_rank", Type::getInt32Ty(Ctx));
     FunctionCallee runtime_get_size = M->getOrInsertFunction("mdmp_get_size", Type::getInt32Ty(Ctx));
-
+    // Send uses: Buffer, Count, Type, Actor, Peer, Tag
     FunctionCallee runtime_send = M->getOrInsertFunction("mdmp_send", 
         Type::getInt32Ty(Ctx), PointerType::getUnqual(Ctx), Type::getInt64Ty(Ctx), 
-        Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx));
+        Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx));
+        
+    if (Function *FSend = dyn_cast<Function>(runtime_send.getCallee())) {
+        FSend->addFnAttr(Attribute::NoUnwind);
+        FSend->setMemoryEffects(MemoryEffects::readOnly());
+        FSend->addParamAttr(0, Attribute::ReadOnly);
+    }
+    // Recv uses: Buffer, Count, Type, Actor, Peer, Tag
     FunctionCallee runtime_recv = M->getOrInsertFunction("mdmp_recv", 
         Type::getInt32Ty(Ctx), PointerType::getUnqual(Ctx), Type::getInt64Ty(Ctx), 
-        Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx));
+        Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx));
+    if (Function *FRecv = dyn_cast<Function>(runtime_recv.getCallee())) {
+        FRecv->addFnAttr(Attribute::NoUnwind);
+    }
 
- 
     std::vector<Instruction*> toDelete;
 
     for (auto &BB : F) {
@@ -61,12 +70,12 @@ void MDMPPragmaPass::transformPragmasToCalls(Function &F, AAResults &AA) {
                 Value *BufferPtr = CI->getArgOperand(0);
                 Value *CountVal  = CI->getArgOperand(1);
                 Value *TypeVal   = CI->getArgOperand(2);
-                Value *BytesVal  = CI->getArgOperand(3); // Extracted purely for AA
+                Value *BytesVal  = CI->getArgOperand(3); // Stripped out for backend
                 Value *ActorRank = CI->getArgOperand(4);
                 Value *PeerRank  = CI->getArgOperand(5);
+                Value *TagVal    = CI->getArgOperand(6); 
 
                 LocationSize LocSize = LocationSize::beforeOrAfterPointer();
-                // Use the Byte Size calculated by the C++ template for precise Alias Analysis
                 if (auto *ConstBytes = dyn_cast<ConstantInt>(BytesVal)) {
                     LocSize = LocationSize::precise(ConstBytes->getZExtValue());
                 }
@@ -74,31 +83,25 @@ void MDMPPragmaPass::transformPragmasToCalls(Function &F, AAResults &AA) {
 
                 bool isSend = (Name == "__mdmp_marker_send");
                 
-                // Strip 'BytesVal' out. The backend runtime doesn't need it.
+                // Pass the TagVal directly to the backend runtime call
                 CallInst *NewCall = Builder.CreateCall(
                     isSend ? runtime_send : runtime_recv, 
-                    {BufferPtr, CountVal, TypeVal, ActorRank, PeerRank}
+                    {BufferPtr, CountVal, TypeVal, ActorRank, PeerRank, TagVal}
                 );
                 
                 CI->replaceAllUsesWith(NewCall);
                 hoistInitiation(NewCall, Loc, AA, isSend);
                 PendingRequests.push_back({Loc, NewCall});
                 toDelete.push_back(CI);
-            } else if (Name == "__mdmp_marker_commregion_end") {
+            } 
+            else if (Name == "__mdmp_marker_commregion_begin") {
+                CallInst *NewCall = Builder.CreateCall(runtime_begin);
+                CI->replaceAllUsesWith(NewCall);
+                toDelete.push_back(CI);
+            }
+            else if (Name == "__mdmp_marker_commregion_end") {
                 CallInst *NewEnd = Builder.CreateCall(runtime_end);
                 injectWaitsForRegion(NewEnd, AA, Ctx, M);
-                toDelete.push_back(CI);
-            } else if (Name == "__mdmp_marker_init") {
-                Builder.CreateCall(runtime_init);
-                toDelete.push_back(CI);
-            } else if (Name == "__mdmp_marker_final") {
-                Builder.CreateCall(runtime_final);
-                toDelete.push_back(CI);
-            } else if (Name == "__mdmp_marker_commregion_begin") {
-                Builder.CreateCall(runtime_begin);
-                toDelete.push_back(CI);
-            } else if (Name == "__mdmp_marker_sync") {
-                Builder.CreateCall(runtime_sync);
                 toDelete.push_back(CI);
             }
             else if (Name == "__mdmp_marker_get_rank") {
@@ -111,9 +114,20 @@ void MDMPPragmaPass::transformPragmasToCalls(Function &F, AAResults &AA) {
                 CI->replaceAllUsesWith(NewCall);
                 toDelete.push_back(CI);
             }
+            else if (Name == "__mdmp_marker_init") {
+                Builder.CreateCall(runtime_init);
+                toDelete.push_back(CI);
+            }
+            else if (Name == "__mdmp_marker_final") {
+                Builder.CreateCall(runtime_final);
+                toDelete.push_back(CI);
+            }
+            else if (Name == "__mdmp_marker_sync") {
+                Builder.CreateCall(runtime_sync);
+                toDelete.push_back(CI);
+            }
         }
     }
-
     for (Instruction *I : toDelete) I->eraseFromParent();
 }
 
@@ -216,17 +230,24 @@ void MDMPPragmaPass::injectWaitsForRegion(Instruction *RegionEnd, AAResults &AA,
 
 extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo llvmGetPassPluginInfo() {
     return {
-        LLVM_PLUGIN_API_VERSION, "MDMPPragmaPass", LLVM_VERSION_STRING,
+        LLVM_PLUGIN_API_VERSION, "MDMPPragma", "v0.1",
         [](PassBuilder &PB) {
+            // For debugging with 'opt' 
             PB.registerPipelineParsingCallback(
-                [](StringRef Name, ModulePassManager &MPM,
-                   ArrayRef<PassBuilder::PipelineElement>) {
-                    // This is the flag we will pass to `opt`
+                [](StringRef Name, ModulePassManager &MPM, ArrayRef<PassBuilder::PipelineElement>) {
                     if (Name == "mdmp-pragma") {
                         MPM.addPass(MDMPPragmaPass());
                         return true;
                     }
                     return false;
                 });
-        }};
+
+            // For native integration into compilers
+            // This injects our pass at the very start of the O1/O2/O3 optimization pipeline
+            PB.registerPipelineStartEPCallback(
+                [](ModulePassManager &MPM, OptimizationLevel Level) {
+                    MPM.addPass(MDMPPragmaPass());
+                });
+        }
+    };
 }

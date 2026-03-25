@@ -1,30 +1,37 @@
-# tests/CMakeLists.txt
 cmake_minimum_required(VERSION 3.13)
 
-# Create example application
-add_executable(mdmp_test test_mdmp.cpp)
+set(MDMPCXX "${CMAKE_CURRENT_SOURCE_DIR}/../harness/mdmpc++")
 
-# Use target_include_directories with absolute paths to guarantee visibility
-target_include_directories(mdmp_test PRIVATE 
-    ${CMAKE_SOURCE_DIR}/src 
-    ${LLVM_INCLUDE_DIRS}
-    ${MPI_INCLUDE_PATH}
-)
+string(REPLACE ";" " -I" MPI_INC_FLAGS "${MPI_CXX_INCLUDE_DIRS}")
+if(MPI_INC_FLAGS)
+    set(MPI_INC_FLAGS "-I${MPI_INC_FLAGS}")
+else()
+    set(MPI_INC_FLAGS "-I/usr/include/mpich-x86_64") # Safe fallback
+endif()
 
-# Link against the MDMP runtime and MPI
-target_link_libraries(mdmp_test PRIVATE
-    mdmp_runtime
-    ${MPI_LIBRARIES}
-)
+function(add_mdmp_test TEST_NAME SOURCE_FILE)
+    # Tell CMake exactly how to build this file using the harness
+    add_custom_command(
+        OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${TEST_NAME}
+        COMMAND ${MDMPCXX} ${CMAKE_CURRENT_SOURCE_DIR}/${SOURCE_FILE} 
+                ${MPI_INC_FLAGS} ${MPI_CXX_COMPILE_FLAGS} ${MPI_LIBRARIES} 
+                -o ${CMAKE_CURRENT_BINARY_DIR}/${TEST_NAME}
+        # Rebuild if the source file, the pass, or the runtime changes!
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/${SOURCE_FILE} mdmp_pragma_pass mdmp_runtime
+        COMMENT "Compiling ${TEST_NAME} using mdmpc++ harness..."
+    )
 
-# Set compile options for test
-target_compile_options(mdmp_test PRIVATE
-    -Wall
-    -Wextra
-    -pedantic
-    ${MPI_CXX_COMPILE_FLAGS}
-)
+    # Attach the custom command to a target so 'make' knows to build it
+    add_custom_target(${TEST_NAME}_target ALL 
+        DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/${TEST_NAME}
+    )
 
-# Create a simple test
+    # Register the executable with CTest so 'make test' works
+    add_test(NAME ${TEST_NAME} COMMAND ${CMAKE_CURRENT_BINARY_DIR}/${TEST_NAME})
+endfunction()
+
 enable_testing()
-add_test(NAME mdmp_example_test COMMAND mdmp_test)
+
+add_mdmp_test(mdmp_test_rank_selection test_rank_selection_mdmp.cpp)
+add_mdmp_test(mdmp_test_out_of_bounds_rank_selection test_out_of_bounds_rank_selection_mdmp.cpp)
+add_mdmp_test(mdmp_test test_mdmp.cpp)

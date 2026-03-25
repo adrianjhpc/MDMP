@@ -1,0 +1,12 @@
+#!/bin/bash
+# mdmpc++ : The MDMP C++ Compiler Wrapper
+
+# Find where this script lives so we can locate the plugin and libraries
+MDMP_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
+
+PLUGIN="-fpass-plugin=${MDMP_DIR}/..//build/src/MDMPPragma.so"
+INCLUDES="-I${MDMP_DIR}/../src"
+LIBS="-L${MDMP_DIR}/../build/src -lmdmp_runtime"
+
+# Call the real compiler (clang++), forcing at least -O1, injecting our plugin, and passing along user args
+clang++ -O1 ${PLUGIN} ${INCLUDES} "$@" ${LIBS}

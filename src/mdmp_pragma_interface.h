@@ -5,6 +5,12 @@
 #include <type_traits> // Required for decltype manipulation
 
 #ifdef __cplusplus
+#define MDMP_NOEXCEPT noexcept
+#else
+#define MDMP_NOEXCEPT
+#endif
+
+#ifdef __cplusplus
 
 // 1. Our Internal Enum
 enum MDMP_Datatype { MDMP_INT, MDMP_FLOAT, MDMP_DOUBLE, MDMP_CHAR };
@@ -19,27 +25,27 @@ template<> struct MDMPTypeTraits<char> { static const int type = MDMP_CHAR; };
 extern "C" {
 #endif
 
-void __mdmp_marker_init();
-void __mdmp_marker_final();
+void __mdmp_marker_init() MDMP_NOEXCEPT;
+void __mdmp_marker_final() MDMP_NOEXCEPT;
 
-int __mdmp_marker_get_size();
-int __mdmp_marker_get_rank();
+int __mdmp_marker_get_size() MDMP_NOEXCEPT;
+int __mdmp_marker_get_rank() MDMP_NOEXCEPT;
 
-void __mdmp_marker_commregion_begin();
-void __mdmp_marker_commregion_end();
-void __mdmp_marker_sync();
+void __mdmp_marker_commregion_begin() MDMP_NOEXCEPT;
+void __mdmp_marker_commregion_end() MDMP_NOEXCEPT;
+void __mdmp_marker_sync() MDMP_NOEXCEPT;
 
-int __mdmp_marker_send(void* buffer, size_t count, int type, size_t byte_size, int sender, int dest);
-int __mdmp_marker_recv(void* buffer, size_t count, int type, size_t byte_size, int receiver, int src);
+int __mdmp_marker_send(void* buffer, size_t count, int type, size_t byte_size, int sender, int dest, int tag) MDMP_NOEXCEPT;
+int __mdmp_marker_recv(void* buffer, size_t count, int type, size_t byte_size, int receiver, int src, int tag) MDMP_NOEXCEPT;
 
 #ifdef __cplusplus
 } // End extern "C"
 
-#define MDMP_SEND(buf, count, sender, dest) \
-    __mdmp_marker_send((void*)(buf), count, MDMPTypeTraits<typename std::remove_reference<decltype(*(buf))>::type>::type, (count) * sizeof(*(buf)), sender, dest)
+#define MDMP_SEND(buf, count, sender, dest, tag) \
+    __mdmp_marker_send((void*)(buf), count, MDMPTypeTraits<typename std::remove_reference<decltype(*(buf))>::type>::type, (count) * sizeof(*(buf)), sender, dest, tag)
 
-#define MDMP_RECV(buf, count, receiver, src) \
-    __mdmp_marker_recv((void*)(buf), count, MDMPTypeTraits<typename std::remove_reference<decltype(*(buf))>::type>::type, (count) * sizeof(*(buf)), receiver, src)
+#define MDMP_RECV(buf, count, receiver, src, tag) \
+    __mdmp_marker_recv((void*)(buf), count, MDMPTypeTraits<typename std::remove_reference<decltype(*(buf))>::type>::type, (count) * sizeof(*(buf)), receiver, src, tag)
 
 #define MDMP_COMM_INIT()        __mdmp_marker_init()
 #define MDMP_COMM_FINAL()       __mdmp_marker_final()
@@ -49,6 +55,9 @@ int __mdmp_marker_recv(void* buffer, size_t count, int type, size_t byte_size, i
 
 #define MDMP_GET_SIZE()         __mdmp_marker_get_size()
 #define MDMP_GET_RANK()         __mdmp_marker_get_rank()
+
+#define MDMP_IGNORE -2
+#define MDMP_RANK   __mdmp_marker_get_rank()
 
 #endif
 #endif

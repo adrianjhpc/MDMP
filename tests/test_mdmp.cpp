@@ -7,18 +7,6 @@
 #include "mdmp_pragma_interface.h"
 #include "mdmp_runtime.h"
 
-extern "C" {
-    void __mdmp_marker_init() {}
-    void __mdmp_marker_final() {}
-    void __mdmp_marker_commregion_begin() {}
-    void __mdmp_marker_commregion_end() {}
-    void __mdmp_marker_sync() {}
-    int __mdmp_marker_send(void* buffer, size_t count, int type, size_t byte_size, int sender, int dest) { return 0; }
-    int __mdmp_marker_recv(void* buffer, size_t count, int type, size_t byte_size, int receiver, int src) { return 0; }
-    int __mdmp_marker_get_rank() { return 0; }
-    int __mdmp_marker_get_size() { return 0;}
-}
-
 int main() {
 
     int mdmp_rank, mdmp_size;
@@ -40,10 +28,10 @@ int main() {
     }
 
     MDMP_COMMREGION_BEGIN();
-    MDMP_SEND(data.data(), size, 0, 1); // Rank 0 sends to Rank 1
-    MDMP_RECV(result.data(), size, 1, 0); // Rank 1 recvs from Rank 0
-    MDMP_SEND(result.data(), size, 1, 0); // Rank 1 sends to Rank 0
-    MDMP_RECV(result.data(), size, 0, 1); // Rank 0 recvs from Rank 1
+    MDMP_SEND(data.data(), size, 0, 1, 0); // Rank 0 sends to Rank 1
+    MDMP_RECV(result.data(), size, 1, 0, 0); // Rank 1 recvs from Rank 0
+    MDMP_SEND(result.data(), size, 1, 0, 0); // Rank 1 sends to Rank 0
+    MDMP_RECV(result.data(), size, 0, 1, 0); // Rank 0 recvs from Rank 1
 
     for (int i = 0; i < size; ++i) {
         result[i] = result[i] * result[i] * result[i];
