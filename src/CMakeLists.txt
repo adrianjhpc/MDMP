@@ -18,45 +18,23 @@ llvm_map_components_to_libnames(llvm_libs
   TransformUtils
 )
 
-# Create the MDMP pragma pass library
-add_library(mdmp_pragma_pass SHARED
-    mdmp_pragma_pass.cpp
-    mdmp_managed_pass.cpp
+add_library(mdmp_runtime SHARED
+    mdmp_runtime.cpp
 )
 
+# Create the MDMP pragma pass library
+add_library(mdmp_pragma_pass MODULE
+    mdmp_pragma_pass.cpp
+#    mdmp_managed_pass.cpp
+)
 
-# Link against LLVM libraries
-target_link_libraries(mdmp_pragma_pass 
-    clangAST
-    clangASTMatchers
-    clangBasic
-    clangLex
-    clangRewrite         # The engine
-    clangRewriteFrontend # The plugin hooks
-    clangFrontend
-    clangTooling
-    ${LLVM_LIBRARIES}
-    ${MPI_LIBRARIES}
+target_link_libraries(mdmp_pragma_pass PRIVATE
 )
 
 # Set library properties
 set_target_properties(mdmp_pragma_pass PROPERTIES
     PREFIX ""
     OUTPUT_NAME "MDMPPragma"
-)
-
-# Set compile options for the pass
-target_compile_options(mdmp_pragma_pass PRIVATE
-    ${LLVM_CXXFLAGS}
-    -Wall
-    -Wextra
-    -pedantic
-)
-
-# Install targets
-install(TARGETS mdmp_pragma_pass
-    LIBRARY DESTINATION lib
-    COMPONENT mdmp_pragma_pass
 )
 
 # Install headers
@@ -84,4 +62,16 @@ add_custom_target(doc
 add_custom_target(tests
     COMMAND ${CMAKE_CTEST_COMMAND} --verbose
     COMMENT "Running all tests"
+)
+
+# Include MPI headers for the runtime
+target_include_directories(mdmp_runtime PRIVATE ${MPI_INCLUDE_PATH})
+
+# Link the runtime against MPI
+target_link_libraries(mdmp_runtime PRIVATE ${MPI_LIBRARIES})
+
+# Install the runtime library alongside the pass
+install(TARGETS mdmp_runtime
+    LIBRARY DESTINATION lib
+    COMPONENT mdmp_runtime
 )

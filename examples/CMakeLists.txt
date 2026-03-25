@@ -18,7 +18,7 @@ add_executable(mdmp_example
 
 # Link against MDMP pass and MPI
 target_link_libraries(mdmp_example 
-    mdmp_pragma_pass
+    mdmp_runtime
     ${MPI_LIBRARIES}
 )
 

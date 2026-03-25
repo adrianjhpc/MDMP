@@ -2,19 +2,23 @@
 #ifndef MDMP_RUNTIME_H
 #define MDMP_RUNTIME_H
 
+#include <stddef.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 // MDMP runtime function declarations
+void mdmp_init();
+void mdmp_final();
 void mdmp_commregion_begin();
 void mdmp_commregion_end();
+int mdmp_send(void* buffer, size_t count, int type, int sender, int dest);
+int mdmp_recv(void* buffer, size_t count, int type, int receiver, int src);
 void mdmp_sync();
-void mdmp_wait();
-void mdmp_send();
-void mdmp_recv();
-void mdmp_get_size();
-void mdmp_get_rank();
+void mdmp_wait(int req_id);
+int mdmp_get_size();
+int mdmp_get_rank();
 void mdmp_optimize(int level);
 void mdmp_no_opt();
 void mdmp_reduce(int op, void* src, void* dst, size_t size);

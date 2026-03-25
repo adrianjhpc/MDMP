@@ -1,223 +1,232 @@
-// MDMPPragmaPass.cpp
 #include "mdmp_pragma_pass.h"
-#include "llvm/Support/Debug.h"
-#include "llvm/Support/raw_ostream.h"
-#include "llvm/Transforms/Utils/BasicBlockUtils.h"
-#include "llvm/Transforms/Utils/Cloning.h"
-#include <regex>
-#include <iostream>
+#include "llvm/IR/IRBuilder.h"
+#include "llvm/Passes/PassBuilder.h"
+#include "llvm/Passes/PassPlugin.h"
 
 using namespace llvm;
 
-char MDMPPragmaPass::ID = 0;
-
-bool MDMPPragmaPass::runOnModule(Module &M) {
+PreservedAnalyses MDMPPragmaPass::run(Module &M, ModuleAnalysisManager &MAM) {
     bool changed = false;
     
-    // Process each function in the module
+    auto &FAM = MAM.getResult<FunctionAnalysisManagerModuleProxy>(M).getManager();
+
     for (auto &F : M) {
         if (!F.isDeclaration()) {
-            changed |= runOnFunction(F);
-        }
-    }
-    
-    return changed;
-}
-
-bool MDMPPragmaPass::runOnFunction(Function &F) {
-    bool changed = false;
-    
-    // Process pragmas in this function
-    processPragmaDirectives(F);
-    
-    // Transform pragmas to actual function calls
-    transformPragmasToCalls(F);
-    
-    return changed;
-}
-
-void MDMPPragmaPass::processPragmaDirectives(Function &F) {
-    // Walk through all basic blocks
-    for (auto &BB : F) {
-        if (processed_blocks.find(&BB) != processed_blocks.end()) {
-            continue;
-        }
-        
-        // Look for MDMP pragmas in this basic block
-        for (auto &I : BB) {
-            if (isa<CallInst>(&I)) {
-                CallInst *CI = cast<CallInst>(&I);
-                Function *called = CI->getCalledFunction();
-                
-                if (called && called->getName().starts_with("mdmp_pragma")) {
-                    // This is a pragma call, process it
-                    // Extract pragma information from arguments
-                }
-            }
-        }
-    }
-}
-
-void MDMPPragmaPass::transformPragmasToCalls(Function &F) {
-    // Transform MDMP pragma directives into actual calls
-    // This involves:
-    // 1. Finding pragma directives in comments or special markers
-    // 2. Converting them to appropriate MDMP runtime calls
-    // 3. Inserting proper synchronization points
-    
-    // Example transformation:
-    // MDMP_COMMREGION_BEGIN() -> mdmp_commregion_begin()
-    // MDMP_COMM_SYNC() -> mdmp_sync()
-    
-    // Walk through instructions and replace pragmas with calls
-    for (auto &BB : F) {
-        for (auto I = BB.begin(); I != BB.end(); ) {
-            Instruction *Inst = &*I;
-            ++I; // Increment before potential removal
+            AAResults &AA = FAM.getResult<AAManager>(F);
             
-            // Check if this is a placeholder for a pragma
-            if (isa<CallInst>(Inst)) {
-                CallInst *CI = cast<CallInst>(Inst);
-                Function *called = CI->getCalledFunction();
+            changed |= runOnFunction(F, AA);
+        }
+    }
+    return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
+}
+
+bool MDMPPragmaPass::runOnFunction(Function &F, AAResults &AA) {
+    PendingRequests.clear(); // Reset for each function
+    transformPragmasToCalls(F, AA);
+    return true; 
+}
+
+void MDMPPragmaPass::transformPragmasToCalls(Function &F, AAResults &AA) {
+    Module *M = F.getParent();
+    LLVMContext &Ctx = M->getContext();
+
+    FunctionCallee runtime_begin = M->getOrInsertFunction("mdmp_commregion_begin", Type::getVoidTy(Ctx));
+    FunctionCallee runtime_end   = M->getOrInsertFunction("mdmp_commregion_end", Type::getVoidTy(Ctx));
+    FunctionCallee runtime_sync  = M->getOrInsertFunction("mdmp_sync", Type::getVoidTy(Ctx));
+    FunctionCallee runtime_wait  = M->getOrInsertFunction("mdmp_wait_all", Type::getVoidTy(Ctx));
+    FunctionCallee runtime_init  = M->getOrInsertFunction("mdmp_init", Type::getVoidTy(Ctx));
+    FunctionCallee runtime_final = M->getOrInsertFunction("mdmp_final", Type::getVoidTy(Ctx));
+    FunctionCallee runtime_get_rank = M->getOrInsertFunction("mdmp_get_rank", Type::getInt32Ty(Ctx));
+    FunctionCallee runtime_get_size = M->getOrInsertFunction("mdmp_get_size", Type::getInt32Ty(Ctx));
+
+    FunctionCallee runtime_send = M->getOrInsertFunction("mdmp_send", 
+        Type::getInt32Ty(Ctx), PointerType::getUnqual(Ctx), Type::getInt64Ty(Ctx), 
+        Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx));
+    FunctionCallee runtime_recv = M->getOrInsertFunction("mdmp_recv", 
+        Type::getInt32Ty(Ctx), PointerType::getUnqual(Ctx), Type::getInt64Ty(Ctx), 
+        Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx));
+
+ 
+    std::vector<Instruction*> toDelete;
+
+    for (auto &BB : F) {
+        for (auto &I : BB) {
+            auto *CI = dyn_cast<CallInst>(&I);
+            if (!CI || !CI->getCalledFunction()) continue;
+            
+            StringRef Name = CI->getCalledFunction()->getName();
+            IRBuilder<> Builder(CI);
+
+            if (Name == "__mdmp_marker_send" || Name == "__mdmp_marker_recv") {
+                Value *BufferPtr = CI->getArgOperand(0);
+                Value *CountVal  = CI->getArgOperand(1);
+                Value *TypeVal   = CI->getArgOperand(2);
+                Value *BytesVal  = CI->getArgOperand(3); // Extracted purely for AA
+                Value *ActorRank = CI->getArgOperand(4);
+                Value *PeerRank  = CI->getArgOperand(5);
+
+                LocationSize LocSize = LocationSize::beforeOrAfterPointer();
+                // Use the Byte Size calculated by the C++ template for precise Alias Analysis
+                if (auto *ConstBytes = dyn_cast<ConstantInt>(BytesVal)) {
+                    LocSize = LocationSize::precise(ConstBytes->getZExtValue());
+                }
+                MemoryLocation Loc(BufferPtr, LocSize);
+
+                bool isSend = (Name == "__mdmp_marker_send");
                 
-                if (called && called->getName().starts_with("mdmp_pragma")) {
-                    // This is where the transformation happens
+                // Strip 'BytesVal' out. The backend runtime doesn't need it.
+                CallInst *NewCall = Builder.CreateCall(
+                    isSend ? runtime_send : runtime_recv, 
+                    {BufferPtr, CountVal, TypeVal, ActorRank, PeerRank}
+                );
+                
+                CI->replaceAllUsesWith(NewCall);
+                hoistInitiation(NewCall, Loc, AA, isSend);
+                PendingRequests.push_back({Loc, NewCall});
+                toDelete.push_back(CI);
+            } else if (Name == "__mdmp_marker_commregion_end") {
+                CallInst *NewEnd = Builder.CreateCall(runtime_end);
+                injectWaitsForRegion(NewEnd, AA, Ctx, M);
+                toDelete.push_back(CI);
+            } else if (Name == "__mdmp_marker_init") {
+                Builder.CreateCall(runtime_init);
+                toDelete.push_back(CI);
+            } else if (Name == "__mdmp_marker_final") {
+                Builder.CreateCall(runtime_final);
+                toDelete.push_back(CI);
+            } else if (Name == "__mdmp_marker_commregion_begin") {
+                Builder.CreateCall(runtime_begin);
+                toDelete.push_back(CI);
+            } else if (Name == "__mdmp_marker_sync") {
+                Builder.CreateCall(runtime_sync);
+                toDelete.push_back(CI);
+            }
+            else if (Name == "__mdmp_marker_get_rank") {
+                CallInst *NewCall = Builder.CreateCall(runtime_get_rank);
+                CI->replaceAllUsesWith(NewCall); 
+                toDelete.push_back(CI);
+            }
+            else if (Name == "__mdmp_marker_get_size") {
+                CallInst *NewCall = Builder.CreateCall(runtime_get_size);
+                CI->replaceAllUsesWith(NewCall);
+                toDelete.push_back(CI);
+            }
+        }
+    }
+
+    for (Instruction *I : toDelete) I->eraseFromParent();
+}
+
+// Move communications to the earliest possible times (helps that they are nonblocking)
+bool MDMPPragmaPass::hoistInitiation(CallInst *CommCall, MemoryLocation Loc, AAResults &AA, bool isSend) {
+    // Establish the absolute ceiling (the latest instruction that generates an argument)
+    Instruction *OpBound = nullptr;
+    for (Use &U : CommCall->operands()) {
+        if (auto *OpI = dyn_cast<Instruction>(U.get())) {
+            if (OpI->getParent() == CommCall->getParent()) {
+                if (!OpBound || OpBound->comesBefore(OpI)) {                   
+                    OpBound = OpI;
                 }
             }
         }
     }
-}
 
-// Helper function to parse pragma directives
-bool MDMPPragmaPass::parseMDMPPragma(const std::string &pragma_line) {
-    // Parse MDMP pragma directives
-    std::regex commregion_begin_pattern(R"(MDMP_COMMREGION_BEGIN\(\))");
-    std::regex commregion_end_pattern(R"(MDMP_COMMREGION_END\(\))");
-    std::regex sync_pattern(R"(MDMP_COMM_SYNC\(\))");
-    std::regex wait_pattern(R"(MDMP_COMM_WAIT\(\))");
-    std::regex send_pattern(R"(MDMP_COMM_SEND\(\))");
-    std::regex receive_pattern(R"(MDMP_COMM_RECV\(\))");
-    std::regex rank_pattern(R"(MDMP_COMM_RANK\(\))");
-    std::regex size_pattern(R"(MDMP_COMM_SIZE\(\))");
-    std::regex optimize_pattern(R"(MDMP_COMM_OPTIMIZE\(\s*(\d+)\s*\))");
-    std::regex noopt_pattern(R"(MDMP_COMM_NOOPT\(\))");
+    Instruction *InsertPoint = CommCall;
+    BasicBlock::iterator it(CommCall);
     
-    if (std::regex_match(pragma_line, commregion_begin_pattern)) {
-        handleCommunicationBegin();
-        return true;
-    } else if (std::regex_match(pragma_line, commregion_end_pattern)) {
-        handleCommunicationEnd();
-        return true;
-    } else if (std::regex_match(pragma_line, sync_pattern)) {
-        handleSync();
-        return true;
-    } else if (std::regex_match(pragma_line, wait_pattern)) {
-        handleWait();
-        return true;
-    } else if (std::regex_match(pragma_line, send_pattern)) {
-        handleSend();
-        return true;
-    } else if (std::regex_match(pragma_line, receive_pattern)) {
-        handleRecv();
-        return true;
-    } else if (std::regex_match(pragma_line, rank_pattern)) {
-        handleRank();
-        return true;
-    } else if (std::regex_match(pragma_line, size_pattern)) {
-        handleSize();
-        return true;
-    } else if (std::regex_match(pragma_line, optimize_pattern)) {
-        std::smatch match;
-        std::regex_search(pragma_line, match, optimize_pattern);
-        handleOptimize(std::stoi(match[1].str()));
-        return true;
-    } else if (std::regex_match(pragma_line, noopt_pattern)) {
-        handleNoOpt();
+    while (it != CommCall->getParent()->begin()) {
+        Instruction *Prev = &*(--it);
+
+        // Do not hoist past the instructions that generate our arguments
+        if (OpBound && (Prev == OpBound || Prev->comesBefore(OpBound))) {
+            break;
+        }
+
+        // Do not hoist past the start of the region
+        if (auto *PrevCall = dyn_cast<CallInst>(Prev)) {
+            if (Function *F = PrevCall->getCalledFunction()) {
+                if (F->getName() == "__mdmp_marker_commregion_begin") {
+                    break;
+                }
+            }
+        }
+
+        // Check for Memory Dependencies
+        auto ModRef = AA.getModRefInfo(Prev, Loc);
+        if (isSend && isModSet(ModRef)) break;
+        if (!isSend && isModOrRefSet(ModRef)) break;
+
+        InsertPoint = Prev; 
+    }
+
+    if (InsertPoint != CommCall) {
+        CommCall->moveBefore(InsertPoint->getIterator());
         return true;
     }
-    
     return false;
 }
 
-void MDMPPragmaPass::handleCommunicationBegin() {
-    // Handle overlap begin pragma
-    // Mark the start of communication overlap region
+// Generate individual wait calls
+void MDMPPragmaPass::injectWaitsForRegion(Instruction *RegionEnd, AAResults &AA, LLVMContext &Ctx, Module *M) {
+    FunctionCallee runtime_wait = M->getOrInsertFunction("mdmp_wait", Type::getVoidTy(Ctx), Type::getInt32Ty(Ctx));
+
+    for (auto &Req : PendingRequests) {
+        Instruction *InsertPt = nullptr;
+        
+        BasicBlock::iterator it(Req.RuntimeCall);
+        it++; 
+
+        // Scan downwards, but strictly within the current Basic Block
+        while (it != Req.RuntimeCall->getParent()->end()) {
+            Instruction *Next = &*it;
+            
+            // Did we find the Region End marker?
+            if (Next == RegionEnd) {
+                InsertPt = RegionEnd;
+                break;
+            }
+
+            // Did we find a memory dependency (read/write to our buffer)?
+            if (isModOrRefSet(AA.getModRefInfo(Next, Req.Loc))) {
+                InsertPt = Next;
+                break;
+            }
+
+            // Did we hit the end of the Basic Block?
+            // If we hit a branch (like a jump into a for-loop), we must
+            // insert the wait before the branch to guarantee safety.
+            if (Next->isTerminator()) {
+                InsertPt = Next;
+                break;
+            }
+
+            it++;
+        }
+
+        // Safety fallback (though the terminator check should always catch it)
+        if (!InsertPt) InsertPt = RegionEnd; 
+
+        // Inject the wait call
+        IRBuilder<> Builder(InsertPt);
+        Builder.CreateCall(runtime_wait, {Req.RuntimeCall});
+    }
+    
+    PendingRequests.clear();
 }
 
-void MDMPPragmaPass::handleCommunicationEnd() {
-    // Handle overlap end pragma
-    // Mark the end of communication overlap region
+extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo llvmGetPassPluginInfo() {
+    return {
+        LLVM_PLUGIN_API_VERSION, "MDMPPragmaPass", LLVM_VERSION_STRING,
+        [](PassBuilder &PB) {
+            PB.registerPipelineParsingCallback(
+                [](StringRef Name, ModulePassManager &MPM,
+                   ArrayRef<PassBuilder::PipelineElement>) {
+                    // This is the flag we will pass to `opt`
+                    if (Name == "mdmp-pragma") {
+                        MPM.addPass(MDMPPragmaPass());
+                        return true;
+                    }
+                    return false;
+                });
+        }};
 }
-
-void MDMPPragmaPass::handleSync() {
-    // Handle sync pragma
-    // Insert synchronization point
-}
-
-void MDMPPragmaPass::handleWait() {
-    // Handle wait pragma
-    // Insert wait for communication completion
-}
-
-void MDMPPragmaPass::handleSend() {
-    // Handle sending pragma
-    // Defines data to send
-}
-
-void MDMPPragmaPass::handleRecv() {
-    // Handle receiving pragma
-    // Defines data to receive
-}
-
-
-void MDMPPragmaPass::handleOptimize(int level) {
-    // Handle optimization pragma
-    // Set optimization level
-}
-
-void MDMPPragmaPass::handleNoOpt() {
-    // Handle no optimization pragma
-    // Disable optimizations
-}
-
-void MDMPPragmaPass::handleSize() {
-    // Handle tag pragma
-    // Get communication size
-}
-
-void MDMPPragmaPass::handleRank() {
-    // Handle rank pragma
-    // Get communication rank
-}
-
-void MDMPPragmaPass::handleReduce(int op, void* src, void* dst, size_t size) {
-    // Handle reduce pragma
-    // Insert reduction operation
-}
-
-void MDMPPragmaPass::handleBarrier() {
-    // Handle barrier pragma
-    // Insert synchronization barrier
-}
-
-void MDMPPragmaPass::handleBroadcast(void* data, size_t size, int root) {
-    // Handle broadcast pragma
-    // Insert broadcast operation
-}
-
-void MDMPPragmaPass::handleGather(void* sendbuf, void* recvbuf, int count,
-                                  int datatype, int root) {
-    // Handle gather pragma
-    // Insert gather operation
-}
-
-void MDMPPragmaPass::handleScatter(void* sendbuf, void* recvbuf, int count,
-                                   int datatype, int root) {
-    // Handle scatter pragma
-    // Insert scatter operation
-}
-
-// Register the pass
-static RegisterPass<MDMPPragmaPass> X("mdmp-pragma", "MDMP Pragma Processing Pass",
-                                      false, false);
-
