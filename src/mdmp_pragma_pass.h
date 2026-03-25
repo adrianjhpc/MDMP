@@ -38,7 +38,8 @@ namespace llvm {
     
         void hoistInitiation(CallInst *CI, MemoryLocation &Loc, AAResults &AA, DominatorTree &DT, LoopInfo &LI, bool isSend);
         bool sinkCompletion(CallInst *WaitCall, AAResults &AA);
-        void injectWaitsForRegion(Instruction *RegionEnd, AAResults &AA, LLVMContext &Ctx, Module *M);
+        void injectWaitsForRegion(Instruction *RegionEnd, AAResults &AA, LoopInfo &LI, LLVMContext &Ctx, Module *M);
+
     };
 }
 

@@ -93,7 +93,6 @@ void MDMPPragmaPass::transformPragmasToCalls(Function &F, AAResults &AA, Dominat
         FGather->addParamAttr(0, Attribute::ReadOnly);
     }
 
-
     std::vector<Instruction*> toDelete;
 
     for (auto &BB : F) {
@@ -184,7 +183,7 @@ void MDMPPragmaPass::transformPragmasToCalls(Function &F, AAResults &AA, Dominat
             }
             else if (Name == "__mdmp_marker_commregion_end") {
                 CallInst *NewEnd = Builder.CreateCall(runtime_end);
-                injectWaitsForRegion(NewEnd, AA, Ctx, M);
+                injectWaitsForRegion(NewEnd, AA, LI, Ctx, M); // <-- Pass LI here!
                 toDelete.push_back(CI);
             }
             else if (Name == "__mdmp_marker_get_rank") {
@@ -311,7 +310,7 @@ void MDMPPragmaPass::hoistInitiation(CallInst *CI, MemoryLocation &Loc, AAResult
 }
 
 // Generate individual wait calls dynamically based on CFG Dataflow Analysis
-void MDMPPragmaPass::injectWaitsForRegion(Instruction *RegionEnd, AAResults &AA, LLVMContext &Ctx, Module *M) {
+void MDMPPragmaPass::injectWaitsForRegion(Instruction *RegionEnd, AAResults &AA, LoopInfo &LI, LLVMContext &Ctx, Module *M){
     FunctionCallee runtime_wait = M->getOrInsertFunction("mdmp_wait", Type::getVoidTy(Ctx), Type::getInt32Ty(Ctx));
 
     for (auto &Req : PendingRequests) {
@@ -386,12 +385,18 @@ void MDMPPragmaPass::injectWaitsForRegion(Instruction *RegionEnd, AAResults &AA,
                     }
                 }
             }
-            
             // If we reached the end of the block without finding a reason to wait,
             // we jump across the terminator and explore all successor blocks
             if (!foundWaitPoint) {
                 for (BasicBlock *Succ : successors(BB)) {
-                    Worklist.push_back({Succ, Succ->begin()});
+                    // If the successor block is deeper inside a loop than our Send/Recv,
+                    // we must not enter it, or we will poison the inner compute math.
+                    // We drop the wait safely at the terminator before the loop starts.
+                    if (LI.getLoopDepth(Succ) > LI.getLoopDepth(Req.RuntimeCall->getParent())) {
+                        WaitInsertionPoints.push_back(BB->getTerminator());
+                    } else {
+                        Worklist.push_back({Succ, Succ->begin()});
+                    }
                 }
             }
         }

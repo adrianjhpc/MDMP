@@ -161,29 +161,11 @@ int mdmp_recv(void* buffer, size_t count, int type, int receiver_rank, int src_r
 void mdmp_wait(int req_id) {
     if (req_id >= 0 && req_id < active_requests.size()) {
         if (active_requests[req_id] != MPI_REQUEST_NULL) {
-            mdmp_log("[MDMP Runtime] Waiting on request %d (Safe Progress Mode)...\n", req_id);
             
-            // Safe Rendezvous Spinner
-            // Instead of a blocking MPI_Wait, we spin with MPI_Test.
-            int flag = 0;
-            while (!flag) {
-                MPI_Test(&active_requests[req_id], &flag, MPI_STATUS_IGNORE);
-
-                // Let the MPI progress engine service other active requests
-                // This guarantees we process incoming 'Irecv' handshakes, instantly
-                // breaking Rendezvous deadlocks while we wait for the 'Isend'.
-                for (size_t i = 0; i < active_requests.size(); i++) {
-                    if (i != req_id && active_requests[i] != MPI_REQUEST_NULL) {
-                        int temp_flag = 0;
-                        MPI_Test(&active_requests[i], &temp_flag, MPI_STATUS_IGNORE);
-                    }
-                }
-            }
+            MPI_Wait(&active_requests[req_id], MPI_STATUS_IGNORE);
             
-            // Nullify the request
+            // Nullify the request and recycle the slot
             active_requests[req_id] = MPI_REQUEST_NULL; 
-            
-            // Push the ID to the Free List for instant recycling
             free_request_slots.push_back(req_id);
         }
     }
