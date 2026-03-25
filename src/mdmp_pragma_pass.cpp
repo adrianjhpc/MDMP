@@ -7,26 +7,37 @@ using namespace llvm;
 
 PreservedAnalyses MDMPPragmaPass::run(Module &M, ModuleAnalysisManager &MAM) {
     bool changed = false;
-    
+
+    // Grab the Function Analysis Manager proxy
     auto &FAM = MAM.getResult<FunctionAnalysisManagerModuleProxy>(M).getManager();
 
+    // Loop over every function in the module
     for (auto &F : M) {
         if (!F.isDeclaration()) {
+            // Grab all three analyses for this specific function
             AAResults &AA = FAM.getResult<AAManager>(F);
-            
-            changed |= runOnFunction(F, AA);
+            DominatorTree &DT = FAM.getResult<DominatorTreeAnalysis>(F);
+            LoopInfo &LI = FAM.getResult<LoopAnalysis>(F);
+
+            // Call runOnFunction so state is properly reset
+            changed |= runOnFunction(F, AA, DT, LI);
         }
     }
+
     return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }
 
-bool MDMPPragmaPass::runOnFunction(Function &F, AAResults &AA) {
-    PendingRequests.clear(); // Reset for each function
-    transformPragmasToCalls(F, AA);
-    return true; 
+// Update the signature to accept the new analyses
+bool MDMPPragmaPass::runOnFunction(Function &F, AAResults &AA, DominatorTree &DT, LoopInfo &LI) {
+    // Reset the request tracker for the new function
+    PendingRequests.clear(); 
+    
+    // Pass everything down to the transformation engine
+    transformPragmasToCalls(F, AA, DT, LI);
+    return true;
 }
 
-void MDMPPragmaPass::transformPragmasToCalls(Function &F, AAResults &AA) {
+void MDMPPragmaPass::transformPragmasToCalls(Function &F, AAResults &AA, DominatorTree &DT, LoopInfo &LI) {
     Module *M = F.getParent();
     LLVMContext &Ctx = M->getContext();
 
@@ -90,7 +101,7 @@ void MDMPPragmaPass::transformPragmasToCalls(Function &F, AAResults &AA) {
                 );
                 
                 CI->replaceAllUsesWith(NewCall);
-                hoistInitiation(NewCall, Loc, AA, isSend);
+                hoistInitiation(NewCall, Loc, AA, DT, LI, isSend);
                 PendingRequests.push_back({Loc, NewCall});
                 toDelete.push_back(CI);
             } 
@@ -132,52 +143,94 @@ void MDMPPragmaPass::transformPragmasToCalls(Function &F, AAResults &AA) {
 }
 
 // Move communications to the earliest possible times (helps that they are nonblocking)
-bool MDMPPragmaPass::hoistInitiation(CallInst *CommCall, MemoryLocation Loc, AAResults &AA, bool isSend) {
-    // Establish the absolute ceiling (the latest instruction that generates an argument)
-    Instruction *OpBound = nullptr;
-    for (Use &U : CommCall->operands()) {
-        if (auto *OpI = dyn_cast<Instruction>(U.get())) {
-            if (OpI->getParent() == CommCall->getParent()) {
-                if (!OpBound || OpBound->comesBefore(OpI)) {                   
-                    OpBound = OpI;
-                }
-            }
-        }
-    }
-
-    Instruction *InsertPoint = CommCall;
-    BasicBlock::iterator it(CommCall);
+void MDMPPragmaPass::hoistInitiation(CallInst *CI, MemoryLocation &Loc, AAResults &AA, DominatorTree &DT, LoopInfo &LI, bool isSend) {
+    // 1. === LOOP INVARIANT CODE MOTION (LICM) ===
+    Loop *L = LI.getLoopFor(CI->getParent());
     
-    while (it != CommCall->getParent()->begin()) {
-        Instruction *Prev = &*(--it);
+    if (L && isSend) {
+        bool isSafeToHoistOut = true;
 
-        // Do not hoist past the instructions that generate our arguments
-        if (OpBound && (Prev == OpBound || Prev->comesBefore(OpBound))) {
-            break;
-        }
-
-        // Do not hoist past the start of the region
-        if (auto *PrevCall = dyn_cast<CallInst>(Prev)) {
-            if (Function *F = PrevCall->getCalledFunction()) {
-                if (F->getName() == "__mdmp_marker_commregion_begin") {
+        // NEW DEPENDENCY CHECK: Are any of our arguments calculated inside this loop?
+        // If so, we cannot hoist the SEND outside the loop!
+        for (Value *Op : CI->operands()) {
+            if (Instruction *OpInst = dyn_cast<Instruction>(Op)) {
+                if (L->contains(OpInst)) {
+                    isSafeToHoistOut = false;
                     break;
                 }
             }
         }
+        
+        if (isSafeToHoistOut) {
+            for (BasicBlock *BB : L->blocks()) {
+                for (Instruction &I : *BB) {
+                    // BARRIER CHECK
+                    if (auto *Call = dyn_cast<CallInst>(&I)) {
+                        if (Call->getCalledFunction() && Call->getCalledFunction()->getName() == "mdmp_commregion_begin") {
+                            isSafeToHoistOut = false; 
+                            break; 
+                        }
+                    }
+                    // MEMORY CHECK
+                    if (I.mayWriteToMemory() && isModSet(AA.getModRefInfo(&I, Loc))) {
+                        isSafeToHoistOut = false;
+                        break;
+                    }
+                }
+                if (!isSafeToHoistOut) break;
+            }
+        }
 
-        // Check for Memory Dependencies
-        auto ModRef = AA.getModRefInfo(Prev, Loc);
-        if (isSend && isModSet(ModRef)) break;
-        if (!isSend && isModOrRefSet(ModRef)) break;
-
-        InsertPoint = Prev; 
+        // TELEPORTATION
+        if (isSafeToHoistOut) {
+            BasicBlock *Preheader = L->getLoopPreheader();
+            if (Preheader) {
+                CI->moveBefore(Preheader->getTerminator()->getIterator());
+                errs() << "[MDMP] OPTIMIZATION: Hoisted SEND out of loop!\n";
+                return; 
+            }
+        }
     }
 
-    if (InsertPoint != CommCall) {
-        CommCall->moveBefore(InsertPoint->getIterator());
-        return true;
+    // 2. === STANDARD LINEAR HOISTING ===
+    Instruction *InsertPoint = CI;
+    Instruction *Prev = CI->getPrevNode();
+
+    while (Prev) {
+        // NEW RULE 1: Never move above a PHI Node!
+        if (isa<PHINode>(Prev)) break;
+
+        // NEW RULE 2: Never move above the instruction that calculates our arguments!
+        bool usesPrev = false;
+        for (Value *Op : CI->operands()) {
+            if (Op == Prev) {
+                usesPrev = true;
+                break;
+            }
+        }
+        if (usesPrev) break;
+
+        // BARRIER CHECK
+        if (auto *Call = dyn_cast<CallInst>(Prev)) {
+            if (Call->getCalledFunction() && Call->getCalledFunction()->getName() == "mdmp_commregion_begin") {
+                break; 
+            }
+        }
+
+        // MEMORY CHECK
+        if (Prev->mayWriteToMemory() && isModSet(AA.getModRefInfo(Prev, Loc))) {
+            break; 
+        }
+
+        InsertPoint = Prev;
+        Prev = Prev->getPrevNode();
     }
-    return false;
+
+    // Apply the hoist
+    if (InsertPoint != CI) {
+        CI->moveBefore(InsertPoint->getIterator());
+        errs() << "[MDMP] Hoisted communication within region.\n";
+    }
 }
 
 // Generate individual wait calls
