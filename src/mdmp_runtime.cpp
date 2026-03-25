@@ -99,6 +99,14 @@ void mdmp_commregion_begin() {
 
 void mdmp_commregion_end() {
     mdmp_log("[MDMP Runtime] Exiting communication region.\n");
+    
+    if (!active_requests.empty()) {
+        // Safety Net: Catch any dangling requests the CFG engine missed
+        MPI_Waitall(active_requests.size(), active_requests.data(), MPI_STATUSES_IGNORE);
+        // Clean up request vectors
+        active_requests.clear();
+        free_request_slots.clear();
+    }
 }
 
 void mdmp_sync() {
