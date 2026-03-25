@@ -6,6 +6,9 @@
 #include <stdlib.h> // For getenv
 #include <stdarg.h> // For variadic arguments
 #include <stdio.h>
+#include <stdio.h>
+#include <mpi.h>
+#include <vector>
 
 #ifdef __cplusplus
 extern "C" {

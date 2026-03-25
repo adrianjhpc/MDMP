@@ -1,10 +1,8 @@
 #include "mdmp_runtime.h"
-#include <stdio.h>
-#include <mpi.h>
-#include <vector>
 
 // This vector stores all active non-blocking requests for the current region.
 static std::vector<MPI_Request> active_requests;
+static std::vector<int> free_request_slots;
 static int global_my_rank = -1; 
 static int global_size = 0;
 
@@ -45,6 +43,21 @@ MPI_Op get_mpi_op(int op) {
         case 1: return MPI_MAX;
         case 2: return MPI_MIN;
         default: return MPI_SUM;
+    }
+}
+
+inline int allocate_request_slot(MPI_Request req) {
+    if (!free_request_slots.empty()) {
+        // Recycle a dead slot! O(1) time.
+        int reused_id = free_request_slots.back();
+        free_request_slots.pop_back();
+        active_requests[reused_id] = req;
+        return reused_id;
+    } else {
+        // Only grow the vector if we absolutely have to
+        int new_id = active_requests.size();
+        active_requests.push_back(req);
+        return new_id;
     }
 }
 
@@ -107,12 +120,12 @@ int mdmp_send(void* buffer, size_t count, int type, int sender_rank, int dest_ra
     // Check if this process should be doing anything
     if (global_my_rank != sender_rank) return MPI_REQUEST_NULL;
 
+    mdmp_log("[MDMP Runtime] Rank %d posting Isend to Rank %d (Tag: %d)...\n", global_my_rank, dest_rank, tag);
+
     MPI_Request req;
     MPI_Isend(buffer, count, get_mpi_type(type), dest_rank, tag, MPI_COMM_WORLD, &req);
     
-    int req_id = active_requests.size();
-    active_requests.push_back(req);
-    return req_id;
+    return allocate_request_slot(req);
 }
 
 int mdmp_recv(void* buffer, size_t count, int type, int receiver_rank, int src_rank, int tag) {
@@ -123,29 +136,47 @@ int mdmp_recv(void* buffer, size_t count, int type, int receiver_rank, int src_r
     // Ignore out of bounds process ranks
     if (receiver_rank < 0 || receiver_rank >= global_size || 
         src_rank < 0 || src_rank >= global_size) {
-        return -1;
+        return MPI_REQUEST_NULL;
     }
 
     // Check if this process should be doing anything
     if (global_my_rank != receiver_rank) return MPI_REQUEST_NULL;
 
+    mdmp_log("[MDMP Runtime] Rank %d posting Irecv from Rank %d (Tag: %d)...\n", global_my_rank, src_rank, tag);
+
     MPI_Request req;
     MPI_Irecv(buffer, count, get_mpi_type(type), src_rank, tag, MPI_COMM_WORLD, &req);
-    
-    int req_id = active_requests.size();
-    active_requests.push_back(req);
-    return req_id;
+   
+    return allocate_request_slot(req); 
 }
 
 void mdmp_wait(int req_id) {
     if (req_id >= 0 && req_id < active_requests.size()) {
-        // Only wait if it hasn't been waited on already
         if (active_requests[req_id] != MPI_REQUEST_NULL) {
-            mdmp_log("[MDMP Runtime] Waiting on request %d...\n", req_id);
-            MPI_Wait(&active_requests[req_id], MPI_STATUS_IGNORE);
+            mdmp_log("[MDMP Runtime] Waiting on request %d (Safe Progress Mode)...\n", req_id);
             
-            // Nullify the request so future calls for this ID are safely ignored
+            // Safe Rendezvous Spinner
+            // Instead of a blocking MPI_Wait, we spin with MPI_Test.
+            int flag = 0;
+            while (!flag) {
+                MPI_Test(&active_requests[req_id], &flag, MPI_STATUS_IGNORE);
+
+                // Let the MPI progress engine service other active requests
+                // This guarantees we process incoming 'Irecv' handshakes, instantly
+                // breaking Rendezvous deadlocks while we wait for the 'Isend'.
+                for (size_t i = 0; i < active_requests.size(); i++) {
+                    if (i != req_id && active_requests[i] != MPI_REQUEST_NULL) {
+                        int temp_flag = 0;
+                        MPI_Test(&active_requests[i], &temp_flag, MPI_STATUS_IGNORE);
+                    }
+                }
+            }
+            
+            // Nullify the request
             active_requests[req_id] = MPI_REQUEST_NULL; 
+            
+            // Push the ID to the Free List for instant recycling
+            free_request_slots.push_back(req_id);
         }
     }
 }

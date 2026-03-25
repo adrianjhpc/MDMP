@@ -126,7 +126,6 @@ void MDMPPragmaPass::transformPragmasToCalls(Function &F, AAResults &AA, Dominat
                     isSend ? runtime_send : runtime_recv, 
                     {BufferPtr, CountVal, TypeVal, ActorRank, PeerRank, TagVal}
                 );
- 
                 CI->replaceAllUsesWith(NewCall);
                 hoistInitiation(NewCall, Loc, AA, DT, LI, isSend);
                 PendingRequests.push_back({Loc, NewCall});
@@ -351,10 +350,40 @@ void MDMPPragmaPass::injectWaitsForRegion(Instruction *RegionEnd, AAResults &AA,
                 }
                 
                 // Stop Condition 2: Memory dependency (Read or Write to the buffer)
-                if (Inst->mayReadOrWriteMemory() && isModOrRefSet(AA.getModRefInfo(Inst, Req.Loc))) {
-                    WaitInsertionPoints.push_back(Inst);
-                    foundWaitPoint = true;
-                    break;
+                if (Inst->mayReadOrWriteMemory()) {
+                    
+                    bool isAsyncCall = false;
+                    if (auto *Call = dyn_cast<CallInst>(Inst)) {
+                        if (Function *CalledFn = Call->getCalledFunction()) {
+                            StringRef FnName = CalledFn->getName();
+                            if (FnName == "mdmp_send" || FnName == "mdmp_recv" || 
+                                FnName == "mdmp_reduce" || FnName == "mdmp_gather" ||
+                                FnName.starts_with("__mdmp_marker_")) {
+                                isAsyncCall = true;
+                            }
+                        }
+                    }
+                    
+                    // Bypass AA's 'Unknown Size' panic by proving the instruction 
+                    // accesses a fundamentally different base object than our buffer.
+                    bool isSafeMemOp = false;
+                    if (auto *LI = dyn_cast<LoadInst>(Inst)) {
+                        if (getUnderlyingObject(LI->getPointerOperand()) != getUnderlyingObject(Req.Loc.Ptr)) {
+                            isSafeMemOp = true; // Safely loading a different variable
+                        }
+                    } else if (auto *SI = dyn_cast<StoreInst>(Inst)) {
+                        if (getUnderlyingObject(SI->getPointerOperand()) != getUnderlyingObject(Req.Loc.Ptr)) {
+                            isSafeMemOp = true; // Safely storing to a different variable
+                        }
+                    }
+                    
+                    // Only drop the wait if it's not a whitelisted async call, 
+                    // not a safe variable operation, and AA claims a collision.
+                    if (!isAsyncCall && !isSafeMemOp && isModOrRefSet(AA.getModRefInfo(Inst, Req.Loc))) {
+                        WaitInsertionPoints.push_back(Inst);
+                        foundWaitPoint = true;
+                        break;
+                    }
                 }
             }
             
