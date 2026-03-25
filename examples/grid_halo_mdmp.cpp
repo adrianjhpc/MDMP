@@ -1,3 +1,4 @@
+// Copied from https://github.com/paboyle/Grid/blob/develop/MPI_benchmark/halo_mpi.cc
 #include <cassert>
 #include <complex>
 #include <memory>
