@@ -16,6 +16,7 @@
     template<> struct MDMPTypeTraits<int>    { static const int type = 0; };
     template<> struct MDMPTypeTraits<double> { static const int type = 1; };
     template<> struct MDMPTypeTraits<float>  { static const int type = 2; };
+    template<> struct MDMPTypeTraits<char>   { static const int type = 3; };
 
     // A unified helper macro for C++
     #define MDMP_DEDUCE_TYPE(ptr) MDMPTypeTraits<typename std::remove_reference<decltype(*(ptr))>::type>::type
@@ -31,6 +32,7 @@
         int: 0, \
         double: 1, \
         float: 2, \
+        char: 3, \
         default: 0 \
     )
 #endif

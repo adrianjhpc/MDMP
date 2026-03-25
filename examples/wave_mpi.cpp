@@ -85,13 +85,13 @@ int main ( int argc, char *argv[] )
 //    Local, int P, the number of MPI processes.
 //
 {
-  double dt = 0.00125;
+  double dt = 0.0000125;
   int i_global_hi;
   int i_global_lo;
   int id;
-  int n_global = 401;
+  int n_global = 40001;
   int n_local;
-  int nsteps = 4000;
+  int nsteps = 400000;
   int p;
   double *u1_local;
   double wtime;
@@ -484,10 +484,13 @@ void collect ( int id, int p, int n_global, int n_local, int nsteps,
     for ( i_global = 0; i_global < n_global; i_global++) 
     {
       x = ( double ) ( i_global ) / ( double ) ( n_global - 1 );
-      cout << "  " << setw(3) << i_global
-           << "  " << setprecision(3) << setw(6) << x
-           << "  " << setprecision(3) << setw(6) << u_global[i_global]
-           << "  " << setprecision(3) << setw(6) << exact ( x, t ) << "\n";
+      if ( i_global == n_global - 1 ) {
+        cout << "  " << setw(3) << i_global
+             << "  " << setprecision(3) << setw(6) << x
+             << "  " << setprecision(3) << setw(6) << u_global[i_global]
+             << "  " << setprecision(3) << setw(6) << exact ( x, t ) << "\n";
+        }
+
     }
 
     delete [] u_global;

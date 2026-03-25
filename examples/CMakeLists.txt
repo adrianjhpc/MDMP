@@ -58,3 +58,6 @@ add_comparison_example(satisfy cpp)
 
 # Parallel Solution of the 1D Wave Equation
 add_comparison_example(wave cpp)
+
+# Example MPI benchmark code from the Grid codebase
+add_comparison_example(grid_halo cpp)

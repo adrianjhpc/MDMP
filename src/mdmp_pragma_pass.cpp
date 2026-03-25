@@ -3,7 +3,21 @@
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
 
+#include <map>
+#include <vector>
+
 using namespace llvm;
+
+// Structure to hold information about a communication call
+struct CommCallInfo {
+    CallInst *CI;           // The actual LLVM Call Instruction
+    Value *BufferPtr;       // Arg 0: The data pointer
+    Value *Count;           // Arg 1: Number of elements
+    Value *Type;            // Arg 2: MDMP Type ID
+    Value *ByteSize;        // Arg 3: Size in bytes (Crucial for packing!)
+    Value *PeerRank;        // Arg 4/5: Dest (for Send) or Src (for Recv)
+    Value *Tag;             // Arg 5/6: The message tag
+};
 
 PreservedAnalyses MDMPPragmaPass::run(Module &M, ModuleAnalysisManager &MAM) {
     bool changed = false;
@@ -118,7 +132,7 @@ void MDMPPragmaPass::transformPragmasToCalls(Function &F, AAResults &AA, Dominat
                     isSend ? runtime_send : runtime_recv, 
                     {BufferPtr, CountVal, TypeVal, ActorRank, PeerRank, TagVal}
                 );
-                
+ 
                 CI->replaceAllUsesWith(NewCall);
                 hoistInitiation(NewCall, Loc, AA, DT, LI, isSend);
                 PendingRequests.push_back({Loc, NewCall});
