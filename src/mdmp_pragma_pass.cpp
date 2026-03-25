@@ -1,10 +1,4 @@
 #include "mdmp_pragma_pass.h"
-#include "llvm/IR/IRBuilder.h"
-#include "llvm/Passes/PassBuilder.h"
-#include "llvm/Passes/PassPlugin.h"
-
-#include <map>
-#include <vector>
 
 using namespace llvm;
 
@@ -317,49 +311,71 @@ void MDMPPragmaPass::hoistInitiation(CallInst *CI, MemoryLocation &Loc, AAResult
     }
 }
 
-// Generate individual wait calls
+// Generate individual wait calls dynamically based on CFG Dataflow Analysis
 void MDMPPragmaPass::injectWaitsForRegion(Instruction *RegionEnd, AAResults &AA, LLVMContext &Ctx, Module *M) {
     FunctionCallee runtime_wait = M->getOrInsertFunction("mdmp_wait", Type::getVoidTy(Ctx), Type::getInt32Ty(Ctx));
 
     for (auto &Req : PendingRequests) {
-        Instruction *InsertPt = nullptr;
+        SmallVector<Instruction*, 4> WaitInsertionPoints;
+        SmallPtrSet<BasicBlock*, 8> Visited;
         
-        BasicBlock::iterator it(Req.RuntimeCall);
-        it++; 
-
-        // Scan downwards, but strictly within the current Basic Block
-        while (it != Req.RuntimeCall->getParent()->end()) {
-            Instruction *Next = &*it;
+        struct TraversalState {
+            BasicBlock *BB;
+            BasicBlock::iterator StartIt;
+        };
+        SmallVector<TraversalState, 8> Worklist;
+        
+        // Start exploring from the instruction immediately following the async call
+        BasicBlock::iterator StartIt = Req.RuntimeCall->getIterator();
+        StartIt++;
+        Worklist.push_back({Req.RuntimeCall->getParent(), StartIt});
+        
+        while (!Worklist.empty()) {
+            auto State = Worklist.pop_back_val();
+            BasicBlock *BB = State.BB;
             
-            // Did we find the Region End marker?
-            if (Next == RegionEnd) {
-                InsertPt = RegionEnd;
-                break;
+            // If we've already fully visited this block from the top, skip it to prevent infinite loops
+            if (!Visited.insert(BB).second && State.StartIt == BB->begin()) {
+                continue;
             }
-
-            // Did we find a memory dependency (read/write to our buffer)?
-            if (isModOrRefSet(AA.getModRefInfo(Next, Req.Loc))) {
-                InsertPt = Next;
-                break;
+            
+            bool foundWaitPoint = false;
+            for (auto It = State.StartIt; It != BB->end(); ++It) {
+                Instruction *Inst = &*It;
+                
+                // Stop Condition 1: We reached the explicit end of the region
+                if (Inst == RegionEnd) {
+                    WaitInsertionPoints.push_back(Inst);
+                    foundWaitPoint = true;
+                    break;
+                }
+                
+                // Stop Condition 2: Memory dependency (Read or Write to the buffer)
+                if (Inst->mayReadOrWriteMemory() && isModOrRefSet(AA.getModRefInfo(Inst, Req.Loc))) {
+                    WaitInsertionPoints.push_back(Inst);
+                    foundWaitPoint = true;
+                    break;
+                }
             }
-
-            // Did we hit the end of the Basic Block?
-            // If we hit a branch (like a jump into a for-loop), we must
-            // insert the wait before the branch to guarantee safety.
-            if (Next->isTerminator()) {
-                InsertPt = Next;
-                break;
+            
+            // If we reached the end of the block without finding a reason to wait,
+            // we jump across the terminator and explore all successor blocks
+            if (!foundWaitPoint) {
+                for (BasicBlock *Succ : successors(BB)) {
+                    Worklist.push_back({Succ, Succ->begin()});
+                }
             }
-
-            it++;
         }
-
-        // Safety fallback (though the terminator check should always catch it)
-        if (!InsertPt) InsertPt = RegionEnd; 
-
-        // Inject the wait call
-        IRBuilder<> Builder(InsertPt);
-        Builder.CreateCall(runtime_wait, {Req.RuntimeCall});
+        
+        // Insert the waits at the discovered optimal points
+        // We use a set to ensure we don't insert duplicate waits on the exact same instruction 
+        // if multiple execution paths converge.
+        SmallPtrSet<Instruction*, 4> UniqueWaitPoints(WaitInsertionPoints.begin(), WaitInsertionPoints.end());
+        for (Instruction *InsertPt : UniqueWaitPoints) {
+            IRBuilder<> Builder(InsertPt);
+            // Note: Req.RuntimeCall returns the integer 'req_id', which we pass directly to mdmp_wait
+            Builder.CreateCall(runtime_wait, {Req.RuntimeCall});
+        }
     }
     
     PendingRequests.clear();

@@ -138,10 +138,16 @@ int mdmp_recv(void* buffer, size_t count, int type, int receiver_rank, int src_r
 }
 
 void mdmp_wait(int req_id) {
-    if (req_id < 0 || req_id >= active_requests.size()) return;
-    
-    mdmp_log("[MDMP Rank %d] Waiting on request %d...\n", global_my_rank, req_id);
-    MPI_Wait(&active_requests[req_id], MPI_STATUS_IGNORE);
+    if (req_id >= 0 && req_id < active_requests.size()) {
+        // Only wait if it hasn't been waited on already
+        if (active_requests[req_id] != MPI_REQUEST_NULL) {
+            mdmp_log("[MDMP Runtime] Waiting on request %d...\n", req_id);
+            MPI_Wait(&active_requests[req_id], MPI_STATUS_IGNORE);
+            
+            // Nullify the request so future calls for this ID are safely ignored
+            active_requests[req_id] = MPI_REQUEST_NULL; 
+        }
+    }
 }
 
 int mdmp_reduce(void* in_buf, void* out_buf, size_t count, int type, int root, int op) {
