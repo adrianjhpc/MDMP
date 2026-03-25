@@ -37,4 +37,5 @@ add_mdmp_test(mdmp_test_out_of_bounds_rank_selection test_out_of_bounds_rank_sel
 add_mdmp_test(mdmp_test test_mdmp.cpp)
 add_mdmp_test(mdmp_test_periodic_boundaries test_periodic_mdmp.cpp)
 add_mdmp_test(mdmp_test_reduce test_reduce_mdmp.cpp)
+add_mdmp_test(mdmp_test_reduce_non_zero_root test_reduce_non_zero_root_mdmp.cpp)
 
