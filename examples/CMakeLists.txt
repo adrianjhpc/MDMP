@@ -1,43 +1,36 @@
-# CMakeLists.txt for building with LLVM support
-cmake_minimum_required(VERSION 3.13)
+# ==============================================================================
+# MDMP Examples CMake Configuration
+# ==============================================================================
 
-# Include LLVM directories
-include_directories(${LLVM_INCLUDE_DIRS})
-include_directories(${MPI_INCLUDE_PATH})
+# Find standard MPI for the baseline comparison program
+find_package(MPI REQUIRED)
 
-# Add definitions from LLVM
-add_definitions(${LLVM_DEFINITIONS})
+# ------------------------------------------------------------------------------
+# 1. Baseline: Standard MPI Heat Equation
+# ------------------------------------------------------------------------------
+add_executable(heat_mpi heat_mpi.c)
+target_include_directories(heat_mpi PRIVATE ${MPI_C_INCLUDE_DIRS})
+target_link_libraries(heat_mpi PRIVATE ${MPI_C_LIBRARIES} m) # 'm' is for the math library (sin)
 
-# Include MDMP directories
-include_directories("../src")
+# ------------------------------------------------------------------------------
+# 2. Optimized: MDMP Heat Equation
+# ------------------------------------------------------------------------------
+# We compile this using your custom harness to ensure the LLVM pass runs,
+# the CFG hoister executes, and the runtime is linked natively.
 
-# Create example application
-add_executable(mdmp_example
-    example_usage.cpp
+set(MDMP_HARNESS "${CMAKE_SOURCE_DIR}/harness/mdmpc++")
+
+add_custom_command(
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/heat_mdmp
+    COMMAND ${MDMP_HARNESS} ${CMAKE_CURRENT_SOURCE_DIR}/heat_mdmp.c 
+            -I${CMAKE_SOURCE_DIR}/src 
+            -I/usr/include/mpich-x86_64 
+            /usr/lib64/mpich/lib/libmpi.so 
+            -lm  # Link the math library
+            -o ${CMAKE_CURRENT_BINARY_DIR}/heat_mdmp
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/heat_mdmp.c mdmp_pragma_pass mdmp_runtime
+    COMMENT "Compiling heat_mdmp using mdmpc++ harness..."
 )
 
-# Link against MDMP pass and MPI
-target_link_libraries(mdmp_example 
-    mdmp_runtime
-    ${MPI_LIBRARIES}
-)
-
-# Set compile options for example
-target_compile_options(mdmp_example PRIVATE
-    -Wall
-    -Wextra
-    -pedantic
-    ${MPI_CXX_COMPILE_FLAGS}
-)
-
-install(TARGETS mdmp_example
-    RUNTIME DESTINATION bin
-    COMPONENT MDMPExample
-)
-
-# Create a simple test
-enable_testing()
-add_test(NAME mdmp_example_test
-    COMMAND mdmp_example
-)
-
+# Create a target so `make` knows to trigger the custom command above
+add_custom_target(mdmp_example_heat ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/heat_mdmp)

@@ -49,6 +49,7 @@ void MDMPPragmaPass::transformPragmasToCalls(Function &F, AAResults &AA, Dominat
     FunctionCallee runtime_final = M->getOrInsertFunction("mdmp_final", Type::getVoidTy(Ctx));
     FunctionCallee runtime_get_rank = M->getOrInsertFunction("mdmp_get_rank", Type::getInt32Ty(Ctx));
     FunctionCallee runtime_get_size = M->getOrInsertFunction("mdmp_get_size", Type::getInt32Ty(Ctx));
+    FunctionCallee runtime_wtime = M->getOrInsertFunction("mdmp_wtime", Type::getDoubleTy(Ctx));
     // Send uses: Buffer, Count, Type, Actor, Peer, Tag
     FunctionCallee runtime_send = M->getOrInsertFunction("mdmp_send", 
         Type::getInt32Ty(Ctx), PointerType::getUnqual(Ctx), Type::getInt64Ty(Ctx), 
@@ -66,6 +67,16 @@ void MDMPPragmaPass::transformPragmasToCalls(Function &F, AAResults &AA, Dominat
     if (Function *FRecv = dyn_cast<Function>(runtime_recv.getCallee())) {
         FRecv->addFnAttr(Attribute::NoUnwind);
     }
+
+    FunctionCallee runtime_reduce = M->getOrInsertFunction("mdmp_reduce", 
+        Type::getInt32Ty(Ctx), PointerType::getUnqual(Ctx), PointerType::getUnqual(Ctx), 
+        Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx));   
+    if (Function *FReduce = dyn_cast<Function>(runtime_reduce.getCallee())) {
+        FReduce->addFnAttr(Attribute::NoUnwind);
+        // We only mark the in_buf (Arg 0) as ReadOnly. out_buf (Arg 1) is modified
+        FReduce->addParamAttr(0, Attribute::ReadOnly);
+    }
+
 
     std::vector<Instruction*> toDelete;
 
@@ -105,6 +116,29 @@ void MDMPPragmaPass::transformPragmasToCalls(Function &F, AAResults &AA, Dominat
                 PendingRequests.push_back({Loc, NewCall});
                 toDelete.push_back(CI);
             } 
+            else if (Name == "__mdmp_marker_reduce") {
+                Value *InBufPtr = CI->getArgOperand(0);
+                Value *OutBufPtr = CI->getArgOperand(1);
+                Value *CountVal  = CI->getArgOperand(2);
+                Value *TypeVal   = CI->getArgOperand(3);
+                Value *RootVal   = CI->getArgOperand(5);
+                Value *OpVal     = CI->getArgOperand(6);
+
+                CallInst *NewCall = Builder.CreateCall(
+                    runtime_reduce, 
+                    {InBufPtr, OutBufPtr, CountVal, TypeVal, RootVal, OpVal}
+                );
+                
+                CI->replaceAllUsesWith(NewCall);
+                
+                // Track the out buffer for data dependencies
+                MemoryLocation OutLoc(OutBufPtr, LocationSize::beforeOrAfterPointer());
+                
+                // Set isSend = false to disable aggressive Loop Hoisting for Collectives
+                hoistInitiation(NewCall, OutLoc, AA, DT, LI, false);
+                PendingRequests.push_back({OutLoc, NewCall});
+                toDelete.push_back(CI);
+            }
             else if (Name == "__mdmp_marker_commregion_begin") {
                 CallInst *NewCall = Builder.CreateCall(runtime_begin);
                 CI->replaceAllUsesWith(NewCall);
@@ -135,6 +169,11 @@ void MDMPPragmaPass::transformPragmasToCalls(Function &F, AAResults &AA, Dominat
             }
             else if (Name == "__mdmp_marker_sync") {
                 Builder.CreateCall(runtime_sync);
+                toDelete.push_back(CI);
+            } 
+            else if (Name == "__mdmp_marker_wtime") {
+                CallInst *NewCall = Builder.CreateCall(runtime_wtime);
+                CI->replaceAllUsesWith(NewCall);
                 toDelete.push_back(CI);
             }
         }

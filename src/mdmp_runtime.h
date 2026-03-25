@@ -3,12 +3,17 @@
 #define MDMP_RUNTIME_H
 
 #include <stddef.h>
+#include <stdlib.h> // For getenv
+#include <stdarg.h> // For variadic arguments
+#include <stdio.h>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 // MDMP runtime function declarations
+void mdmp_log(const char* format, ...);
+void mdmp_set_debug(int enable) noexcept;
 void mdmp_init();
 void mdmp_final();
 void mdmp_commregion_begin();
@@ -19,13 +24,10 @@ void mdmp_sync();
 void mdmp_wait(int req_id);
 int mdmp_get_size();
 int mdmp_get_rank();
+double mdmp_wtime();
 void mdmp_optimize(int level);
 void mdmp_no_opt();
-void mdmp_reduce(int op, void* src, void* dst, size_t size);
-void mdmp_barrier();
-void mdmp_broadcast(void* data, size_t size, int root);
-void mdmp_gather(void* sendbuf, void* recvbuf, int count, int datatype, int root);
-void mdmp_scatter(void* sendbuf, void* recvbuf, int count, int datatype, int root);
+int mdmp_reduce(void* in_buf, void* out_buf, size_t count, int type, int root, int op);
 
 #ifdef __cplusplus
 }

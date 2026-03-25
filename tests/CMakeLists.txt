@@ -35,3 +35,6 @@ enable_testing()
 add_mdmp_test(mdmp_test_rank_selection test_rank_selection_mdmp.cpp)
 add_mdmp_test(mdmp_test_out_of_bounds_rank_selection test_out_of_bounds_rank_selection_mdmp.cpp)
 add_mdmp_test(mdmp_test test_mdmp.cpp)
+add_mdmp_test(mdmp_test_periodic_boundaries test_periodic_mdmp.cpp)
+add_mdmp_test(mdmp_test_reduce test_reduce_mdmp.cpp)
+

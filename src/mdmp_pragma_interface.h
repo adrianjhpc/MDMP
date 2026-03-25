@@ -31,12 +31,18 @@ void __mdmp_marker_final() MDMP_NOEXCEPT;
 int __mdmp_marker_get_size() MDMP_NOEXCEPT;
 int __mdmp_marker_get_rank() MDMP_NOEXCEPT;
 
+double __mdmp_marker_wtime() MDMP_NOEXCEPT;
+
+void mdmp_set_debug(int enable) MDMP_NOEXCEPT;
+
 void __mdmp_marker_commregion_begin() MDMP_NOEXCEPT;
 void __mdmp_marker_commregion_end() MDMP_NOEXCEPT;
 void __mdmp_marker_sync() MDMP_NOEXCEPT;
 
 int __mdmp_marker_send(void* buffer, size_t count, int type, size_t byte_size, int sender, int dest, int tag) MDMP_NOEXCEPT;
 int __mdmp_marker_recv(void* buffer, size_t count, int type, size_t byte_size, int receiver, int src, int tag) MDMP_NOEXCEPT;
+
+int __mdmp_marker_reduce(void* in_buf, void* out_buf, size_t count, int type, size_t byte_size, int root, int op) MDMP_NOEXCEPT;
 
 #ifdef __cplusplus
 } // End extern "C"
@@ -47,6 +53,11 @@ int __mdmp_marker_recv(void* buffer, size_t count, int type, size_t byte_size, i
 #define MDMP_RECV(buf, count, receiver, src, tag) \
     __mdmp_marker_recv((void*)(buf), count, MDMPTypeTraits<typename std::remove_reference<decltype(*(buf))>::type>::type, (count) * sizeof(*(buf)), receiver, src, tag)
 
+#define MDMP_REDUCE(in_buf, out_buf, count, root, op) \
+    __mdmp_marker_reduce((void*)(in_buf), (void*)(out_buf), count, \
+    MDMPTypeTraits<typename std::remove_reference<decltype(*(in_buf))>::type>::type, \
+    (count) * sizeof(*(in_buf)), root, op)
+
 #define MDMP_COMM_INIT()        __mdmp_marker_init()
 #define MDMP_COMM_FINAL()       __mdmp_marker_final()
 #define MDMP_COMMREGION_BEGIN() __mdmp_marker_commregion_begin()
@@ -55,9 +66,17 @@ int __mdmp_marker_recv(void* buffer, size_t count, int type, size_t byte_size, i
 
 #define MDMP_GET_SIZE()         __mdmp_marker_get_size()
 #define MDMP_GET_RANK()         __mdmp_marker_get_rank()
+#define MDMP_WTIME()            __mdmp_marker_wtime()
+
+#define MDMP_SET_DEBUG(enable)        mdmp_set_debug(enable)
 
 #define MDMP_IGNORE -2
 #define MDMP_RANK   __mdmp_marker_get_rank()
+
+// Collective operation types (i.e. reduce)
+#define MDMP_SUM 0
+#define MDMP_MAX 1
+#define MDMP_MIN 2
 
 #endif
 #endif

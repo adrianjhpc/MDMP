@@ -8,16 +8,23 @@ static std::vector<MPI_Request> active_requests;
 static int global_my_rank = -1; 
 static int global_size = 0;
 
+static bool mdmp_debug_mode = false;
+
 extern "C" {
     void __mdmp_marker_init() noexcept {}
     void __mdmp_marker_final() noexcept {}
     void __mdmp_marker_commregion_begin() noexcept {}
     void __mdmp_marker_commregion_end() noexcept {}
     void __mdmp_marker_sync() noexcept {}
+
     int __mdmp_marker_send(void* buffer, size_t count, int type, size_t byte_size, int sender, int dest, int tag) noexcept { return 0; }
     int __mdmp_marker_recv(void* buffer, size_t count, int type, size_t byte_size, int receiver, int src, int tag) noexcept { return 0; }
+
+    int __mdmp_marker_reduce(void* in_buf, void* out_buf, size_t count, int type, size_t byte_size, int root, int op) noexcept { return 0; }
+
     int __mdmp_marker_get_size() noexcept { return 0; }
     int __mdmp_marker_get_rank() noexcept { return 0; }
+    double __mdmp_wtime() noexcept { return 0.0; }
 }
 
 // Helper to map Enum to MPI Types
@@ -31,30 +38,57 @@ MPI_Datatype get_mpi_type(int mdmp_type) {
     }
 }
 
+MPI_Op get_mpi_op(int op) {
+    switch(op) {
+        case 0: return MPI_SUM;
+        case 1: return MPI_MAX;
+        case 2: return MPI_MIN;
+        default: return MPI_SUM;
+    }
+}
+
+// Centralised logging function
+void mdmp_log(const char* format, ...) {
+    if (!mdmp_debug_mode) return;
+
+    va_list args;
+    va_start(args, format);
+    vprintf(format, args);
+    va_end(args);
+}
+
+void mdmp_set_debug(int enable) noexcept {
+    mdmp_debug_mode = (enable != 0);
+}
+
 void mdmp_init() {
-    printf("[MDMP Runtime] Initializing MDMP Environment...\n");
+    const char* env_debug = getenv("MDMP_DEBUG");
+    if (env_debug && (env_debug[0] == '1' || env_debug[0] == 't' || env_debug[0] == 'T')) {
+        mdmp_debug_mode = true;
+    }
+    mdmp_log("[MDMP Runtime] Initializing MDMP Environment...\n");
     // Passing NULL is valid in modern MPI and keeps our macro clean!
     MPI_Init(NULL, NULL); 
     MPI_Comm_rank(MPI_COMM_WORLD, &global_my_rank); 
     MPI_Comm_size(MPI_COMM_WORLD, &global_size);
-    printf("[MDMP Rank %d] Initialized (world size %d).\n", global_my_rank, global_size);
+    mdmp_log("[MDMP Rank %d] Initialized (world size %d).\n", global_my_rank, global_size);
 }
 
 void mdmp_final() {
-    printf("[MDMP Runtime] Finalizing MDMP Environment...\n");
+    mdmp_log("[MDMP Runtime] Finalizing MDMP Environment...\n");
     MPI_Finalize();
 }
 
 void mdmp_commregion_begin() {
-    printf("[MDMP Runtime] Entering communication region.\n");
+    mdmp_log("[MDMP Runtime] Entering communication region.\n");
 }
 
 void mdmp_commregion_end() {
-    printf("[MDMP Runtime] Exiting communication region.\n");
+    mdmp_log("[MDMP Runtime] Exiting communication region.\n");
 }
 
 void mdmp_sync() {
-    printf("[MDMP Runtime] Synchronizing...\n");
+    mdmp_log("[MDMP Runtime] Synchronizing...\n");
     MPI_Barrier(MPI_COMM_WORLD);
 }
 
@@ -105,8 +139,22 @@ int mdmp_recv(void* buffer, size_t count, int type, int receiver_rank, int src_r
 void mdmp_wait(int req_id) {
     if (req_id < 0 || req_id >= active_requests.size()) return;
     
-    printf("[MDMP Rank %d] Waiting on request %d...\n", global_my_rank, req_id);
+    mdmp_log("[MDMP Rank %d] Waiting on request %d...\n", global_my_rank, req_id);
     MPI_Wait(&active_requests[req_id], MPI_STATUS_IGNORE);
+}
+
+int mdmp_reduce(void* in_buf, void* out_buf, size_t count, int type, int root, int op) {
+    MPI_Request req;
+    
+    // Log the operation if debugging is enabled
+    mdmp_log("[MDMP Runtime] Initiating Asynchronous Reduce (Root: %d, Op: %d)...\n", root, op);
+    
+    // MPI_Ireduce (asynchronous collective)
+    MPI_Ireduce(in_buf, out_buf, count, get_mpi_type(type), get_mpi_op(op), root, MPI_COMM_WORLD, &req);
+    
+    int req_id = active_requests.size();
+    active_requests.push_back(req);
+    return req_id;
 }
 
 int mdmp_get_size() {
@@ -118,4 +166,8 @@ int mdmp_get_rank() {
 
     return global_my_rank;
 
+}
+
+double mdmp_wtime() {
+    return MPI_Wtime();
 }
