@@ -28,6 +28,7 @@ double mdmp_wtime();
 void mdmp_optimize(int level);
 void mdmp_no_opt();
 int mdmp_reduce(void* in_buf, void* out_buf, size_t count, int type, int root, int op);
+int mdmp_gather(void* send_buf, size_t send_count, void* recv_buf, int type, int root);
 
 #ifdef __cplusplus
 }

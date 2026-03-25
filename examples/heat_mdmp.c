@@ -16,7 +16,48 @@ void update ( int id, int p );
 /******************************************************************************/
 
 int main ( int argc, char *argv[] )
-{
+
+/******************************************************************************/
+/*
+  Original copied from: https://people.math.sc.edu/Burkardt/c_src/heat_mpi/heat_mpi.c and converted.
+  Which was referenced from:  https://people.math.sc.edu/Burkardt/c_src/heat_mpi/heat_mpi.html
+
+  Purpose:
+
+    MAIN is the main program for HEAT_MDMP.
+
+  Licensing:
+
+     
+
+  Modified:
+
+    24 October 2011
+
+  Author:
+ 
+    John Burkardt
+
+  Reference:
+
+    William Gropp, Ewing Lusk, Anthony Skjellum,
+    Using MPI: Portable Parallel Programming with the
+    Message-Passing Interface,
+    Second Edition,
+    MIT Press, 1999,
+    ISBN: 0262571323,
+    LC: QA76.642.G76.
+
+    Marc Snir, Steve Otto, Steven Huss-Lederman, David Walker, 
+    Jack Dongarra,
+    MPI: The Complete Reference,
+    Volume I: The MPI Core,
+    Second Edition,
+    MIT Press, 1998,
+    ISBN: 0-262-69216-3,
+     LC: QA76.642.M65.
+*/
+  {
   int id;
   int p;
   double wtime;
@@ -44,7 +85,6 @@ int main ( int argc, char *argv[] )
   }
 
   update ( id, p );
-
   /* 
     Record the final time. 
    */
@@ -55,12 +95,13 @@ int main ( int argc, char *argv[] )
     printf ( "\n");       
     printf ( "  Wall clock elapsed seconds = %f\n", wtime );      
   }
-
   /* 
     Terminate MDMP. 
     */
   MDMP_COMM_FINAL(); // Replaced MPI_Finalize
-
+/*
+  Terminate.
+*/  
   if ( id == 0 )
   {
     printf ( "\n" );
@@ -75,6 +116,36 @@ int main ( int argc, char *argv[] )
 /******************************************************************************/
 
 void update ( int id, int p )
+
+/******************************************************************************/
+/*
+  Purpose:
+
+    UPDATE computes the solution of the heat equation.
+
+  Discussion:
+
+    If there is only one processor ( P == 1 ), then the program writes the
+    values of X and H to files.
+
+  Licensing:
+
+    This code is distributed under the GNU LGPL license. 
+
+  Modified:
+
+    21 April 2008
+
+  Author:
+ 
+    John Burkardt
+
+  Parameters:
+
+    Input, int ID, the id of this processor.
+
+    Input, int P, the number of processors.
+*/  
 {
   double cfl;
 
@@ -97,7 +168,9 @@ void update ( int id, int p )
   FILE *x_file;
   double x_max = 1.0;
   double x_min = 0.0;
-
+/*
+  Have process 0 print out some information.
+*/
   if ( id == 0 )
   {
     printf ( "\n" );
@@ -137,7 +210,6 @@ void update ( int id, int p )
            + ( double ) ( p * n - id * n - i     ) * x_min )
            / ( double ) ( p * n              - 1 );
   }
-
 /*
   In single processor mode, write out the X coordinates for display.
 */
@@ -152,7 +224,6 @@ void update ( int id, int p )
 
     fclose ( x_file );
   }
-
 /*
   Set the values of H at the initial time.
 */
@@ -274,29 +345,172 @@ void update ( int id, int p )
 
     if ( p == 1 )
     {
-      for ( i = 1; i <= n; i++ ) fprintf ( h_file, "  %f", h[i] );
+      for ( i = 1; i <= n; i++ )
+      {
+	fprintf ( h_file, "  %f", h[i] );
+      }
       fprintf ( h_file, "\n" );
     }
   }
 
-  if ( p == 1 ) fclose ( h_file );
+  if ( p == 1 ){
+    fclose ( h_file );
+  }
 
-  free ( h ); free ( h_new ); free ( x );
+  free ( h );
+  free ( h_new );
+  free ( x );
+  
   return;
 }
 
 /******************************************************************************/
-// The remaining math functions are completely untouched C code
+
 double boundary_condition ( double x, double time )
+
+/******************************************************************************/
+/*
+  Purpose:
+
+    BOUNDARY_CONDITION evaluates the boundary condition of the differential equation.
+
+  Licensing:
+
+    This code is distributed under the GNU LGPL license. 
+
+  Modified:
+
+    17 April 2008
+
+  Author:
+ 
+    John Burkardt
+
+  Parameters:
+
+    Input, double X, TIME, the position and time.
+
+    Output, double BOUNDARY_CONDITION, the value of the boundary condition.
+*/
 {
-  if ( x < 0.5 ) return 100.0 + 10.0 * sin ( time );
-  else           return 75.0;
+  double value;
+/*
+  Left condition:
+*/
+  if ( x < 0.5 )
+  {
+    value = 100.0 + 10.0 * sin ( time );
+  }
+  else
+  {
+    value = 75.0;
+  }
+
+  return value;
 }
-double initial_condition ( double x, double time ) { return 95.0; }
-double rhs ( double x, double time ) { return 0.0; }
+/******************************************************************************/
+
+double initial_condition ( double x, double time )
+
+/******************************************************************************/
+/*
+  Purpose:
+
+    INITIAL_CONDITION evaluates the initial condition of the differential equation.
+
+  Licensing:
+
+    This code is distributed under the GNU LGPL license. 
+
+  Modified:
+
+    17 April 2008
+
+  Author:
+ 
+    John Burkardt
+
+  Parameters:
+
+    Input, double X, TIME, the position and time.
+
+    Output, double INITIAL_CONDITION, the value of the initial condition.
+*/
+{
+  double value;
+
+  value = 95.0;
+
+  return value;
+}
+/******************************************************************************/
+
+double rhs ( double x, double time )
+
+/******************************************************************************/
+/*
+  Purpose:
+
+    RHS evaluates the right hand side of the differential equation.
+
+  Licensing:
+
+    This code is distributed under the GNU LGPL license. 
+
+  Modified:
+
+    17 April 2008
+
+  Author:
+ 
+    John Burkardt
+
+  Parameters:
+
+    Input, double X, TIME, the position and time.
+
+    Output, double RHS, the value of the right hand side function.
+*/
+{
+  double value;
+
+  value = 0.0;
+
+  return value;
+}
+/******************************************************************************/
+
 void timestamp ( )
+
+/******************************************************************************/
+/*
+  Purpose:
+
+    TIMESTAMP prints the current YMDHMS date as a time stamp.
+
+  Example:
+
+    31 May 2001 09:45:54 AM
+
+  Licensing:
+
+    This code is distributed under the GNU LGPL license. 
+
+  Modified:
+
+    24 September 2003
+
+  Author:
+
+    John Burkardt
+
+  Parameters:
+
+    None
+*/
 {
 # define TIME_SIZE 40
+
   static char time_buffer[TIME_SIZE];
   const struct tm *tm;
   time_t now;
@@ -305,7 +519,9 @@ void timestamp ( )
   tm = localtime ( &now );
 
   strftime ( time_buffer, TIME_SIZE, "%d %B %Y %I:%M:%S %p", tm );
+
   printf ( "%s\n", time_buffer );
+
   return;
 # undef TIME_SIZE
 }

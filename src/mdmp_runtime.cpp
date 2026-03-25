@@ -21,6 +21,7 @@ extern "C" {
     int __mdmp_marker_recv(void* buffer, size_t count, int type, size_t byte_size, int receiver, int src, int tag) noexcept { return 0; }
 
     int __mdmp_marker_reduce(void* in_buf, void* out_buf, size_t count, int type, size_t byte_size, int root, int op) noexcept { return 0; }
+    int __mdmp_marker_gather(void* send_buf, size_t send_count, void* recv_buf, int type, size_t byte_size, int root) noexcept { return 0; }
 
     int __mdmp_marker_get_size() noexcept { return 0; }
     int __mdmp_marker_get_rank() noexcept { return 0; }
@@ -31,8 +32,8 @@ extern "C" {
 MPI_Datatype get_mpi_type(int mdmp_type) {
     switch(mdmp_type) {
         case 0: return MPI_INT;
-        case 1: return MPI_FLOAT;
-        case 2: return MPI_DOUBLE;
+        case 1: return MPI_DOUBLE;
+        case 2: return MPI_FLOAT;
         case 3: return MPI_CHAR;
         default: return MPI_BYTE;
     }
@@ -151,6 +152,24 @@ int mdmp_reduce(void* in_buf, void* out_buf, size_t count, int type, int root, i
     
     // MPI_Ireduce (asynchronous collective)
     MPI_Ireduce(in_buf, out_buf, count, get_mpi_type(type), get_mpi_op(op), root, MPI_COMM_WORLD, &req);
+    
+    int req_id = active_requests.size();
+    active_requests.push_back(req);
+    return req_id;
+}
+
+
+int mdmp_gather(void* send_buf, size_t send_count, void* recv_buf, int type, int root) {
+    MPI_Request req;
+    
+    mdmp_log("[MDMP Runtime] Initiating Asynchronous Gather (Root: %d, Count: %zu, Type: %d)...\n", root, send_count, type);
+    
+    // Explicitly cast send_count to a 32-bit int to satisfy the MPI standard safely
+    int mpi_count = (int)send_count;
+    
+    MPI_Igather(send_buf, mpi_count, get_mpi_type(type), 
+                recv_buf, mpi_count, get_mpi_type(type), 
+                root, MPI_COMM_WORLD, &req);
     
     int req_id = active_requests.size();
     active_requests.push_back(req);

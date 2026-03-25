@@ -76,6 +76,14 @@ void MDMPPragmaPass::transformPragmasToCalls(Function &F, AAResults &AA, Dominat
         // We only mark the in_buf (Arg 0) as ReadOnly. out_buf (Arg 1) is modified
         FReduce->addParamAttr(0, Attribute::ReadOnly);
     }
+    FunctionCallee runtime_gather = M->getOrInsertFunction("mdmp_gather", 
+        Type::getInt32Ty(Ctx), PointerType::getUnqual(Ctx), Type::getInt64Ty(Ctx), 
+        PointerType::getUnqual(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx));   
+    if (Function *FGather = dyn_cast<Function>(runtime_gather.getCallee())) {
+        FGather->addFnAttr(Attribute::NoUnwind);
+        // The send buffer is strictly read-only
+        FGather->addParamAttr(0, Attribute::ReadOnly);
+    }
 
 
     std::vector<Instruction*> toDelete;
@@ -138,7 +146,30 @@ void MDMPPragmaPass::transformPragmasToCalls(Function &F, AAResults &AA, Dominat
                 hoistInitiation(NewCall, OutLoc, AA, DT, LI, false);
                 PendingRequests.push_back({OutLoc, NewCall});
                 toDelete.push_back(CI);
-            }
+             }
+             else if (Name == "__mdmp_marker_gather") {
+                Value *SendBufPtr   = CI->getArgOperand(0);
+                Value *SendCountVal = CI->getArgOperand(1);
+                Value *RecvBufPtr   = CI->getArgOperand(2);
+                Value *TypeVal      = CI->getArgOperand(3); 
+                
+                Value *RootVal      = CI->getArgOperand(5);
+
+                CallInst *NewCall = Builder.CreateCall(
+                    runtime_gather, 
+                    {SendBufPtr, SendCountVal, RecvBufPtr, TypeVal, RootVal}
+                );
+                
+                CI->replaceAllUsesWith(NewCall);
+                
+                // Track the out buffer (recv_buf) for data dependencies
+                MemoryLocation OutLoc(RecvBufPtr, LocationSize::beforeOrAfterPointer());
+                
+                // Disable aggressive loop hoisting for collectives
+                hoistInitiation(NewCall, OutLoc, AA, DT, LI, false);
+                PendingRequests.push_back({OutLoc, NewCall});
+                toDelete.push_back(CI);
+            } 
             else if (Name == "__mdmp_marker_commregion_begin") {
                 CallInst *NewCall = Builder.CreateCall(runtime_begin);
                 CI->replaceAllUsesWith(NewCall);

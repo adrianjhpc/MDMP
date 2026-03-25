@@ -38,4 +38,5 @@ add_mdmp_test(mdmp_test test_mdmp.cpp)
 add_mdmp_test(mdmp_test_periodic_boundaries test_periodic_mdmp.cpp)
 add_mdmp_test(mdmp_test_reduce test_reduce_mdmp.cpp)
 add_mdmp_test(mdmp_test_reduce_non_zero_root test_reduce_non_zero_root_mdmp.cpp)
+add_mdmp_test(mdmp_test_gather test_gather_mdmp.cpp)
 
