@@ -13,7 +13,7 @@ endif()
 find_package(MPI REQUIRED)
 
 # We define how many ranks CTest should use to run your test suite
-set(TEST_NUM_RANKS 4)
+set(TEST_NUM_RANKS 7)
 
 function(add_mdmp_test TEST_NAME SOURCE_FILE)
     add_custom_command(
@@ -47,9 +47,15 @@ endfunction()
 enable_testing()
 
 add_mdmp_test(mdmp_test_rank_selection test_rank_selection_mdmp.cpp)
+add_mdmp_test(mdmp_test_rank_selection_regcom test_rank_selection_mdmp_regcom.cpp)
 add_mdmp_test(mdmp_test_out_of_bounds_rank_selection test_out_of_bounds_rank_selection_mdmp.cpp)
 add_mdmp_test(mdmp_test test_mdmp.cpp)
+add_mdmp_test(mdmp_test_regcom test_mdmp_regcom.cpp)
 add_mdmp_test(mdmp_test_periodic_boundaries test_periodic_mdmp.cpp)
+add_mdmp_test(mdmp_test_periodic_boundaries_regcom test_periodic_mdmp_regcom.cpp)
 add_mdmp_test(mdmp_test_reduce test_reduce_mdmp.cpp)
 add_mdmp_test(mdmp_test_reduce_non_zero_root test_reduce_non_zero_root_mdmp.cpp)
+add_mdmp_test(mdmp_test_reduce_regcom test_reduce_mdmp_regcom.cpp)
+add_mdmp_test(mdmp_test_reduce_non_zero_root_regcom test_reduce_non_zero_root_mdmp_regcom.cpp)
 add_mdmp_test(mdmp_test_gather test_gather_mdmp.cpp)
+add_mdmp_test(mdmp_test_gather_regcom test_gather_mdmp_regcom.cpp)

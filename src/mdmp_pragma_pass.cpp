@@ -39,7 +39,7 @@ void MDMPPragmaPass::transformPragmasToCalls(Function &F, AAResults &AA, Dominat
     Module *M = F.getParent();
     LLVMContext &Ctx = M->getContext();
 
-    // --- STANDARD MDMP RUNTIME CALLS ---
+    // Utility functions
     FunctionCallee runtime_begin = M->getOrInsertFunction("mdmp_commregion_begin", Type::getVoidTy(Ctx));
     FunctionCallee runtime_end   = M->getOrInsertFunction("mdmp_commregion_end", Type::getVoidTy(Ctx));
     FunctionCallee runtime_sync  = M->getOrInsertFunction("mdmp_sync", Type::getVoidTy(Ctx));
@@ -49,7 +49,7 @@ void MDMPPragmaPass::transformPragmasToCalls(Function &F, AAResults &AA, Dominat
     FunctionCallee runtime_get_size = M->getOrInsertFunction("mdmp_get_size", Type::getInt32Ty(Ctx));
     FunctionCallee runtime_wtime = M->getOrInsertFunction("mdmp_wtime", Type::getDoubleTy(Ctx));
 
-    // --- IMPERATIVE API (Returns i32 Req ID) ---
+    // Imperative functionality apis (Returns i32 Req ID) 
     FunctionCallee runtime_send = M->getOrInsertFunction("mdmp_send", 
         Type::getInt32Ty(Ctx), PointerType::getUnqual(Ctx), Type::getInt64Ty(Ctx), 
         Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx));
@@ -72,7 +72,7 @@ void MDMPPragmaPass::transformPragmasToCalls(Function &F, AAResults &AA, Dominat
         PointerType::getUnqual(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx));   
     if (Function *FGather = dyn_cast<Function>(runtime_gather.getCallee())) { FGather->addFnAttr(Attribute::NoUnwind); }
 
-    // --- DECLARATIVE API (Inspector-Executor) ---
+    // Declarative functionality apis (Inspector-Executor)
     FunctionCallee runtime_register_send = M->getOrInsertFunction("mdmp_register_send", 
         Type::getVoidTy(Ctx), PointerType::getUnqual(Ctx), Type::getInt64Ty(Ctx), 
         Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx));
@@ -80,6 +80,14 @@ void MDMPPragmaPass::transformPragmasToCalls(Function &F, AAResults &AA, Dominat
     FunctionCallee runtime_register_recv = M->getOrInsertFunction("mdmp_register_recv", 
         Type::getVoidTy(Ctx), PointerType::getUnqual(Ctx), Type::getInt64Ty(Ctx), 
         Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx));
+
+    FunctionCallee runtime_register_reduce = M->getOrInsertFunction("mdmp_register_reduce", 
+        Type::getVoidTy(Ctx), PointerType::getUnqual(Ctx), PointerType::getUnqual(Ctx), 
+        Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx));
+        
+    FunctionCallee runtime_register_gather = M->getOrInsertFunction("mdmp_register_gather", 
+        Type::getVoidTy(Ctx), PointerType::getUnqual(Ctx), Type::getInt64Ty(Ctx), 
+        PointerType::getUnqual(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx));
 
     FunctionCallee runtime_commit = M->getOrInsertFunction("mdmp_commit", Type::getInt32Ty(Ctx));
 
@@ -101,7 +109,7 @@ void MDMPPragmaPass::transformPragmasToCalls(Function &F, AAResults &AA, Dominat
                 toDelete.push_back(CI);
             }
             // ==========================================
-            // PARADIGM 1: IMPERATIVE (Send/Recv)
+            // Imperative functions (sends/recvs)
             // ==========================================
             else if (Name == "__mdmp_marker_send" || Name == "__mdmp_marker_recv") {
                 Value *BufferPtr = CI->getArgOperand(0);
@@ -128,7 +136,7 @@ void MDMPPragmaPass::transformPragmasToCalls(Function &F, AAResults &AA, Dominat
                 toDelete.push_back(CI);
             } 
             // ==========================================
-            // PARADIGM 2: DECLARATIVE (Register/Commit)
+            // Declarative functionality (register/commit)
             // ==========================================
             else if (Name == "__mdmp_marker_register_send" || Name == "__mdmp_marker_register_recv") {
                 Value *BufferPtr = CI->getArgOperand(0);
@@ -148,20 +156,52 @@ void MDMPPragmaPass::transformPragmasToCalls(Function &F, AAResults &AA, Dominat
                     {BufferPtr, CountVal, TypeVal, ActorRank, PeerRank, TagVal});
                 CI->replaceAllUsesWith(NewCall);
                 toDelete.push_back(CI);
+            }
+            else if (Name == "__mdmp_marker_register_reduce") {
+                Value *InBuf = CI->getArgOperand(0); Value *OutBuf = CI->getArgOperand(1);
+                Value *ByteSize = CI->getArgOperand(4); 
+
+                LocationSize LocSize = LocationSize::beforeOrAfterPointer();
+                if (auto *ConstBytes = dyn_cast<ConstantInt>(ByteSize)) { LocSize = LocationSize::precise(ConstBytes->getZExtValue()); }
+                
+                // Track both buffers to protect them
+                ActiveRegionLocs.push_back(MemoryLocation(InBuf, LocSize));
+                ActiveRegionLocs.push_back(MemoryLocation(OutBuf, LocSize));
+
+                CallInst *NewCall = Builder.CreateCall(runtime_register_reduce, 
+                    {InBuf, OutBuf, CI->getArgOperand(2), CI->getArgOperand(3), CI->getArgOperand(5), CI->getArgOperand(6)});
+                CI->replaceAllUsesWith(NewCall);
+                toDelete.push_back(CI);
+            }
+            else if (Name == "__mdmp_marker_register_gather") {
+                Value *SendBuf = CI->getArgOperand(0); Value *RecvBuf = CI->getArgOperand(2);
+                Value *ByteSize = CI->getArgOperand(4); 
+
+                LocationSize LocSize = LocationSize::beforeOrAfterPointer();
+                if (auto *ConstBytes = dyn_cast<ConstantInt>(ByteSize)) { LocSize = LocationSize::precise(ConstBytes->getZExtValue()); }
+                
+                // Track both buffers to protect them
+                ActiveRegionLocs.push_back(MemoryLocation(SendBuf, LocSize));
+                ActiveRegionLocs.push_back(MemoryLocation(RecvBuf, LocSize));
+
+                CallInst *NewCall = Builder.CreateCall(runtime_register_gather, 
+                    {SendBuf, CI->getArgOperand(1), RecvBuf, CI->getArgOperand(3), CI->getArgOperand(5)});
+                CI->replaceAllUsesWith(NewCall);
+                toDelete.push_back(CI);
             } 
             else if (Name == "__mdmp_marker_commit") {
                 CallInst *NewCommit = Builder.CreateCall(runtime_commit);
                 CI->replaceAllUsesWith(NewCommit);
                 
-                // HOIST THE COMMIT to overlap math with the coalesced network payload!
+                // Hoist commits to overall user work with the coalesced network payload
                 hoistInitiation(NewCommit, ActiveRegionLocs, AA, DT, LI, true);
                 PendingRequests.push_back({ActiveRegionLocs, NewCommit});
                 
-                ActiveRegionLocs.clear(); // Reset in case they commit multiple times
+                ActiveRegionLocs.clear(); // Reset in case the programmer has called commit multiple times
                 toDelete.push_back(CI);
             }
             // ==========================================
-            // COLLECTIVES
+            // Collective operations
             // ==========================================
             else if (Name == "__mdmp_marker_reduce") {
                 CallInst *NewCall = Builder.CreateCall(runtime_reduce, {CI->getArgOperand(0), CI->getArgOperand(1), CI->getArgOperand(2), CI->getArgOperand(3), CI->getArgOperand(5), CI->getArgOperand(6)});
@@ -187,9 +227,9 @@ void MDMPPragmaPass::transformPragmasToCalls(Function &F, AAResults &AA, Dominat
                 PendingRequests.push_back({Locs, NewCall});
                 toDelete.push_back(CI);
             } 
-            // ==========================================
-            // REGION END (Wait Trigger) & UTILS
-            // ==========================================
+            // ==================================================================
+            // Process the end of a region to stop things going beyond that point
+            // ==================================================================
             else if (Name == "__mdmp_marker_commregion_end") {
                 CallInst *NewEnd = Builder.CreateCall(runtime_end);
                 injectWaitsForRegion(NewEnd, AA, LI, Ctx, M);
@@ -298,6 +338,7 @@ void MDMPPragmaPass::injectWaitsForRegion(Instruction *RegionEnd, AAResults &AA,
                             if (FnName == "mdmp_send" || FnName == "mdmp_recv" || FnName == "mdmp_reduce" || 
                                 FnName == "mdmp_gather" || FnName == "mdmp_commit" || 
                                 FnName == "mdmp_register_send" || FnName == "mdmp_register_recv" ||
+                                FnName == "mdmp_register_reduce" || FnName == "mdmp_register_gather" ||
                                 FnName.starts_with("__mdmp_marker_")) {
                                 isAsyncCall = true;
                             }
