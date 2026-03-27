@@ -331,17 +331,6 @@ int main(int argc, char **argv)
 
   if( !WorldRank ) {
     printf("=========================================================\n");
-    printf("= Benchmarking DEVICE memory MPI performance             \n");
-    printf("=========================================================\n");fflush(stdout);
-  }
-  
-  for(int L=16;L<=40;L+=4){
-    // Uncomment this when you are running on an actual SYCL/CUDA GPU node
-    // Benchmark(L,mpi,true,100); 
-  }  
-
-  if( !WorldRank ) {
-    printf("=========================================================\n");
     printf("= DONE   \n");
     printf("=========================================================\n");
   }

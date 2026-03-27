@@ -10,14 +10,12 @@
 #include <strings.h>
 #include <ctime>
 #include <sys/time.h>
+#include <sstream>
 
 #include <mpi.h>
+// Include the MDMP Interface
+#include "mdmp_pragma_interface.h"
 
-/**************************************************************
- * GPU - GPU memory cartesian halo exchange benchmark
- * Config: what is the target
- **************************************************************
- */
 #undef ACC_CUDA
 #undef  ACC_HIP
 #undef  ACC_SYCL
@@ -36,7 +34,7 @@ int WorldRank;
 int WorldShmSize;
 int WorldShmRank;
 
-/**************************************************************
+/***********************************************************
  * Allocate buffers on the GPU, SYCL needs an init call and context
  **************************************************************
  */
@@ -47,11 +45,12 @@ void *acceleratorAllocDevice(size_t bytes)
 {
   void *ptr=NULL;
   auto err = cudaMalloc((void **)&ptr,bytes);
-  GRID_ASSERT(err==cudaSuccess);
+  assert(err==cudaSuccess);
   return ptr;
 }
 void acceleratorFreeDevice(void *ptr){  cudaFree(ptr);}
 #endif
+
 #ifdef ACC_HIP
 #include <hip/hip_runtime.h>
 void acceleratorInit(void){}
@@ -67,6 +66,7 @@ inline void *acceleratorAllocDevice(size_t bytes)
 };
 inline void acceleratorFreeDevice(void *ptr){ auto r=hipFree(ptr);};
 #endif
+
 #ifdef ACC_SYCL
 #include <sycl/CL/sycl.hpp>
 #include <sycl/usm.hpp>
@@ -88,15 +88,15 @@ void acceleratorInit(void)
 inline void *acceleratorAllocDevice(size_t bytes){ return malloc_device(bytes,*theAccelerator);};
 inline void acceleratorFreeDevice(void *ptr){free(ptr,*theAccelerator);};
 #endif
+
 #ifdef ACC_NONE
 void acceleratorInit(void){}
 inline void *acceleratorAllocDevice(size_t bytes){ return malloc(bytes);};
 inline void acceleratorFreeDevice(void *ptr){free(ptr);};
 #endif
 
-
 /**************************************************************
- * Microsecond timer
+ * Microsecond timer (Fallback, though MDMP_WTIME is preferred)
  **************************************************************
  */
 inline double usecond(void) {
@@ -104,16 +104,17 @@ inline double usecond(void) {
   gettimeofday(&tv,NULL);
   return 1.0e6*tv.tv_sec + 1.0*tv.tv_usec;
 }
+
 /**************************************************************
  * Main benchmark routine
  **************************************************************
  */
-void Benchmark(int64_t L,std::vector<int> cart_geom,bool use_device,int ncall)
+void Benchmark(int64_t L, std::vector<int> cart_geom, bool use_device, int ncall)
 {
   int64_t words = 3*4*2;
   int64_t face,vol;
-  int Nd=cart_geom.size();
-  
+  int Nd = cart_geom.size();
+
   /**************************************************************
    * L^Nd volume, L^(Nd-1) faces, 12 complex per site
    * Allocate memory for these
@@ -122,7 +123,6 @@ void Benchmark(int64_t L,std::vector<int> cart_geom,bool use_device,int ncall)
   face=1; for( int d=0;d<Nd-1;d++) face = face*L;
   vol=1;  for( int d=0;d<Nd;d++) vol = vol*L;
 
-  
   std::vector<void *> send_bufs;
   std::vector<void *> recv_bufs;
   size_t vw = face*words;
@@ -139,6 +139,7 @@ void Benchmark(int64_t L,std::vector<int> cart_geom,bool use_device,int ncall)
       recv_bufs.push_back(malloc(bytes));
     }
   }
+  
   /*********************************************************
    * Build cartesian communicator
    *********************************************************
@@ -155,58 +156,65 @@ void Benchmark(int64_t L,std::vector<int> cart_geom,bool use_device,int ncall)
   static int reported;
   if ( ! reported ) { 
     printf("World Rank %d Shm Rank %d CartCoor %d %d %d %d\n",WorldRank,WorldShmRank,
-	 coor[0],coor[1],coor[2],coor[3]); fflush(stdout);
+     coor[0],coor[1],coor[2],coor[3]); fflush(stdout);
     reported =1 ;
   }
+
   /*********************************************************
    * Perform halo exchanges
    *********************************************************
-   */
-  for(int d=0;d<Nd;d++){
-    if ( cart_geom[d]>1 ) {
-      double t0=usecond();
-
-      int from,to;
-      
+   */  
+  for(int d=0; d<Nd; d++){
+    if (cart_geom[d] > 1) {
       MPI_Barrier(communicator);
-      for(int n=0;n<ncall;n++){
-	
-	void *xmit = (void *)send_bufs[d];
-	void *recv = (void *)recv_bufs[d];
-	
-	ierr=MPI_Cart_shift(communicator,d,1,&from,&to);
-	assert(ierr==0);
-	
-	ierr=MPI_Sendrecv(xmit,bytes,MPI_CHAR,to,rank,
-			  recv,bytes,MPI_CHAR,from, from,
-			  communicator,MPI_STATUS_IGNORE);
-	assert(ierr==0);
-	
-	xmit = (void *)send_bufs[Nd+d];
-	recv = (void *)recv_bufs[Nd+d];
-	
-	ierr=MPI_Cart_shift(communicator,d,-1,&from,&to);
-	assert(ierr==0);
-	
-	ierr=MPI_Sendrecv(xmit,bytes,MPI_CHAR,to,rank,
-			  recv,bytes,MPI_CHAR,from, from,
-			  communicator,MPI_STATUS_IGNORE);
-	assert(ierr==0);
+      double t0 = usecond();
+
+      int f_from, f_to; // Forward neighbors
+      int b_from, b_to; // Backward neighbors
+      
+      // Pre-calculate shifts outside the hot loop
+      MPI_Cart_shift(communicator, d, 1, &f_from, &f_to);
+      MPI_Cart_shift(communicator, d, -1, &b_from, &b_to);
+
+      for(int n=0; n<ncall; n++){
+        // ====================================================================
+        // DECLARATIVE HALO EXCHANGE (Inspector-Executor)
+        // ====================================================================
+        MDMP_COMMREGION_BEGIN();
+
+        // 1. REGISTER: Describe the entire halo for this dimension
+        // Forward Shift Buffers
+        MDMP_REGISTER_SEND((char*)send_bufs[d], bytes, rank, f_to, 100+d);
+        MDMP_REGISTER_RECV((char*)recv_bufs[d], bytes, rank, f_from, 100+d);
+
+        // Backward Shift Buffers
+        MDMP_REGISTER_SEND((char*)send_bufs[Nd+d], bytes, rank, b_to, 200+d);
+        MDMP_REGISTER_RECV((char*)recv_bufs[Nd+d], bytes, rank, b_from, 200+d);
+
+        // 2. COMMIT: Fire all 4 operations as a single batch
+        MDMP_COMMIT();
+
+        // (The LLVM pass will sink the Waitall here, as there is no 
+        // local computation in this raw benchmark between begin/end)
+
+        MDMP_COMMREGION_END();
+        // ====================================================================
       }
-      MPI_Barrier(communicator);
-
-      double t1=usecond();
       
+      MPI_Barrier(communicator);
+      double t1 = usecond();
+
       double dbytes    = bytes*WorldShmSize;
       double xbytes    = dbytes*2.0*ncall;
       double rbytes    = xbytes;
       double bidibytes = xbytes+rbytes;
 
       if ( ! WorldRank ) {
-	printf("\t%12ld\t %12ld %16.0lf\n",L,bytes,bidibytes/(t1-t0)); fflush(stdout);
-      }
+        printf("\t%12ld\t %12ld %16.0lf\n",L,bytes,bidibytes/(t1-t0)); fflush(stdout);
+      }      
     }
   }
+
   /*********************************************************
    * Free memory
    *********************************************************
@@ -222,13 +230,11 @@ void Benchmark(int64_t L,std::vector<int> cart_geom,bool use_device,int ncall)
       free(recv_bufs[d]);
     }
   }
-
 }
 
 /**************************************
  * Command line junk
  **************************************/
-
 std::string CmdOptionPayload(char ** begin, char ** end, const std::string & option)
 {
   char ** itr = std::find(begin, end, option);
@@ -238,10 +244,12 @@ std::string CmdOptionPayload(char ** begin, char ** end, const std::string & opt
   }
   return std::string("");
 }
+
 bool CmdOptionExists(char** begin, char** end, const std::string& option)
 {
   return std::find(begin, end, option) != end;
 }
+
 void CmdOptionIntVector(const std::string &str,std::vector<int> & vec)
 {
   vec.resize(0);
@@ -254,8 +262,9 @@ void CmdOptionIntVector(const std::string &str,std::vector<int> & vec)
   }
   return;
 }
+
 /**************************************
- * Command line junk
+ * Main
  **************************************/
 int main(int argc, char **argv)
 {
@@ -263,14 +272,15 @@ int main(int argc, char **argv)
 
   acceleratorInit();
 
-  MPI_Init(&argc,&argv);
+  // Initialize MDMP
+  MDMP_COMM_INIT();
 
   WorldComm = MPI_COMM_WORLD;
   
   MPI_Comm_split_type(WorldComm, MPI_COMM_TYPE_SHARED, 0, MPI_INFO_NULL,&WorldShmComm);
 
-  MPI_Comm_rank(WorldComm     ,&WorldRank);
-  MPI_Comm_size(WorldComm     ,&WorldSize);
+  WorldRank = MDMP_GET_RANK();
+  WorldSize = MDMP_GET_SIZE();
 
   MPI_Comm_rank(WorldShmComm     ,&WorldShmRank);
   MPI_Comm_size(WorldShmComm     ,&WorldShmSize);
@@ -286,6 +296,7 @@ int main(int argc, char **argv)
     CmdOptionIntVector(arg,mpi);
   } else {
     printf("Must specify --mpi <n1.n2.n3.n4> command line argument\n");
+    MDMP_COMM_FINAL();
     exit(0);
   }
 
@@ -295,19 +306,18 @@ int main(int argc, char **argv)
     printf("%d ranks-per-node\n",WorldShmSize);
     printf("%d nodes\n",WorldSize/WorldShmSize);fflush(stdout);
     printf("Cartesian layout: ");
-    for(int d=0;d<mpi.size();d++){
+    for(size_t d=0;d<mpi.size();d++){
       printf("%d ",mpi[d]);
     }
     printf("\n");fflush(stdout);
     printf("***********************************\n");
   }
 
-  
   if( !WorldRank ) {
     printf("=========================================================\n");
     printf("= Benchmarking HOST memory MPI performance               \n");
     printf("=========================================================\n");fflush(stdout);
-    printf("= L\t pkt bytes\t MB/s           \n");
+    printf("= L\t pkt bytes\t MB/s            \n");
     printf("=========================================================\n");fflush(stdout);
   }
 
@@ -320,5 +330,8 @@ int main(int argc, char **argv)
     printf("= DONE   \n");
     printf("=========================================================\n");
   }
-  MPI_Finalize();
+  
+  // Finalize MDMP
+  MDMP_COMM_FINAL();
+  return 0;
 }
