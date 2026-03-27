@@ -1,6 +1,12 @@
 cmake_minimum_required(VERSION 3.13)
 project(MDMPPragmaImplementation LANGUAGES CXX C)
 
+# ==========================================
+# NEW: Enable the global CTest test runner
+# ==========================================
+include(CTest)
+enable_testing()
+
 # Set C++ standard
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -33,5 +39,8 @@ include_directories(${MPI_INCLUDE_PATH})
 add_definitions(${LLVM_DEFINITIONS})
 
 add_subdirectory(src)
-add_subdirectory(tests)
+
+if(BUILD_TESTING)
+    add_subdirectory(tests)
+endif()
 add_subdirectory(examples)

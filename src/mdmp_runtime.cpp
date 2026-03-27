@@ -1,219 +1,234 @@
 #include "mdmp_runtime.h"
+#include <mpi.h>
+#include <vector>
+#include <map>
+#include <cstdio>
+#include <cstdlib>
 
-// This vector stores all active non-blocking requests for the current region.
-static std::vector<MPI_Request> active_requests;
-static std::vector<int> free_request_slots;
-static int global_my_rank = -1; 
-static int global_size = 0;
+// ==========================================
+// GLOBAL STATE & UTILITIES
+// ==========================================
+static int global_my_rank = -1;
+static int global_size = -1;
 
-static bool mdmp_debug_mode = false;
-
-extern "C" {
-    void __mdmp_marker_init() noexcept {}
-    void __mdmp_marker_final() noexcept {}
-    void __mdmp_marker_commregion_begin() noexcept {}
-    void __mdmp_marker_commregion_end() noexcept {}
-    void __mdmp_marker_sync() noexcept {}
-
-    int __mdmp_marker_send(void* buffer, size_t count, int type, size_t byte_size, int sender, int dest, int tag) noexcept { return 0; }
-    int __mdmp_marker_recv(void* buffer, size_t count, int type, size_t byte_size, int receiver, int src, int tag) noexcept { return 0; }
-
-    int __mdmp_marker_reduce(void* in_buf, void* out_buf, size_t count, int type, size_t byte_size, int root, int op) noexcept { return 0; }
-    int __mdmp_marker_gather(void* send_buf, size_t send_count, void* recv_buf, int type, size_t byte_size, int root) noexcept { return 0; }
-
-    int __mdmp_marker_get_size() noexcept { return 0; }
-    int __mdmp_marker_get_rank() noexcept { return 0; }
-    double __mdmp_wtime() noexcept { return 0.0; }
-}
-
-// Helper to map Enum to MPI Types
-MPI_Datatype get_mpi_type(int mdmp_type) {
-    switch(mdmp_type) {
+// Standard MPI Type Mapper (Extend based on your specific framework needs)
+static inline MPI_Datatype get_mpi_type(int type_code) {
+    switch(type_code) {
         case 0: return MPI_INT;
         case 1: return MPI_DOUBLE;
         case 2: return MPI_FLOAT;
         case 3: return MPI_CHAR;
+        case 4: return MPI_BYTE;
         default: return MPI_BYTE;
     }
 }
 
-MPI_Op get_mpi_op(int op) {
-    switch(op) {
+static inline MPI_Op get_mpi_op(int op_code) {
+    switch(op_code) {
         case 0: return MPI_SUM;
         case 1: return MPI_MAX;
         case 2: return MPI_MIN;
+        case 3: return MPI_PROD;
         default: return MPI_SUM;
     }
 }
 
-inline int allocate_request_slot(MPI_Request req) {
+// Optional: Wrap printf in a macro or function for easy toggling
+#define DEBUG_LOG 0
+#define mdmp_log(...) do { if (DEBUG_LOG) { printf(__VA_ARGS__); fflush(stdout); } } while(0)
+
+// ==========================================
+// ASYNC REQUEST MANAGEMENT
+// ==========================================
+static std::vector<MPI_Request> active_requests;
+static std::vector<int> free_request_slots;
+
+static int allocate_request_slot(MPI_Request req) {
     if (!free_request_slots.empty()) {
-        // Recycle a dead slot! O(1) time.
-        int reused_id = free_request_slots.back();
+        int slot = free_request_slots.back();
         free_request_slots.pop_back();
-        active_requests[reused_id] = req;
-        return reused_id;
-    } else {
-        // Only grow the vector if we absolutely have to
-        int new_id = active_requests.size();
-        active_requests.push_back(req);
-        return new_id;
+        active_requests[slot] = req;
+        return slot;
     }
+    active_requests.push_back(req);
+    return active_requests.size() - 1;
 }
 
-// Centralised logging function
-void mdmp_log(const char* format, ...) {
-    if (!mdmp_debug_mode) return;
+// ==========================================
+// INSPECTOR-EXECUTOR REGISTRATION QUEUES
+// ==========================================
+struct RegisteredMsg {
+    void* buffer;
+    size_t count;
+    int type;
+    int rank; // Peer rank (Dest for Send, Src for Recv)
+    int tag;
+};
 
-    va_list args;
-    va_start(args, format);
-    vprintf(format, args);
-    va_end(args);
-}
+static std::vector<RegisteredMsg> send_queue;
+static std::vector<RegisteredMsg> recv_queue;
 
-void mdmp_set_debug(int enable) noexcept {
-    mdmp_debug_mode = (enable != 0);
-}
-
-void mdmp_init() {
-    const char* env_debug = getenv("MDMP_DEBUG");
-    if (env_debug && (env_debug[0] == '1' || env_debug[0] == 't' || env_debug[0] == 'T')) {
-        mdmp_debug_mode = true;
-    }
-    mdmp_log("[MDMP Runtime] Initializing MDMP Environment...\n");
-    // Passing NULL is valid in modern MPI and keeps our macro clean!
-    MPI_Init(NULL, NULL); 
-    MPI_Comm_rank(MPI_COMM_WORLD, &global_my_rank); 
+// ==========================================
+// CORE LIFECYCLE API
+// ==========================================
+ void mdmp_init() {
+    int provided;
+    MPI_Init_thread(NULL, NULL, MPI_THREAD_FUNNELED, &provided);
+    MPI_Comm_rank(MPI_COMM_WORLD, &global_my_rank);
     MPI_Comm_size(MPI_COMM_WORLD, &global_size);
-    mdmp_log("[MDMP Rank %d] Initialized (world size %d).\n", global_my_rank, global_size);
+    mdmp_log("[MDMP Runtime] Initialized Rank %d / %d\n", global_my_rank, global_size);
 }
 
-void mdmp_final() {
-    mdmp_log("[MDMP Runtime] Finalizing MDMP Environment...\n");
+ void mdmp_final() {
     MPI_Finalize();
 }
 
-void mdmp_commregion_begin() {
-    mdmp_log("[MDMP Runtime] Entering communication region.\n");
+ int mdmp_get_rank() { return global_my_rank; }
+ int mdmp_get_size() { return global_size; }
+ double mdmp_wtime() { return MPI_Wtime(); }
+ void mdmp_sync()    { MPI_Barrier(MPI_COMM_WORLD); }
+
+ void mdmp_commregion_begin() {
+    // Empty hook for the LLVM Pass to target
 }
 
-void mdmp_commregion_end() {
-    mdmp_log("[MDMP Runtime] Exiting communication region.\n");
-    
-    if (!active_requests.empty()) {
-        // Safety Net: Catch any dangling requests the CFG engine missed
-        MPI_Waitall(active_requests.size(), active_requests.data(), MPI_STATUSES_IGNORE);
-        // Clean up request vectors
-        active_requests.clear();
-        free_request_slots.clear();
-    }
+ void mdmp_commregion_end() {
+    // Empty hook for the LLVM Pass to target
 }
 
-void mdmp_sync() {
-    mdmp_log("[MDMP Runtime] Synchronizing...\n");
-    MPI_Barrier(MPI_COMM_WORLD);
-}
-
-int mdmp_send(void* buffer, size_t count, int type, int sender_rank, int dest_rank, int tag) {
-
-    // Check for the MDMP_IGNORE flag
-    if (sender_rank == -2 || dest_rank == -2) return MPI_REQUEST_NULL;
-
-    // Ignore out of bounds process ranks
-    if (sender_rank < 0 || sender_rank >= global_size || 
-        dest_rank < 0 || dest_rank >= global_size) {
-        return -1;
-    }
-
-    // Check if this process should be doing anything
-    if (global_my_rank != sender_rank) return MPI_REQUEST_NULL;
-
-    mdmp_log("[MDMP Runtime] Rank %d posting Isend to Rank %d (Tag: %d)...\n", global_my_rank, dest_rank, tag);
-
-    MPI_Request req;
-    MPI_Isend(buffer, count, get_mpi_type(type), dest_rank, tag, MPI_COMM_WORLD, &req);
-    
-    return allocate_request_slot(req);
-}
-
-int mdmp_recv(void* buffer, size_t count, int type, int receiver_rank, int src_rank, int tag) {
-    
-    // Check for the MDMP_IGNORE flag
-    if (receiver_rank == -2 || src_rank == -2) return MPI_REQUEST_NULL;
-
-    // Ignore out of bounds process ranks
-    if (receiver_rank < 0 || receiver_rank >= global_size || 
-        src_rank < 0 || src_rank >= global_size) {
-        return MPI_REQUEST_NULL;
-    }
-
-    // Check if this process should be doing anything
-    if (global_my_rank != receiver_rank) return MPI_REQUEST_NULL;
-
-    mdmp_log("[MDMP Runtime] Rank %d posting Irecv from Rank %d (Tag: %d)...\n", global_my_rank, src_rank, tag);
-
-    MPI_Request req;
-    MPI_Irecv(buffer, count, get_mpi_type(type), src_rank, tag, MPI_COMM_WORLD, &req);
-   
-    return allocate_request_slot(req); 
-}
-
-void mdmp_wait(int req_id) {
-    if (req_id >= 0 && req_id < active_requests.size()) {
+// ==========================================
+// UNIFIED WAIT ENGINE
+// ==========================================
+ void mdmp_wait(int req_id)  {
+    if (req_id == -1) {
+        // --- DECLARATIVE PARADIGM (Bulk Wait) ---
+        if (!active_requests.empty()) {
+            mdmp_log("[MDMP Runtime] CFG Engine triggered bulk wait on %zu requests...\n", active_requests.size());
+            MPI_Waitall(active_requests.size(), active_requests.data(), MPI_STATUSES_IGNORE);
+            active_requests.clear();
+            free_request_slots.clear();
+        }
+    } else if (req_id >= 0 && req_id < (int)active_requests.size()) {
+        // --- IMPERATIVE PARADIGM (Individual Wait) ---
         if (active_requests[req_id] != MPI_REQUEST_NULL) {
-            
             MPI_Wait(&active_requests[req_id], MPI_STATUS_IGNORE);
-            
-            // Nullify the request and recycle the slot
             active_requests[req_id] = MPI_REQUEST_NULL; 
             free_request_slots.push_back(req_id);
         }
     }
 }
 
-int mdmp_reduce(void* in_buf, void* out_buf, size_t count, int type, int root, int op) {
+// ==========================================
+// PARADIGM 1: IMPERATIVE DISPATCHERS
+// ==========================================
+ int mdmp_send(void* buffer, size_t count, int type, int sender_rank, int dest_rank, int tag) {
+    if (dest_rank == -2 || dest_rank < 0 || dest_rank >= global_size) return MPI_REQUEST_NULL;
+    if (global_my_rank != sender_rank) return MPI_REQUEST_NULL;
+
     MPI_Request req;
-    
-    // Log the operation if debugging is enabled
-    mdmp_log("[MDMP Runtime] Initiating Asynchronous Reduce (Root: %d, Op: %d)...\n", root, op);
-    
-    // MPI_Ireduce (asynchronous collective)
-    MPI_Ireduce(in_buf, out_buf, count, get_mpi_type(type), get_mpi_op(op), root, MPI_COMM_WORLD, &req);
-    
-    int req_id = active_requests.size();
-    active_requests.push_back(req);
-    return req_id;
+    MPI_Isend(buffer, count, get_mpi_type(type), dest_rank, tag, MPI_COMM_WORLD, &req);
+    return allocate_request_slot(req);
 }
 
+ int mdmp_recv(void* buffer, size_t count, int type, int receiver_rank, int src_rank, int tag) {
+    if (src_rank == -2 || src_rank < 0 || src_rank >= global_size) return MPI_REQUEST_NULL;
+    if (global_my_rank != receiver_rank) return MPI_REQUEST_NULL;
 
-int mdmp_gather(void* send_buf, size_t send_count, void* recv_buf, int type, int root) {
     MPI_Request req;
-    
-    mdmp_log("[MDMP Runtime] Initiating Asynchronous Gather (Root: %d, Count: %zu, Type: %d)...\n", root, send_count, type);
-    
-    // Explicitly cast send_count to a 32-bit int to satisfy the MPI standard safely
-    int mpi_count = (int)send_count;
-    
-    MPI_Igather(send_buf, mpi_count, get_mpi_type(type), 
-                recv_buf, mpi_count, get_mpi_type(type), 
-                root, MPI_COMM_WORLD, &req);
-    
-    int req_id = active_requests.size();
-    active_requests.push_back(req);
-    return req_id;
+    MPI_Irecv(buffer, count, get_mpi_type(type), src_rank, tag, MPI_COMM_WORLD, &req);
+    return allocate_request_slot(req);
 }
 
-int mdmp_get_size() {
-
-    return global_size;
+ int mdmp_reduce(void* sendbuf, void* recvbuf, size_t count, int type, int root_rank, int op) {
+    MPI_Request req;
+    MPI_Ireduce(sendbuf, recvbuf, count, get_mpi_type(type), get_mpi_op(op), root_rank, MPI_COMM_WORLD, &req);
+    return allocate_request_slot(req);
 }
 
-int mdmp_get_rank() {
-
-    return global_my_rank;
-
+ int mdmp_gather(void* sendbuf, size_t sendcount, void* recvbuf, int type, int root_rank) {
+    MPI_Request req;
+    // Note: recvcount in MPI_Gather is the number of elements *per* receiving rank
+    MPI_Igather(sendbuf, sendcount, get_mpi_type(type), recvbuf, sendcount, get_mpi_type(type), root_rank, MPI_COMM_WORLD, &req);
+    return allocate_request_slot(req);
 }
 
-double mdmp_wtime() {
-    return MPI_Wtime();
+// ==========================================
+// PARADIGM 2: DECLARATIVE INSPECTOR-EXECUTOR
+// ==========================================
+ void mdmp_register_send(void* buffer, size_t count, int type, int sender_rank, int dest_rank, int tag) {
+    if (dest_rank == -2 || dest_rank < 0 || dest_rank >= global_size) return;
+    if (global_my_rank != sender_rank) return; 
+    
+    send_queue.push_back({buffer, count, type, dest_rank, tag});
+}
+
+ void mdmp_register_recv(void* buffer, size_t count, int type, int receiver_rank, int src_rank, int tag) {
+    if (src_rank == -2 || src_rank < 0 || src_rank >= global_size) return;
+    if (global_my_rank != receiver_rank) return; 
+    
+    recv_queue.push_back({buffer, count, type, src_rank, tag});
+}
+
+ int mdmp_commit()  {
+    mdmp_log("[MDMP Runtime] Committing Communication Region...\n");
+
+    auto ProcessQueue = [](std::vector<RegisteredMsg>& queue, bool isSend) {
+        std::map<int, std::vector<RegisteredMsg>> buckets;
+        for (auto& msg : queue) {
+            buckets[msg.rank].push_back(msg);
+        }
+
+        for (auto& pair : buckets) {
+            int peer = pair.first;
+            auto& msgs = pair.second;
+
+            if (msgs.size() == 1) {
+                // Standard Dispatch
+                MPI_Request req;
+                if (isSend) {
+                    MPI_Isend(msgs[0].buffer, msgs[0].count, get_mpi_type(msgs[0].type), peer, msgs[0].tag, MPI_COMM_WORLD, &req);
+                } else {
+                    MPI_Irecv(msgs[0].buffer, msgs[0].count, get_mpi_type(msgs[0].type), peer, msgs[0].tag, MPI_COMM_WORLD, &req);
+                }
+                allocate_request_slot(req);
+            } 
+            else {
+                // Zero-Copy Hardware Coalescing
+                mdmp_log("[MDMP Runtime] Coalescing %zu messages for Rank %d\n", msgs.size(), peer);
+                
+                std::vector<int> block_lengths(msgs.size());
+                std::vector<MPI_Aint> displacements(msgs.size());
+                
+                for (size_t i = 0; i < msgs.size(); i++) {
+                    block_lengths[i] = (int)msgs[i].count;
+                    MPI_Get_address(msgs[i].buffer, &displacements[i]);
+                }
+
+                MPI_Datatype merged_type;
+                MPI_Type_create_hindexed(msgs.size(), block_lengths.data(), displacements.data(), get_mpi_type(msgs[0].type), &merged_type);
+                MPI_Type_commit(&merged_type);
+
+                MPI_Request req;
+                // Dispatch using absolute memory offsets mapped to MPI_BOTTOM
+                if (isSend) {
+                    MPI_Isend(MPI_BOTTOM, 1, merged_type, peer, msgs[0].tag, MPI_COMM_WORLD, &req);
+                } else {
+                    MPI_Irecv(MPI_BOTTOM, 1, merged_type, peer, msgs[0].tag, MPI_COMM_WORLD, &req);
+                }
+                
+                MPI_Type_free(&merged_type);
+                allocate_request_slot(req);
+            }
+        }
+    };
+
+    // INGRESS FIRST, EGRESS SECOND
+    ProcessQueue(recv_queue, false);
+    ProcessQueue(send_queue, true);
+
+    send_queue.clear();
+    recv_queue.clear();
+
+    // Return Magic Batch ID for the LLVM pass to Waitall
+    return -1;
 }

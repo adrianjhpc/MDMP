@@ -311,7 +311,7 @@ int main(int argc, char **argv)
     printf("=========================================================\n");fflush(stdout);
   }
 
-  for(int L=16;L<=64;L+=4){
+  for(int L=16;L<=40;L+=4){
     Benchmark(L,mpi,false,100);
   }  
 
@@ -320,7 +320,7 @@ int main(int argc, char **argv)
     printf("= Benchmarking DEVICE memory MPI performance             \n");
     printf("=========================================================\n");fflush(stdout);
   }
-  for(int L=16;L<=64;L+=4){
+  for(int L=16;L<=40;L+=4){
     Benchmark(L,mpi,true,100);
   }  
 
