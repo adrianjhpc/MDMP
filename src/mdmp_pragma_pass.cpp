@@ -29,9 +29,20 @@ PreservedAnalyses MDMPPragmaPass::run(Module &M, ModuleAnalysisManager &MAM) {
     return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }
 
+
 bool MDMPPragmaPass::runOnFunction(Function &F, AAResults &AA, DominatorTree &DT, LoopInfo &LI) {
-    PendingRequests.clear(); 
+    PendingRequests.clear();
+    
     transformPragmasToCalls(F, AA, DT, LI);
+    
+    // If the function ends and we still have pending imperative calls 
+    // that weren't part of a CommRegion, trace and inject their waits now!
+    if (!PendingRequests.empty()) {
+        LLVMContext &Ctx = F.getContext();
+        Module *M = F.getParent();
+        injectWaitsForRegion(nullptr, AA, LI, Ctx, M);
+    }
+    
     return true;
 }
 
@@ -48,7 +59,8 @@ void MDMPPragmaPass::transformPragmasToCalls(Function &F, AAResults &AA, Dominat
     FunctionCallee runtime_get_rank = M->getOrInsertFunction("mdmp_get_rank", Type::getInt32Ty(Ctx));
     FunctionCallee runtime_get_size = M->getOrInsertFunction("mdmp_get_size", Type::getInt32Ty(Ctx));
     FunctionCallee runtime_wtime = M->getOrInsertFunction("mdmp_wtime", Type::getDoubleTy(Ctx));
-
+    FunctionCallee runtime_set_debug = M->getOrInsertFunction("mdmp_set_debug", Type::getVoidTy(Ctx), Type::getInt32Ty(Ctx));
+ 
     // Imperative functionality apis (Returns i32 Req ID) 
     FunctionCallee runtime_send = M->getOrInsertFunction("mdmp_send", 
         Type::getInt32Ty(Ctx), PointerType::getUnqual(Ctx), Type::getInt64Ty(Ctx), 
@@ -72,22 +84,48 @@ void MDMPPragmaPass::transformPragmasToCalls(Function &F, AAResults &AA, Dominat
         PointerType::getUnqual(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx));   
     if (Function *FGather = dyn_cast<Function>(runtime_gather.getCallee())) { FGather->addFnAttr(Attribute::NoUnwind); }
 
+    FunctionCallee runtime_allreduce = M->getOrInsertFunction("mdmp_allreduce", 
+        Type::getInt32Ty(Ctx), PointerType::getUnqual(Ctx), PointerType::getUnqual(Ctx), 
+        Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx));
+    if (Function *FAllreduce = dyn_cast<Function>(runtime_allreduce.getCallee())) { FAllreduce->addFnAttr(Attribute::NoUnwind); }
+    
+    FunctionCallee runtime_allgather = M->getOrInsertFunction("mdmp_allgather",
+        Type::getInt32Ty(Ctx), PointerType::getUnqual(Ctx), Type::getInt64Ty(Ctx), 
+        PointerType::getUnqual(Ctx), Type::getInt32Ty(Ctx));
+    if (Function *FAllgather = dyn_cast<Function>(runtime_allgather.getCallee())) { FAllgather->addFnAttr(Attribute::NoUnwind); }
+
+
     // Declarative functionality apis (Inspector-Executor)
     FunctionCallee runtime_register_send = M->getOrInsertFunction("mdmp_register_send", 
         Type::getVoidTy(Ctx), PointerType::getUnqual(Ctx), Type::getInt64Ty(Ctx), 
         Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx));
+    if (Function *FRegSend = dyn_cast<Function>(runtime_register_send.getCallee())) { FRegSend->addFnAttr(Attribute::NoUnwind); }
         
     FunctionCallee runtime_register_recv = M->getOrInsertFunction("mdmp_register_recv", 
         Type::getVoidTy(Ctx), PointerType::getUnqual(Ctx), Type::getInt64Ty(Ctx), 
         Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx));
+    if (Function *FRegRecv = dyn_cast<Function>(runtime_register_recv.getCallee())) { FRegRecv->addFnAttr(Attribute::NoUnwind); }
 
     FunctionCallee runtime_register_reduce = M->getOrInsertFunction("mdmp_register_reduce", 
         Type::getVoidTy(Ctx), PointerType::getUnqual(Ctx), PointerType::getUnqual(Ctx), 
         Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx));
+    if (Function *FRegReduce = dyn_cast<Function>(runtime_register_reduce.getCallee())) { FRegReduce->addFnAttr(Attribute::NoUnwind); }
         
     FunctionCallee runtime_register_gather = M->getOrInsertFunction("mdmp_register_gather", 
         Type::getVoidTy(Ctx), PointerType::getUnqual(Ctx), Type::getInt64Ty(Ctx), 
         PointerType::getUnqual(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx));
+    if (Function *FRegGather = dyn_cast<Function>(runtime_register_gather.getCallee())) { FRegGather->addFnAttr(Attribute::NoUnwind); }
+
+    FunctionCallee runtime_register_allreduce = M->getOrInsertFunction("mdmp_register_allreduce",
+        Type::getVoidTy(Ctx), PointerType::getUnqual(Ctx), PointerType::getUnqual(Ctx), 
+        Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx));
+    if (Function *FRegAllreduce = dyn_cast<Function>(runtime_register_allreduce.getCallee())) { FRegAllreduce->addFnAttr(Attribute::NoUnwind); }
+
+    FunctionCallee runtime_register_allgather = M->getOrInsertFunction("mdmp_register_allgather",
+        Type::getVoidTy(Ctx), PointerType::getUnqual(Ctx), Type::getInt64Ty(Ctx), 
+        PointerType::getUnqual(Ctx), Type::getInt32Ty(Ctx));
+    if (Function *FRegAllgather = dyn_cast<Function>(runtime_register_allgather.getCallee())) { FRegAllgather->addFnAttr(Attribute::NoUnwind); }
+
 
     FunctionCallee runtime_commit = M->getOrInsertFunction("mdmp_commit", Type::getInt32Ty(Ctx));
 
@@ -226,6 +264,65 @@ void MDMPPragmaPass::transformPragmasToCalls(Function &F, AAResults &AA, Dominat
                 hoistInitiation(NewCall, Locs, AA, DT, LI, false);
                 PendingRequests.push_back({Locs, NewCall});
                 toDelete.push_back(CI);
+            }
+            else if (Name == "__mdmp_marker_allreduce" || Name == "__mdmp_marker_register_allreduce") {
+                Value *InBuf = CI->getArgOperand(0); 
+                Value *OutBuf = CI->getArgOperand(1);
+                Value *ByteSize = CI->getArgOperand(4); 
+
+                LocationSize LocSize = LocationSize::beforeOrAfterPointer();
+                if (auto *ConstBytes = dyn_cast<ConstantInt>(ByteSize)) { 
+                    LocSize = LocationSize::precise(ConstBytes->getZExtValue()); 
+                }
+
+                FunctionCallee target_func = (Name == "__mdmp_marker_allreduce") ? runtime_allreduce : runtime_register_allreduce;
+                CallInst *NewCall = Builder.CreateCall(target_func, 
+                    {InBuf, OutBuf, CI->getArgOperand(2), CI->getArgOperand(3), CI->getArgOperand(5)});
+                CI->replaceAllUsesWith(NewCall);
+                toDelete.push_back(CI);
+
+                if (Name == "__mdmp_marker_allreduce") {
+                    AsyncRequest Req;
+                    Req.RuntimeCall = NewCall;
+                    Req.Locs.push_back(MemoryLocation(InBuf, LocSize));
+                    Req.Locs.push_back(MemoryLocation(OutBuf, LocSize));
+                    PendingRequests.push_back(Req);
+                    llvm::errs() << "[MDMP PASS DEBUG] Caught Imperative Allreduce. Added to PendingRequests.\n";
+                } else {
+                    ActiveRegionLocs.push_back(MemoryLocation(InBuf, LocSize));
+                    ActiveRegionLocs.push_back(MemoryLocation(OutBuf, LocSize));
+                }
+            }
+            else if (Name == "__mdmp_marker_allgather" || Name == "__mdmp_marker_register_allgather") {
+                Value *InBuf = CI->getArgOperand(0); 
+                Value *OutBuf = CI->getArgOperand(2);
+                Value *ByteSize = CI->getArgOperand(4); 
+
+                LocationSize LocSize = LocationSize::beforeOrAfterPointer();
+                if (auto *ConstBytes = dyn_cast<ConstantInt>(ByteSize)) { 
+                    // The macro only passes the size of the SEND buffer.
+                    // We must multiply it by the global comm size to protect the whole array.
+                    // For safety in the pass without looking up comm size, we just use unknown.
+                    LocSize = LocationSize::beforeOrAfterPointer(); 
+                }
+
+                FunctionCallee target_func = (Name == "__mdmp_marker_allgather") ? runtime_allgather : runtime_register_allgather;
+                CallInst *NewCall = Builder.CreateCall(target_func, 
+                    {InBuf, CI->getArgOperand(1), OutBuf, CI->getArgOperand(3)});
+                CI->replaceAllUsesWith(NewCall);
+                toDelete.push_back(CI);
+
+                if (Name == "__mdmp_marker_allgather") {
+                    AsyncRequest Req;
+                    Req.RuntimeCall = NewCall;
+                    Req.Locs.push_back(MemoryLocation(InBuf, LocSize));
+                    Req.Locs.push_back(MemoryLocation(OutBuf, LocSize));
+                    PendingRequests.push_back(Req);
+                    llvm::errs() << "[MDMP PASS DEBUG] Caught Imperative Allgather. Added to PendingRequests.\n";
+                } else {
+                    ActiveRegionLocs.push_back(MemoryLocation(InBuf, LocSize));
+                    ActiveRegionLocs.push_back(MemoryLocation(OutBuf, LocSize));
+                }
             } 
             // ==================================================================
             // Process the end of a region to stop things going beyond that point
@@ -239,8 +336,14 @@ void MDMPPragmaPass::transformPragmasToCalls(Function &F, AAResults &AA, Dominat
             else if (Name == "__mdmp_marker_get_size") { CallInst *NewCall = Builder.CreateCall(runtime_get_size); CI->replaceAllUsesWith(NewCall); toDelete.push_back(CI); }
             else if (Name == "__mdmp_marker_init") { Builder.CreateCall(runtime_init); toDelete.push_back(CI); }
             else if (Name == "__mdmp_marker_final") { Builder.CreateCall(runtime_final); toDelete.push_back(CI); }
-            else if (Name == "__mdmp_marker_sync") { Builder.CreateCall(runtime_sync); toDelete.push_back(CI); } 
+            else if (Name == "__mdmp_marker_sync") { Builder.CreateCall(runtime_sync); toDelete.push_back(CI); }
             else if (Name == "__mdmp_marker_wtime") { CallInst *NewCall = Builder.CreateCall(runtime_wtime); CI->replaceAllUsesWith(NewCall); toDelete.push_back(CI); }
+            else if (Name == "__mdmp_marker_set_debug") {
+                Value *EnableArg = CI->getArgOperand(0); 
+                CallInst *NewCall = Builder.CreateCall(runtime_set_debug, {EnableArg});
+                CI->replaceAllUsesWith(NewCall);
+                toDelete.push_back(CI);
+            }
         }
     }
     for (Instruction *I : toDelete) I->eraseFromParent();
@@ -336,57 +439,85 @@ void MDMPPragmaPass::injectWaitsForRegion(Instruction *RegionEnd, AAResults &AA,
                         if (Function *CalledFn = Call->getCalledFunction()) {
                             StringRef FnName = CalledFn->getName();
                             if (FnName == "mdmp_send" || FnName == "mdmp_recv" || FnName == "mdmp_reduce" || 
+                                FnName == "mdmp_allreduce" || FnName == "mdmp_allgather" || 
                                 FnName == "mdmp_gather" || FnName == "mdmp_commit" || 
                                 FnName == "mdmp_register_send" || FnName == "mdmp_register_recv" ||
                                 FnName == "mdmp_register_reduce" || FnName == "mdmp_register_gather" ||
+                                FnName == "mdmp_register_allreduce" || FnName == "mdmp_register_allgather" ||
                                 FnName.starts_with("__mdmp_marker_")) {
                                 isAsyncCall = true;
                             }
                         }
                     }
                     
-                    bool isSafeMemOp = false;
+                    // Manual check for exact pointer matches (bypasses AA limitations)
+                    bool exactMatch = false;
                     if (auto *LInst = dyn_cast<LoadInst>(Inst)) {
-                        isSafeMemOp = true; 
-                        const Value *BaseObj = getUnderlyingObject(LInst->getPointerOperand());
+                        Value *LoadPtr = LInst->getPointerOperand()->stripPointerCasts();
                         for (auto &Loc : Req.Locs) {
-                            if (BaseObj == getUnderlyingObject(Loc.Ptr)) { isSafeMemOp = false; break; }
+                            if (LoadPtr == Loc.Ptr->stripPointerCasts() || 
+                                getUnderlyingObject(LoadPtr) == getUnderlyingObject(Loc.Ptr)) { 
+                                exactMatch = true; break; 
+                            }
                         }
                     } else if (auto *SInst = dyn_cast<StoreInst>(Inst)) {
-                        isSafeMemOp = true;
-                        const Value *BaseObj = getUnderlyingObject(SInst->getPointerOperand());
+                        Value *StorePtr = SInst->getPointerOperand()->stripPointerCasts();
                         for (auto &Loc : Req.Locs) {
-                            if (BaseObj == getUnderlyingObject(Loc.Ptr)) { isSafeMemOp = false; break; }
-                        }
-                    }
-                    
-                    bool memoryCollision = false;
-                    if (!isAsyncCall && !isSafeMemOp) {
-                        for (auto &Loc : Req.Locs) {
-                            if (isModOrRefSet(AA.getModRefInfo(Inst, Loc))) { memoryCollision = true; break; }
+                            if (StorePtr == Loc.Ptr->stripPointerCasts() || 
+                                getUnderlyingObject(StorePtr) == getUnderlyingObject(Loc.Ptr)) { 
+                                exactMatch = true; break; 
+                            }
                         }
                     }
 
+                    // Collision Router
+                    bool memoryCollision = false;
+                    if (!isAsyncCall) {
+                        if (isa<LoadInst>(Inst) || isa<StoreInst>(Inst)) {
+                            // If it's a direct memory read/write, trust our exactMatch 100%.
+                            // This prevents Alias Analysis from panicking over harmless loop counters.
+                            memoryCollision = exactMatch;
+                        } else {
+                            // It's a CallInst or something opaque. Ask Alias Analysis to be safe.
+                            for (auto &Loc : Req.Locs) {
+                                if (isModOrRefSet(AA.getModRefInfo(Inst, Loc))) { 
+                                    memoryCollision = true; break; 
+                                }
+                            }
+                        }
+                    }
+
+                    // Inject and Break
                     if (memoryCollision) {
+                        llvm::errs() << "[MDMP PASS DEBUG] Collision triggered by: " << *Inst << "\n";
                         WaitInsertionPoints.push_back(Inst); foundWaitPoint = true; break;
                     }
                 }
             }
-            
+           
             if (!foundWaitPoint) {
+                bool hasSuccessors = false;
                 for (BasicBlock *Succ : successors(BB)) {
+                    hasSuccessors = true;
                     // Loop boundary protection
                     if (LI.getLoopDepth(Succ) > LI.getLoopDepth(Req.RuntimeCall->getParent())) {
+                        llvm::errs() << "[MDMP PASS DEBUG] Wait forced at Loop Boundary.\n";
                         WaitInsertionPoints.push_back(BB->getTerminator());
                     } else {
                         Worklist.push_back({Succ, Succ->begin()});
                     }
                 }
-            }
+                // If we hit the end of the function (e.g., return block)
+                if (!hasSuccessors) {
+                    llvm::errs() << "[MDMP PASS DEBUG] Wait forced at End of Function.\n";
+                    WaitInsertionPoints.push_back(BB->getTerminator());
+                }
+            } 
         }
         
         SmallPtrSet<Instruction*, 4> UniqueWaitPoints(WaitInsertionPoints.begin(), WaitInsertionPoints.end());
         for (Instruction *InsertPt : UniqueWaitPoints) {
+            llvm::errs() << "[MDMP PASS DEBUG] Successfully injected Wait instruction!\n";
             IRBuilder<> Builder(InsertPt);
             Builder.CreateCall(runtime_wait, {Req.RuntimeCall});
         }

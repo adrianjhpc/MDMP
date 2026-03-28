@@ -13,7 +13,7 @@ int  mdmp_get_rank();
 int  mdmp_get_size();
 double mdmp_wtime();
 void mdmp_sync();
-
+void mdmp_set_debug(int enabled);
 void mdmp_commregion_begin();
 void mdmp_commregion_end();
 
@@ -29,6 +29,9 @@ int mdmp_recv(void* buffer, size_t count, int type, int receiver_rank, int src_r
 int mdmp_reduce(void* sendbuf, void* recvbuf, size_t count, int type, int root_rank, int op);
 int mdmp_gather(void* sendbuf, size_t sendcount, void* recvbuf, int type, int root_rank);
 
+int mdmp_allreduce(void* sendbuf, void* recvbuf, size_t count, int type, int op);
+int mdmp_allgather(void* sendbuf, size_t count, void* recvbuf, int type);
+
 // ========================================================================
 // Declarative API (Inspector-Executor, returns -1 Batch ID)
 // ========================================================================
@@ -38,10 +41,22 @@ void mdmp_register_recv(void* buffer, size_t count, int type, int receiver_rank,
 void mdmp_register_reduce(void* sendbuf, void* recvbuf, size_t count, int type, int root_rank, int op);
 void mdmp_register_gather(void* sendbuf, size_t sendcount, void* recvbuf, int type, int root_rank);
 
+void mdmp_register_allreduce(void* sendbuf, void* recvbuf, size_t count, int type, int op);
+void mdmp_register_allgather(void* sendbuf, size_t count, void* recvbuf, int type);
+
+
 int  mdmp_commit();
 
 #ifdef __cplusplus
 }
 #endif
+
+// Dynamic logging macro
+#define mdmp_log(...) do { \
+    if (mdmp_debug_enabled) { \
+        printf(__VA_ARGS__); \
+        fflush(stdout); \
+    } \
+} while(0)
 
 #endif // MDMP_RUNTIME_H
