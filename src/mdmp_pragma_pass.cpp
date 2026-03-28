@@ -60,6 +60,8 @@ void MDMPPragmaPass::transformPragmasToCalls(Function &F, AAResults &AA, Dominat
     FunctionCallee runtime_get_size = M->getOrInsertFunction("mdmp_get_size", Type::getInt32Ty(Ctx));
     FunctionCallee runtime_wtime = M->getOrInsertFunction("mdmp_wtime", Type::getDoubleTy(Ctx));
     FunctionCallee runtime_set_debug = M->getOrInsertFunction("mdmp_set_debug", Type::getVoidTy(Ctx), Type::getInt32Ty(Ctx));
+    FunctionCallee runtime_abort = M->getOrInsertFunction("mdmp_abort", Type::getVoidTy(Ctx), Type::getInt32Ty(Ctx));
+
  
     // Imperative functionality apis (Returns i32 Req ID) 
     FunctionCallee runtime_send = M->getOrInsertFunction("mdmp_send", 
@@ -341,6 +343,12 @@ void MDMPPragmaPass::transformPragmasToCalls(Function &F, AAResults &AA, Dominat
             else if (Name == "__mdmp_marker_set_debug") {
                 Value *EnableArg = CI->getArgOperand(0); 
                 CallInst *NewCall = Builder.CreateCall(runtime_set_debug, {EnableArg});
+                CI->replaceAllUsesWith(NewCall);
+                toDelete.push_back(CI);
+            }
+            else if (Name == "__mdmp_marker_abort") {
+                Value *EnableArg = CI->getArgOperand(0);
+                CallInst *NewCall = Builder.CreateCall(runtime_abort, {EnableArg});
                 CI->replaceAllUsesWith(NewCall);
                 toDelete.push_back(CI);
             }

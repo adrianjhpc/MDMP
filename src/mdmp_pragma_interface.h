@@ -27,7 +27,6 @@
         default: 0 \
     )
 #endif
-
     void __mdmp_marker_init() MDMP_NOEXCEPT;
     void __mdmp_marker_final() MDMP_NOEXCEPT;
     int __mdmp_marker_get_size() MDMP_NOEXCEPT;
@@ -36,7 +35,8 @@
     void __mdmp_marker_commregion_end() MDMP_NOEXCEPT;
     void __mdmp_marker_sync() MDMP_NOEXCEPT;
     double __mdmp_marker_wtime() MDMP_NOEXCEPT;
-    void __mdmp_set_debug(int enable) MDMP_NOEXCEPT;
+    void __mdmp_marker_set_debug(int enable) MDMP_NOEXCEPT;
+    void __mdmp_marker_abort(int error_code) MDMP_NOEXCEPT;
 
     int __mdmp_marker_send(void* buffer, size_t count, int type, size_t byte_size, int sender, int dest, int tag) MDMP_NOEXCEPT;
     int __mdmp_marker_recv(void* buffer, size_t count, int type, size_t byte_size, int receiver, int src, int tag) MDMP_NOEXCEPT;
@@ -117,6 +117,8 @@
 #define MDMP_GET_RANK()         __mdmp_marker_get_rank()
 #define MDMP_RANK               __mdmp_marker_get_rank() // Alias for cleaner maths
 #define MDMP_WTIME()            __mdmp_marker_wtime()
+
+#define MDMP_ABORT(error_code) __mdmp_marker_abort(error_code)
 
 #define MDMP_SET_DEBUG(enable)  __mdmp_marker_set_debug(enable)
 

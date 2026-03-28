@@ -17,6 +17,8 @@ void mdmp_set_debug(int enabled);
 void mdmp_commregion_begin();
 void mdmp_commregion_end();
 
+void mdmp_abort(int error_code);
+
 // Accepts a specific request ID (Imperative) or -1 for a bulk Waitall (Declarative)
 void mdmp_wait(int req_id);
 

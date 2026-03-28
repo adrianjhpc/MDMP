@@ -108,6 +108,15 @@ void mdmp_set_debug(int enable) {
 void mdmp_commregion_begin() {}
 void mdmp_commregion_end() {}
 
+void mdmp_abort(int error_code) {
+    // Flush any pending logs so we know exactly who called this function
+    fflush(stdout); 
+    mdmp_log("[MDMP FATAL] Rank %d called ABORT with error code %d. Terminating...\n", global_my_rank, error_code);
+    
+    // MDMP uses MPI under the hood, so we still trigger the hardware abort
+    MPI_Abort(MPI_COMM_WORLD, error_code);
+}
+
 void mdmp_wait(int req_id) {
     mdmp_log("[MDMP] Rank %d WAITING on request ID: %d\n", global_my_rank, req_id);
     if (req_id == -1) {
