@@ -1,0 +1,68 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <vector>
+#include "mdmp_pragma_interface.h"
+
+struct Particle {
+    double x, y, z;
+    double vx, vy, vz;
+    int id;
+    int type;
+};
+
+int main(int argc, char** argv) {
+    MDMP_COMM_INIT();
+    int rank = MDMP_GET_RANK();
+    int size = MDMP_GET_SIZE();
+
+    const int num_migrating = 10000; // 10,000 particles cross the boundary
+    const int iterations = 100;
+
+    std::vector<Particle> send_list(num_migrating);
+    std::vector<Particle> recv_list(num_migrating);
+
+    int right_neighbor = (rank + 1) % size;
+    int left_neighbor = (rank - 1 + size) % size;
+
+    MDMP_COMM_SYNC();
+    double start_time = MDMP_WTIME();
+
+    for (int iter = 0; iter < iterations; ++iter) {
+        
+        MDMP_COMMREGION_BEGIN();
+
+        for (int i = 0; i < num_migrating; ++i) {
+            MDMP_REGISTER_SEND(&send_list[i], sizeof(Particle), rank, right_neighbor, 0);
+            MDMP_REGISTER_RECV(&recv_list[i], sizeof(Particle), rank, left_neighbor, 0);
+        }
+
+        // The MDMP engine sees 10k items going to the same peer with the same tag.
+        // It builds the hindexed zero-copy datatype and fires 1 MPI_Isend.
+        MDMP_COMMIT(); 
+
+        double dummy_work = 0.0;
+        for (int i = 0; i < 100000; ++i) {
+            dummy_work += 0.0001; 
+        }
+
+        MDMP_COMMREGION_END();
+
+        for (int i = 0; i < num_migrating; ++i) {
+            send_list[i].x = recv_list[i].x + dummy_work; 
+        }
+    }
+
+    double end_time = MDMP_WTIME();
+
+    if (rank == 0) {
+        printf("------------------------------------------------\n");
+        printf(" BENCHMARK: N-Body Particle Exchange (Declarative)\n");
+        printf("------------------------------------------------\n");
+        printf("Particles Exchanged: %d per step\n", num_migrating);
+        printf("Iterations: %d\n", iterations);
+        printf("Elapsed Time: %f seconds\n", end_time - start_time);
+    }
+
+    MDMP_COMM_FINAL();
+    return 0;
+}

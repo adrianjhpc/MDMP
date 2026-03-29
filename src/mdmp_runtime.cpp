@@ -251,33 +251,34 @@ int mdmp_commit() {
     auto ProcessQueue = [](std::vector<RegisteredMsg>& queue, bool isSend) {
         if (queue.empty()) return;
 
-        // Sort by rank to group messages for the same neighbor
+        // Sort by both rank and tag to group identical destinations/tags together
         std::stable_sort(queue.begin(), queue.end(), [](const RegisteredMsg& a, const RegisteredMsg& b) {
-            return a.rank < b.rank;
+            if (a.rank != b.rank) return a.rank < b.rank;
+            return a.tag < b.tag;
         });
 
         size_t i = 0;
         while (i < queue.size()) {
             int peer = queue[i].rank;
+            int current_tag = queue[i].tag; // Grab the tag for this group
             size_t j = i + 1;
             
-            // Group messages for the same peer
-            while (j < queue.size() && queue[j].rank == peer) {
+            // Group messages that share both the same peer and same tag
+            while (j < queue.size() && queue[j].rank == peer && queue[j].tag == current_tag) {
                 j++;
             }
 
             size_t count = j - i;
-            // Only coalesce if multiple messages exist for the SAME peer AND SAME tag
-            // If tags differ, we must send them individually but still in this loop
-            if (count == 1 || queue[i].tag != queue[i+1].tag) { 
-                for(size_t k = i; k < j; ++k) {
-                    MPI_Request req;
-                    if (isSend) MPI_Isend(queue[k].buffer, (int)queue[k].count, get_mpi_type(queue[k].type), peer, queue[k].tag, MPI_COMM_WORLD, &req);
-                    else        MPI_Irecv(queue[k].buffer, (int)queue[k].count, get_mpi_type(queue[k].type), peer, queue[k].tag, MPI_COMM_WORLD, &req);
-                    allocate_request_slot(req);
-                }
-            } else {
-                // Coalesce Path (Multiple messages, same peer, same tag)
+            
+            // Fire individually if there is only 1 message
+            if (count == 1) { 
+                MPI_Request req;
+                if (isSend) MPI_Isend(queue[i].buffer, (int)queue[i].count, get_mpi_type(queue[i].type), peer, current_tag, MPI_COMM_WORLD, &req);
+                else        MPI_Irecv(queue[i].buffer, (int)queue[i].count, get_mpi_type(queue[i].type), peer, current_tag, MPI_COMM_WORLD, &req);
+                allocate_request_slot(req);
+            } 
+            // 4. Fire the Zero-Copy Hardware Datatype if there are multiple
+            else {
                 std::vector<int> blens(count);
                 std::vector<MPI_Aint> disps(count);
                 for (size_t k = 0; k < count; k++) {
@@ -287,11 +288,11 @@ int mdmp_commit() {
                 MPI_Datatype ntype;
                 MPI_Type_create_hindexed((int)count, blens.data(), disps.data(), get_mpi_type(queue[i].type), &ntype);
                 MPI_Type_commit(&ntype);
-                custom_types_to_free.push_back(ntype);
+                custom_types_to_free.push_back(ntype); // Saved so mdmp_wait can free it
 
                 MPI_Request req;
-                if (isSend) MPI_Isend(MPI_BOTTOM, 1, ntype, peer, queue[i].tag, MPI_COMM_WORLD, &req);
-                else        MPI_Irecv(MPI_BOTTOM, 1, ntype, peer, queue[i].tag, MPI_COMM_WORLD, &req);
+                if (isSend) MPI_Isend(MPI_BOTTOM, 1, ntype, peer, current_tag, MPI_COMM_WORLD, &req);
+                else        MPI_Irecv(MPI_BOTTOM, 1, ntype, peer, current_tag, MPI_COMM_WORLD, &req);
                 allocate_request_slot(req);
             }
             i = j;

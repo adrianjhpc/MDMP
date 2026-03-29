@@ -1,0 +1,67 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <vector>
+#include <mpi.h>
+
+struct Particle {
+    double x, y, z;
+    double vx, vy, vz;
+    int id;
+    int type;
+};
+
+int main(int argc, char** argv) {
+    MPI_Init(&argc, &argv);
+    
+    int rank, size;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    MPI_Comm_size(MPI_COMM_WORLD, &size);
+
+    const int num_migrating = 10000; // 10,000 particles cross the boundary
+    const int iterations = 100;
+
+    std::vector<Particle> send_list(num_migrating);
+    std::vector<Particle> recv_list(num_migrating);
+
+    int right_neighbor = (rank + 1) % size;
+    int left_neighbor = (rank - 1 + size) % size;
+
+    MPI_Barrier(MPI_COMM_WORLD);
+    double start_time = MPI_Wtime();
+
+    for (int iter = 0; iter < iterations; ++iter) {
+        
+        std::vector<MPI_Request> reqs(num_migrating * 2);
+        int req_idx = 0;
+
+        for (int i = 0; i < num_migrating; ++i) {
+            MPI_Isend(&send_list[i], sizeof(Particle), MPI_BYTE, right_neighbor, 0, MPI_COMM_WORLD, &reqs[req_idx++]);
+            MPI_Irecv(&recv_list[i], sizeof(Particle), MPI_BYTE, left_neighbor, 0, MPI_COMM_WORLD, &reqs[req_idx++]);
+        }
+
+        double dummy_work = 0.0;
+        for (int i = 0; i < 100000; ++i) {
+            dummy_work += 0.0001; 
+        }
+
+        MPI_Waitall(reqs.size(), reqs.data(), MPI_STATUSES_IGNORE);
+
+        for (int i = 0; i < num_migrating; ++i) {
+            send_list[i].x = recv_list[i].x + dummy_work; 
+        }
+    }
+
+    double end_time = MPI_Wtime();
+
+    if (rank == 0) {
+        printf("------------------------------------------------\n");
+        printf(" BENCHMARK: N-Body Particle Exchange (Raw MPI)\n");
+        printf("------------------------------------------------\n");
+        printf("Particles Exchanged: %d per step\n", num_migrating);
+        printf("Iterations: %d\n", iterations);
+        printf("Elapsed Time: %f seconds\n", end_time - start_time);
+    }
+
+    MPI_Finalize();
+    return 0;
+}

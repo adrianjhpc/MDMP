@@ -7,7 +7,9 @@
     #include <type_traits>
     #define MDMP_NOEXCEPT noexcept
 
-    template<typename T> struct MDMPTypeTraits;
+    // Default to MPI_BTYE if an unknown type is passed
+    template<typename T> struct MDMPTypeTraits { static const int type = 4; };
+    
     template<> struct MDMPTypeTraits<int>    { static const int type = 0; };
     template<> struct MDMPTypeTraits<double> { static const int type = 1; };
     template<> struct MDMPTypeTraits<float>  { static const int type = 2; };
@@ -24,8 +26,9 @@
         double: 1, \
         float: 2, \
         char: 3, \
-        default: 0 \
+        default: 4 \
     )
+
 #endif
     void __mdmp_marker_init() MDMP_NOEXCEPT;
     void __mdmp_marker_final() MDMP_NOEXCEPT;

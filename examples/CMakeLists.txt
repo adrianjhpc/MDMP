@@ -92,6 +92,8 @@ endfunction()
 # ==============================================================================
 
 add_comparison_example(heat c LINK_LIBS -lm)
+add_comparison_example(heat_2d cpp)
 add_comparison_example(satisfy cpp)
 add_comparison_example(wave cpp)
 add_comparison_example(grid_halo cpp RANKS 16 RUN_ARGS --mpi 2.2.2.2)
+add_comparison_example(nbody cpp)
