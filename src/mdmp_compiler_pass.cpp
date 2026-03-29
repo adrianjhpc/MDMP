@@ -427,11 +427,17 @@ void MDMPPass::hoistInitiation(CallInst *CI, std::vector<MemoryLocation> &Locs, 
 void MDMPPass::injectWaitsForRegion(Instruction *RegionEnd, AAResults &AA, LoopInfo &LI, LLVMContext &Ctx, Module *M) {
     FunctionCallee runtime_wait = M->getOrInsertFunction("mdmp_wait", Type::getVoidTy(Ctx), Type::getInt32Ty(Ctx));
 
+    struct TraversalState { BasicBlock *BB; BasicBlock::iterator StartIt; };
+
+    SmallVector<Instruction*, 16> WaitInsertionPoints;
+    SmallPtrSet<BasicBlock*, 16> Visited;
+    SmallVector<TraversalState, 16> Worklist;
+
     for (auto &Req : PendingRequests) {
-        SmallVector<Instruction*, 4> WaitInsertionPoints;
-        SmallPtrSet<BasicBlock*, 8> Visited;
-        
-        struct TraversalState { BasicBlock *BB; BasicBlock::iterator StartIt; };
+        WaitInsertionPoints.clear();
+        Visited.clear();
+        Worklist.clear();
+
         SmallVector<TraversalState, 8> Worklist;
         
         BasicBlock::iterator StartIt = Req.RuntimeCall->getIterator();

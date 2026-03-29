@@ -158,12 +158,11 @@ void mdmp_set_debug(int enable) {
 void mdmp_commregion_begin() {}
 void mdmp_commregion_end() {}
 
+
 void mdmp_abort(int error_code) {
-    // Flush any pending logs so we know exactly who called this function
     fflush(stdout); 
-    mdmp_log("[MDMP FATAL] Rank %d called ABORT with error code %d. Terminating...\n", global_my_rank, error_code);
-    
-    // MDMP uses MPI under the hood, so we still trigger the hardware abort
+    fprintf(stderr, "[MDMP FATAL] Rank %d called ABORT with error code %d. Terminating...\n", global_my_rank, error_code);
+    fflush(stderr);
     MPI_Abort(MPI_COMM_WORLD, error_code);
 }
 
@@ -291,6 +290,10 @@ void mdmp_register_allgather(void* sb, size_t c, void* rb, int t, size_t bytes) 
 int mdmp_commit() {
     mdmp_log("[MDMP] Rank %d ENTERING COMMIT. Processing %zu Sends, %zu Recvs, %zu Allreduces, %zu Allgathers\n", 
              global_my_rank, send_queue.size(), recv_queue.size(), allreduce_queue.size(), allgather_queue.size());
+
+    static std::vector<int> blens_buffer;
+    static std::vector<MPI_Aint> disps_buffer;
+
     // Process P2P queues
     auto ProcessQueue = [](std::vector<RegisteredMsg>& queue, bool isSend) {
         if (queue.empty()) return;
@@ -325,15 +328,17 @@ int mdmp_commit() {
             } 
             // 4. Fire the Zero-Copy Hardware Datatype if there are multiple
             else {
-                std::vector<int> blens(count);
-                std::vector<MPI_Aint> disps(count);
-                for (size_t k = 0; k < count; k++) {
-                    blens[k] = (int)queue[i + k].bytes;
-                    MPI_Get_address(queue[i + k].buffer, &disps[k]);
-                }
-                MPI_Datatype ntype;
+
+                blens_buffer.resize(count);
+                disps_buffer.resize(count);
                 
-                MPI_Type_create_hindexed((int)count, blens.data(), disps.data(), MPI_BYTE, &ntype);
+                for (size_t k = 0; k < count; k++) {
+                     blens_buffer[k] = (int)queue[i + k].bytes;
+                     MPI_Get_address(queue[i + k].buffer, &disps_buffer[k]);
+                }
+        
+                MPI_Datatype ntype;
+                MPI_Type_create_hindexed((int)count, blens_buffer.data(), disps_buffer.data(), MPI_BYTE, &ntype);
                 MPI_Type_commit(&ntype);
                 custom_types_to_free.push_back(ntype); 
 
