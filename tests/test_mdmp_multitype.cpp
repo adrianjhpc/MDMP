@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
-#include "mdmp_pragma_interface.h"
+#include "mdmp_interface.h"
 
 // A custom 12-byte struct
 struct Vector3 {

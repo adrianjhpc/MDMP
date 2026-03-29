@@ -1,4 +1,4 @@
-#include "mdmp_pragma_pass.h"
+#include "mdmp_compiler_pass.h"
 #include "llvm/Analysis/ValueTracking.h" 
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
@@ -14,7 +14,7 @@ struct AsyncRequest {
 // Global tracker for the current function being processed
 std::vector<AsyncRequest> PendingRequests;
 
-PreservedAnalyses MDMPPragmaPass::run(Module &M, ModuleAnalysisManager &MAM) {
+PreservedAnalyses MDMPPass::run(Module &M, ModuleAnalysisManager &MAM) {
     bool changed = false;
     auto &FAM = MAM.getResult<FunctionAnalysisManagerModuleProxy>(M).getManager();
 
@@ -30,10 +30,10 @@ PreservedAnalyses MDMPPragmaPass::run(Module &M, ModuleAnalysisManager &MAM) {
 }
 
 
-bool MDMPPragmaPass::runOnFunction(Function &F, AAResults &AA, DominatorTree &DT, LoopInfo &LI) {
+bool MDMPPass::runOnFunction(Function &F, AAResults &AA, DominatorTree &DT, LoopInfo &LI) {
     PendingRequests.clear();
     
-    transformPragmasToCalls(F, AA, DT, LI);
+    transformFunctionsToCalls(F, AA, DT, LI);
     
     // If the function ends and we still have pending imperative calls 
     // that weren't part of a CommRegion, trace and inject their waits now!
@@ -46,7 +46,7 @@ bool MDMPPragmaPass::runOnFunction(Function &F, AAResults &AA, DominatorTree &DT
     return true;
 }
 
-void MDMPPragmaPass::transformPragmasToCalls(Function &F, AAResults &AA, DominatorTree &DT, LoopInfo &LI) {
+void MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTree &DT, LoopInfo &LI) {
     Module *M = F.getParent();
     LLVMContext &Ctx = M->getContext();
 
@@ -368,7 +368,7 @@ void MDMPPragmaPass::transformPragmasToCalls(Function &F, AAResults &AA, Dominat
 
 }
 
-void MDMPPragmaPass::hoistInitiation(CallInst *CI, std::vector<MemoryLocation> &Locs, AAResults &AA, DominatorTree &DT, LoopInfo &LI, bool isSend) {
+void MDMPPass::hoistInitiation(CallInst *CI, std::vector<MemoryLocation> &Locs, AAResults &AA, DominatorTree &DT, LoopInfo &LI, bool isSend) {
     Loop *L = LI.getLoopFor(CI->getParent());
     if (L && isSend) {
         bool isSafeToHoistOut = true;
@@ -424,7 +424,7 @@ void MDMPPragmaPass::hoistInitiation(CallInst *CI, std::vector<MemoryLocation> &
     if (InsertPoint != CI) { CI->moveBefore(InsertPoint->getIterator()); }
 }
 
-void MDMPPragmaPass::injectWaitsForRegion(Instruction *RegionEnd, AAResults &AA, LoopInfo &LI, LLVMContext &Ctx, Module *M) {
+void MDMPPass::injectWaitsForRegion(Instruction *RegionEnd, AAResults &AA, LoopInfo &LI, LLVMContext &Ctx, Module *M) {
     FunctionCallee runtime_wait = M->getOrInsertFunction("mdmp_wait", Type::getVoidTy(Ctx), Type::getInt32Ty(Ctx));
 
     for (auto &Req : PendingRequests) {
@@ -546,14 +546,14 @@ void MDMPPragmaPass::injectWaitsForRegion(Instruction *RegionEnd, AAResults &AA,
 
 extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo llvmGetPassPluginInfo() {
     return {
-        LLVM_PLUGIN_API_VERSION, "MDMPPragma", "v0.1",
+        LLVM_PLUGIN_API_VERSION, "MDMP", "v0.2",
         [](PassBuilder &PB) {
             PB.registerPipelineParsingCallback(
                 [](StringRef Name, ModulePassManager &MPM, ArrayRef<PassBuilder::PipelineElement>) {
-                    if (Name == "mdmp-pragma") { MPM.addPass(MDMPPragmaPass()); return true; } return false;
+                    if (Name == "mdmp") { MPM.addPass(MDMPPass()); return true; } return false;
                 });
             PB.registerPipelineStartEPCallback(
-                [](ModulePassManager &MPM, OptimizationLevel Level) { MPM.addPass(MDMPPragmaPass()); });
+                [](ModulePassManager &MPM, OptimizationLevel Level) { MPM.addPass(MDMPPass()); });
         }
     };
 }

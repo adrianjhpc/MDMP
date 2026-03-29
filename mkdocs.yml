@@ -1,0 +1,28 @@
+site_name: MDMP Documentation
+site_description: Compiler-Assisted Multi-Paradigm Message Passing
+repo_url: https://github.com/adrianjhpc/MDMP
+
+theme:
+  name: material
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - toc.integrate
+  palette:
+    primary: deep purple
+    accent: cyan
+
+markdown_extensions:
+  - admonition
+  - pymdownx.highlight
+  - pymdownx.superfences
+  - pymdownx.details
+
+nav:
+  - Getting Started: index.md
+  - The Paradigms:
+    - Imperative API: imperative.md
+    - Declarative API: declarative.md
+    - Collectives: collectives.md
+  - Deep Dive:
+    - Architecture: architecture.md

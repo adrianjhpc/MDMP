@@ -22,19 +22,18 @@ add_library(mdmp_runtime SHARED
     mdmp_runtime.cpp
 )
 
-# Create the MDMP pragma pass library
-add_library(mdmp_pragma_pass MODULE
-    mdmp_pragma_pass.cpp
-#    mdmp_managed_pass.cpp
+# Create the MDMP compiler pass library
+add_library(mdmp_compiler_pass MODULE
+    mdmp_compiler_pass.cpp
 )
 
-target_link_libraries(mdmp_pragma_pass PRIVATE
+target_link_libraries(mdmp_compiler_pass PRIVATE
 )
 
 # Set library properties
-set_target_properties(mdmp_pragma_pass PROPERTIES
+set_target_properties(mdmp_compiler_pass PROPERTIES
     PREFIX ""
-    OUTPUT_NAME "MDMPPragma"
+    OUTPUT_NAME "MDMP"
 )
 
 # Install headers

@@ -2,7 +2,7 @@
 #include <vector>
 #include <iomanip>
 
-#include "mdmp_pragma_interface.h"
+#include "mdmp_interface.h"
 #include "mdmp_runtime.h"
 
 int main() {

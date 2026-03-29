@@ -14,7 +14,7 @@
 
 #include <mpi.h>
 // Include the MDMP Interface
-#include "mdmp_pragma_interface.h"
+#include "mdmp_interface.h"
 
 /**************************************************************
  * GPU - GPU memory cartesian halo exchange benchmark

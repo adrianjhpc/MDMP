@@ -1,6 +1,6 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include "mdmp_pragma_interface.h"
+#include "mdmp_interface.h"
 
 int main(int argc, char** argv) {
     MDMP_COMM_INIT();

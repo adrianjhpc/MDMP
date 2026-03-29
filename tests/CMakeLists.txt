@@ -23,7 +23,7 @@ function(add_mdmp_test TEST_NAME SOURCE_FILE)
                 ${MPI_INC_FLAGS} ${MPI_LIBRARIES}
                 -o ${CMAKE_CURRENT_BINARY_DIR}/${TEST_NAME}
         # Rebuild if the source file, the pass, or the runtime changes!
-        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/${SOURCE_FILE} mdmp_pragma_pass mdmp_runtime
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/${SOURCE_FILE} mdmp_compiler_pass mdmp_runtime
         COMMENT "Compiling ${TEST_NAME} using mdmpc++ harness..."
     )
 

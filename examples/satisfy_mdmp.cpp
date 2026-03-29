@@ -4,7 +4,7 @@
 # include <iostream>
 
 // 1. Replaced mpi.h with the pure MDMP interface
-# include "mdmp_pragma_interface.h"
+# include "mdmp_interface.h"
 
 using namespace std;
 

@@ -1,7 +1,7 @@
 #include <iostream>
 #include <vector>
 #include <cstdlib>
-#include "mdmp_pragma_interface.h"
+#include "mdmp_interface.h"
 
 int main() {
     MDMP_COMM_INIT();

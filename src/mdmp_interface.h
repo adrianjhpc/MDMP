@@ -1,5 +1,5 @@
-#ifndef MDMP_PRAGMA_INTERFACE_H
-#define MDMP_PRAGMA_INTERFACE_H
+#ifndef MDMP_INTERFACE_H
+#define MDMP_INTERFACE_H
 
 #include <stddef.h>
 
@@ -125,4 +125,4 @@
 
 #define MDMP_SET_DEBUG(enable)  __mdmp_marker_set_debug(enable)
 
-#endif // MDMP_PRAGMA_INTERFACE_H
+#endif // MDMP_INTERFACE_H

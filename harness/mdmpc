@@ -4,7 +4,7 @@
 # Find where this script lives so we can locate the plugin and libraries
 MDMP_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 
-PLUGIN="-fpass-plugin=${MDMP_DIR}/..//build/src/MDMPPragma.so"
+PLUGIN="-fpass-plugin=${MDMP_DIR}/..//build/src/MDMP.so"
 INCLUDES="-I${MDMP_DIR}/../src"
 LIBS="-L${MDMP_DIR}/../build/src -lmdmp_runtime"
 

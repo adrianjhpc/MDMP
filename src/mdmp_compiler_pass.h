@@ -1,5 +1,5 @@
-#ifndef MDMP_PRAGMA_PASS_H
-#define MDMP_PRAGMA_PASS_H
+#ifndef MDMP_PASS_H
+#define MDMP_PASS_H
 
 #include "llvm/IR/PassManager.h"
 #include "llvm/IR/Function.h"
@@ -17,7 +17,7 @@
 
 namespace llvm {
 
-class MDMPPragmaPass : public PassInfoMixin<MDMPPragmaPass> {
+class MDMPPass : public PassInfoMixin<MDMPPass> {
 public:
     // Main entry point for the Pass Manager
     PreservedAnalyses run(Module &M, ModuleAnalysisManager &MAM);
@@ -27,7 +27,7 @@ private:
     bool runOnFunction(Function &F, AAResults &AA, DominatorTree &DT, LoopInfo &LI);
     
     // Translates user markers to either Imperative (Send/Recv) or Declarative (Commit) calls
-    void transformPragmasToCalls(Function &F, AAResults &AA, DominatorTree &DT, LoopInfo &LI);
+    void transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTree &DT, LoopInfo &LI);
     
     // Upgraded Hoisting Engine: Accepts a vector of MemoryLocations to safely hoist 
     // collectives and declarative bulk-commits without breaking data dependencies.
@@ -42,4 +42,4 @@ private:
 
 } // namespace llvm
 
-#endif // MDMP_PRAGMA_PASS_H
+#endif // MDMP_PASS_H

@@ -4,7 +4,7 @@
 # include <time.h>
 
 // Replaced mpi.h with the pure MDMP interface
-# include "mdmp_pragma_interface.h"
+# include "mdmp_interface.h"
 
 int main ( int argc, char *argv[] );
 double boundary_condition ( double x, double time );

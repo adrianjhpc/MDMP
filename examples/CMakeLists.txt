@@ -39,7 +39,7 @@ function(add_comparison_example EXAMPLE_NAME EXT)
                 -I${CMAKE_SOURCE_DIR}/src -I/usr/include/mpich-x86_64
                 /usr/lib64/mpich/lib/libmpi.so ${ARG_LINK_LIBS}
                 -o ${CMAKE_CURRENT_BINARY_DIR}/${EXAMPLE_NAME}_mdmp
-        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/${EXAMPLE_NAME}_mdmp.${EXT} mdmp_pragma_pass mdmp_runtime
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/${EXAMPLE_NAME}_mdmp.${EXT} mdmp_compiler_pass mdmp_runtime
         COMMENT "Compiling ${EXAMPLE_NAME}_mdmp (Imperative)..."
     )
     add_custom_target(target_${EXAMPLE_NAME}_mdmp DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/${EXAMPLE_NAME}_mdmp)
@@ -50,7 +50,7 @@ function(add_comparison_example EXAMPLE_NAME EXT)
                 -I${CMAKE_SOURCE_DIR}/src -I/usr/include/mpich-x86_64
                 /usr/lib64/mpich/lib/libmpi.so ${ARG_LINK_LIBS}
                 -o ${CMAKE_CURRENT_BINARY_DIR}/${EXAMPLE_NAME}_mdmp_regcom
-        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/${EXAMPLE_NAME}_mdmp_regcom.${EXT} mdmp_pragma_pass mdmp_runtime
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/${EXAMPLE_NAME}_mdmp_regcom.${EXT} mdmp_compiler_pass mdmp_runtime
         COMMENT "Compiling ${EXAMPLE_NAME}_mdmp_regcom (Declarative)..."
     )
     add_custom_target(target_${EXAMPLE_NAME}_mdmp_regcom DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/${EXAMPLE_NAME}_mdmp_regcom)

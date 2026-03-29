@@ -14,7 +14,7 @@
 
 #include <mpi.h>
 // Include the MDMP Interface
-#include "mdmp_pragma_interface.h"
+#include "mdmp_interface.h"
 
 #undef ACC_CUDA
 #undef  ACC_HIP

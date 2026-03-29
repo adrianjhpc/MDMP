@@ -5,7 +5,7 @@
 # include <iostream>
 
 // 1. Swap MPI header for MDMP
-# include "mdmp_pragma_interface.h"
+# include "mdmp_interface.h"
 
 using namespace std;
 
