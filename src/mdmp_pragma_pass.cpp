@@ -81,22 +81,22 @@ void MDMPPragmaPass::transformPragmasToCalls(Function &F, AAResults &AA, Dominat
     // ==========================================
     FunctionCallee runtime_reduce = M->getOrInsertFunction("mdmp_reduce", 
         Type::getInt32Ty(Ctx), PointerType::getUnqual(Ctx), PointerType::getUnqual(Ctx), 
-        Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx)); // Added i64 bytes   
+        Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx)); 
     if (Function *FReduce = dyn_cast<Function>(runtime_reduce.getCallee())) { FReduce->addFnAttr(Attribute::NoUnwind); }
 
     FunctionCallee runtime_gather = M->getOrInsertFunction("mdmp_gather", 
         Type::getInt32Ty(Ctx), PointerType::getUnqual(Ctx), Type::getInt64Ty(Ctx), 
-        PointerType::getUnqual(Ctx), Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx)); // Added i64 bytes  
+        PointerType::getUnqual(Ctx), Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx)); 
     if (Function *FGather = dyn_cast<Function>(runtime_gather.getCallee())) { FGather->addFnAttr(Attribute::NoUnwind); }
 
     FunctionCallee runtime_allreduce = M->getOrInsertFunction("mdmp_allreduce", 
         Type::getInt32Ty(Ctx), PointerType::getUnqual(Ctx), PointerType::getUnqual(Ctx), 
-        Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx)); // Added i64 bytes
+        Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx)); 
     if (Function *FAllreduce = dyn_cast<Function>(runtime_allreduce.getCallee())) { FAllreduce->addFnAttr(Attribute::NoUnwind); }
     
     FunctionCallee runtime_allgather = M->getOrInsertFunction("mdmp_allgather",
         Type::getInt32Ty(Ctx), PointerType::getUnqual(Ctx), Type::getInt64Ty(Ctx), 
-        PointerType::getUnqual(Ctx), Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx)); // Added i64 bytes
+        PointerType::getUnqual(Ctx), Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx));
     if (Function *FAllgather = dyn_cast<Function>(runtime_allgather.getCallee())) { FAllgather->addFnAttr(Attribute::NoUnwind); }
 
 
@@ -115,22 +115,22 @@ void MDMPPragmaPass::transformPragmasToCalls(Function &F, AAResults &AA, Dominat
 
     FunctionCallee runtime_register_reduce = M->getOrInsertFunction("mdmp_register_reduce", 
         Type::getVoidTy(Ctx), PointerType::getUnqual(Ctx), PointerType::getUnqual(Ctx), 
-        Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx)); // Added i64 bytes
+        Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx)); 
     if (Function *FRegReduce = dyn_cast<Function>(runtime_register_reduce.getCallee())) { FRegReduce->addFnAttr(Attribute::NoUnwind); }
         
     FunctionCallee runtime_register_gather = M->getOrInsertFunction("mdmp_register_gather", 
         Type::getVoidTy(Ctx), PointerType::getUnqual(Ctx), Type::getInt64Ty(Ctx), 
-        PointerType::getUnqual(Ctx), Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx)); // Added i64 bytes
+        PointerType::getUnqual(Ctx), Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx));
     if (Function *FRegGather = dyn_cast<Function>(runtime_register_gather.getCallee())) { FRegGather->addFnAttr(Attribute::NoUnwind); }
 
     FunctionCallee runtime_register_allreduce = M->getOrInsertFunction("mdmp_register_allreduce",
         Type::getVoidTy(Ctx), PointerType::getUnqual(Ctx), PointerType::getUnqual(Ctx), 
-        Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx)); // Added i64 bytes
+        Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx)); 
     if (Function *FRegAllreduce = dyn_cast<Function>(runtime_register_allreduce.getCallee())) { FRegAllreduce->addFnAttr(Attribute::NoUnwind); }
 
     FunctionCallee runtime_register_allgather = M->getOrInsertFunction("mdmp_register_allgather",
         Type::getVoidTy(Ctx), PointerType::getUnqual(Ctx), Type::getInt64Ty(Ctx), 
-        PointerType::getUnqual(Ctx), Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx)); // Added i64 bytes
+        PointerType::getUnqual(Ctx), Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx)); 
     if (Function *FRegAllgather = dyn_cast<Function>(runtime_register_allgather.getCallee())) { FRegAllgather->addFnAttr(Attribute::NoUnwind); }
 
     FunctionCallee runtime_commit = M->getOrInsertFunction("mdmp_commit", Type::getInt32Ty(Ctx));
@@ -217,7 +217,7 @@ void MDMPPragmaPass::transformPragmasToCalls(Function &F, AAResults &AA, Dominat
                 ActiveRegionLocs.push_back(MemoryLocation(OutBuf, LocSize));
 
                 CallInst *NewCall = Builder.CreateCall(runtime_register_reduce, 
-                    {InBuf, OutBuf, CI->getArgOperand(2), CI->getArgOperand(3), CI->getArgOperand(5), CI->getArgOperand(6)});
+                    {InBuf, OutBuf, CI->getArgOperand(2), CI->getArgOperand(3), CI->getArgOperand(4), CI->getArgOperand(5), CI->getArgOperand(6)});
                 CI->replaceAllUsesWith(NewCall);
                 toDelete.push_back(CI);
             }
@@ -233,7 +233,7 @@ void MDMPPragmaPass::transformPragmasToCalls(Function &F, AAResults &AA, Dominat
                 ActiveRegionLocs.push_back(MemoryLocation(RecvBuf, LocSize));
 
                 CallInst *NewCall = Builder.CreateCall(runtime_register_gather, 
-                    {SendBuf, CI->getArgOperand(1), RecvBuf, CI->getArgOperand(3), CI->getArgOperand(5)});
+                    {SendBuf, CI->getArgOperand(1), RecvBuf, CI->getArgOperand(3), CI->getArgOperand(4), CI->getArgOperand(5)});
                 CI->replaceAllUsesWith(NewCall);
                 toDelete.push_back(CI);
             } 
@@ -252,7 +252,8 @@ void MDMPPragmaPass::transformPragmasToCalls(Function &F, AAResults &AA, Dominat
             // Collective operations
             // ==========================================
             else if (Name == "__mdmp_marker_reduce") {
-                CallInst *NewCall = Builder.CreateCall(runtime_reduce, {CI->getArgOperand(0), CI->getArgOperand(1), CI->getArgOperand(2), CI->getArgOperand(3), CI->getArgOperand(5), CI->getArgOperand(6)});
+                CallInst *NewCall = Builder.CreateCall(runtime_reduce, 
+                    {CI->getArgOperand(0), CI->getArgOperand(1), CI->getArgOperand(2), CI->getArgOperand(3), CI->getArgOperand(4), CI->getArgOperand(5), CI->getArgOperand(6)});
                 CI->replaceAllUsesWith(NewCall);
                 
                 std::vector<MemoryLocation> Locs = {
@@ -264,7 +265,8 @@ void MDMPPragmaPass::transformPragmasToCalls(Function &F, AAResults &AA, Dominat
                 toDelete.push_back(CI);
              }
              else if (Name == "__mdmp_marker_gather") {
-                CallInst *NewCall = Builder.CreateCall(runtime_gather, {CI->getArgOperand(0), CI->getArgOperand(1), CI->getArgOperand(2), CI->getArgOperand(3), CI->getArgOperand(5)});
+                CallInst *NewCall = Builder.CreateCall(runtime_gather, 
+                    {CI->getArgOperand(0), CI->getArgOperand(1), CI->getArgOperand(2), CI->getArgOperand(3), CI->getArgOperand(4), CI->getArgOperand(5)});
                 CI->replaceAllUsesWith(NewCall);
                 
                 std::vector<MemoryLocation> Locs = {
@@ -287,7 +289,7 @@ void MDMPPragmaPass::transformPragmasToCalls(Function &F, AAResults &AA, Dominat
 
                 FunctionCallee target_func = (Name == "__mdmp_marker_allreduce") ? runtime_allreduce : runtime_register_allreduce;
                 CallInst *NewCall = Builder.CreateCall(target_func, 
-                    {InBuf, OutBuf, CI->getArgOperand(2), CI->getArgOperand(3), CI->getArgOperand(5)});
+                    {InBuf, OutBuf, CI->getArgOperand(2), CI->getArgOperand(3), CI->getArgOperand(4), CI->getArgOperand(5)});
                 CI->replaceAllUsesWith(NewCall);
                 toDelete.push_back(CI);
 
@@ -318,7 +320,7 @@ void MDMPPragmaPass::transformPragmasToCalls(Function &F, AAResults &AA, Dominat
 
                 FunctionCallee target_func = (Name == "__mdmp_marker_allgather") ? runtime_allgather : runtime_register_allgather;
                 CallInst *NewCall = Builder.CreateCall(target_func, 
-                    {InBuf, CI->getArgOperand(1), OutBuf, CI->getArgOperand(3)});
+                    {InBuf, CI->getArgOperand(1), OutBuf, CI->getArgOperand(3), CI->getArgOperand(4)});
                 CI->replaceAllUsesWith(NewCall);
                 toDelete.push_back(CI);
 
@@ -363,6 +365,7 @@ void MDMPPragmaPass::transformPragmasToCalls(Function &F, AAResults &AA, Dominat
         }
     }
     for (Instruction *I : toDelete) I->eraseFromParent();
+
 }
 
 void MDMPPragmaPass::hoistInitiation(CallInst *CI, std::vector<MemoryLocation> &Locs, AAResults &AA, DominatorTree &DT, LoopInfo &LI, bool isSend) {
