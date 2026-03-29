@@ -26,7 +26,6 @@ add_library(mdmp_runtime SHARED
 add_library(mdmp_compiler_pass MODULE
     mdmp_compiler_pass.cpp
 )
-
 target_link_libraries(mdmp_compiler_pass PRIVATE
 )
 

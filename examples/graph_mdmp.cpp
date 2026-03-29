@@ -57,6 +57,10 @@ int main(int argc, char** argv) {
     double end_time = MDMP_WTIME();
 
     if (rank == 0) {
+        printf("Validation Check (Prevents DCE): %f\n", local_vals[0]); 
+    }
+
+    if (rank == 0) {
         printf("------------------------------------------------\n");
         printf(" BENCHMARK: Graph Analytics (Imperative MDMP)\n");
         printf("------------------------------------------------\n");
