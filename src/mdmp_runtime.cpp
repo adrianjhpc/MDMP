@@ -51,14 +51,62 @@ static inline MPI_Op get_mpi_op(int op_code) {
 static std::vector<MPI_Request> active_requests;
 static std::vector<int> free_request_slots;
 
+#define MDMP_GC_TEST_THRESHOLD 1024
+#define MDMP_GC_HARD_LIMIT 32768
+static int gc_counter = 0;
+
+static void mdmp_garbage_collect_requests() {
+    int active_count = 0;
+    
+    // Pass 1: Non-blocking sweep using MPI_Test
+    // This allows the MPI library to its internal handles for completed transfers
+    // and ensure we don't run out of resources in that library.
+    for (size_t i = 0; i < active_requests.size(); ++i) {
+        if (active_requests[i] != MPI_REQUEST_NULL) {
+            int flag = 0;
+            MPI_Test(&active_requests[i], &flag, MPI_STATUS_IGNORE);
+            if (flag) {
+                // Transfer is completely finished. Recycle the slot.
+                free_request_slots.push_back(i);
+            } else {
+                active_count++;
+            }
+        }
+    }
+
+    // Pass 2: The Safety Valve
+    // If the network is completely saturated and we are hoarding too many 
+    // active handles, force a blocking wait to prevent an mpi library crash.
+    if (active_count > MDMP_GC_HARD_LIMIT) {
+        mdmp_log("[MDMP WARNING] Network saturated! Forcing Hard Flush of %d requests.\n", active_count);
+        for (size_t i = 0; i < active_requests.size(); ++i) {
+            if (active_requests[i] != MPI_REQUEST_NULL) {
+                MPI_Wait(&active_requests[i], MPI_STATUS_IGNORE);
+                free_request_slots.push_back(i);
+            }
+        }
+    }
+}
+
 static int allocate_request_slot(MPI_Request req) {
     if (req == MPI_REQUEST_NULL) return -2;
+
+    // Trigger background GC periodically
+    gc_counter++;
+    if (gc_counter >= MDMP_GC_TEST_THRESHOLD) {
+        mdmp_garbage_collect_requests();
+        gc_counter = 0;
+    }
+
+    // Reuse a recycled slot if available
     if (!free_request_slots.empty()) {
         int slot = free_request_slots.back();
         free_request_slots.pop_back();
         active_requests[slot] = req;
         return slot;
     }
+    
+    // Otherwise, expand the pool
     active_requests.push_back(req);
     return (int)active_requests.size() - 1;
 }
@@ -280,14 +328,14 @@ int mdmp_commit() {
                 std::vector<int> blens(count);
                 std::vector<MPI_Aint> disps(count);
                 for (size_t k = 0; k < count; k++) {
-                    // Use 'bytes' for structs, otherwise use 'count'
-                    blens[k] = (queue[i + k].type == 4) ? (int)queue[i + k].bytes : (int)queue[i + k].count;
+                    blens[k] = (int)queue[i + k].bytes;
                     MPI_Get_address(queue[i + k].buffer, &disps[k]);
                 }
                 MPI_Datatype ntype;
-                MPI_Type_create_hindexed((int)count, blens.data(), disps.data(), get_mpi_type(queue[i].type), &ntype);
+                
+                MPI_Type_create_hindexed((int)count, blens.data(), disps.data(), MPI_BYTE, &ntype);
                 MPI_Type_commit(&ntype);
-                custom_types_to_free.push_back(ntype);
+                custom_types_to_free.push_back(ntype); 
 
                 MPI_Request req;
                 if (isSend) MPI_Isend(MPI_BOTTOM, 1, ntype, peer, current_tag, MPI_COMM_WORLD, &req);

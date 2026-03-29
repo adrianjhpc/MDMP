@@ -30,15 +30,11 @@ int main(int argc, char** argv) {
     for (int iter = 0; iter < iterations; ++iter) {
         
         MDMP_COMMREGION_BEGIN();
-
         for (int i = 0; i < num_migrating; ++i) {
-            MDMP_REGISTER_SEND(&send_list[i], sizeof(Particle), rank, right_neighbor, 0);
-            MDMP_REGISTER_RECV(&recv_list[i], sizeof(Particle), rank, left_neighbor, 0);
+            MDMP_REGISTER_SEND(&send_list[i], 1, rank, right_neighbor, 0);
+            MDMP_REGISTER_RECV(&recv_list[i], 1, rank, left_neighbor, 0);
         }
-
-        // The MDMP engine sees 10k items going to the same peer with the same tag.
-        // It builds the hindexed zero-copy datatype and fires 1 MPI_Isend.
-        MDMP_COMMIT(); 
+        MDMP_COMMIT();
 
         double dummy_work = 0.0;
         for (int i = 0; i < 100000; ++i) {
