@@ -27,8 +27,8 @@ void mdmp_wait(int req_id);
 // ========================================================================
 // Imperative API (Fine-grained, returns individual Request IDs)
 // ========================================================================
-int mdmp_send(void* buffer, size_t count, int type, int sender_rank, int dest_rank, int tag);
-int mdmp_recv(void* buffer, size_t count, int type, int receiver_rank, int src_rank, int tag);
+int mdmp_send(void* buf, size_t count, int type, size_t bytes, int sender, int dest, int tag);
+int mdmp_recv(void* buf, size_t count, int type, size_t bytes, int receiver, int src, int tag);
 
 int mdmp_reduce(void* sendbuf, void* recvbuf, size_t count, int type, int root_rank, int op);
 int mdmp_gather(void* sendbuf, size_t sendcount, void* recvbuf, int type, int root_rank);
@@ -39,8 +39,8 @@ int mdmp_allgather(void* sendbuf, size_t count, void* recvbuf, int type);
 // ========================================================================
 // Declarative API (Inspector-Executor, returns -1 Batch ID)
 // ========================================================================
-void mdmp_register_send(void* buffer, size_t count, int type, int sender_rank, int dest_rank, int tag);
-void mdmp_register_recv(void* buffer, size_t count, int type, int receiver_rank, int src_rank, int tag);
+void mdmp_register_send(void* buffer, size_t count, int type, size_t bytes, int sender_rank, int dest_rank, int tag);
+void mdmp_register_recv(void* buffer, size_t count, int type, size_t bytes, int receiver_rank, int src_rank, int tag);
 
 void mdmp_register_reduce(void* sendbuf, void* recvbuf, size_t count, int type, int root_rank, int op);
 void mdmp_register_gather(void* sendbuf, size_t sendcount, void* recvbuf, int type, int root_rank);

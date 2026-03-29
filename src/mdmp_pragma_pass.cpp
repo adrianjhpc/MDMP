@@ -66,68 +66,72 @@ void MDMPPragmaPass::transformPragmasToCalls(Function &F, AAResults &AA, Dominat
     // Imperative functionality apis (Returns i32 Req ID) 
     FunctionCallee runtime_send = M->getOrInsertFunction("mdmp_send", 
         Type::getInt32Ty(Ctx), PointerType::getUnqual(Ctx), Type::getInt64Ty(Ctx), 
-        Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx));
+        Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx));
     if (Function *FSend = dyn_cast<Function>(runtime_send.getCallee())) {
         FSend->addFnAttr(Attribute::NoUnwind); FSend->setMemoryEffects(MemoryEffects::readOnly()); FSend->addParamAttr(0, Attribute::ReadOnly);
     }
-    
+ 
     FunctionCallee runtime_recv = M->getOrInsertFunction("mdmp_recv", 
         Type::getInt32Ty(Ctx), PointerType::getUnqual(Ctx), Type::getInt64Ty(Ctx), 
-        Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx));
+        Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx));
     if (Function *FRecv = dyn_cast<Function>(runtime_recv.getCallee())) { FRecv->addFnAttr(Attribute::NoUnwind); }
 
+    // ==========================================
+    // Imperative Collective apis
+    // ==========================================
     FunctionCallee runtime_reduce = M->getOrInsertFunction("mdmp_reduce", 
         Type::getInt32Ty(Ctx), PointerType::getUnqual(Ctx), PointerType::getUnqual(Ctx), 
-        Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx));   
+        Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx)); // Added i64 bytes   
     if (Function *FReduce = dyn_cast<Function>(runtime_reduce.getCallee())) { FReduce->addFnAttr(Attribute::NoUnwind); }
 
     FunctionCallee runtime_gather = M->getOrInsertFunction("mdmp_gather", 
         Type::getInt32Ty(Ctx), PointerType::getUnqual(Ctx), Type::getInt64Ty(Ctx), 
-        PointerType::getUnqual(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx));   
+        PointerType::getUnqual(Ctx), Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx)); // Added i64 bytes  
     if (Function *FGather = dyn_cast<Function>(runtime_gather.getCallee())) { FGather->addFnAttr(Attribute::NoUnwind); }
 
     FunctionCallee runtime_allreduce = M->getOrInsertFunction("mdmp_allreduce", 
         Type::getInt32Ty(Ctx), PointerType::getUnqual(Ctx), PointerType::getUnqual(Ctx), 
-        Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx));
+        Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx)); // Added i64 bytes
     if (Function *FAllreduce = dyn_cast<Function>(runtime_allreduce.getCallee())) { FAllreduce->addFnAttr(Attribute::NoUnwind); }
     
     FunctionCallee runtime_allgather = M->getOrInsertFunction("mdmp_allgather",
         Type::getInt32Ty(Ctx), PointerType::getUnqual(Ctx), Type::getInt64Ty(Ctx), 
-        PointerType::getUnqual(Ctx), Type::getInt32Ty(Ctx));
+        PointerType::getUnqual(Ctx), Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx)); // Added i64 bytes
     if (Function *FAllgather = dyn_cast<Function>(runtime_allgather.getCallee())) { FAllgather->addFnAttr(Attribute::NoUnwind); }
 
 
-    // Declarative functionality apis (Inspector-Executor)
+    // ==========================================
+    // Declarative Collective apis
+    // ==========================================
     FunctionCallee runtime_register_send = M->getOrInsertFunction("mdmp_register_send", 
         Type::getVoidTy(Ctx), PointerType::getUnqual(Ctx), Type::getInt64Ty(Ctx), 
-        Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx));
+        Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx));
     if (Function *FRegSend = dyn_cast<Function>(runtime_register_send.getCallee())) { FRegSend->addFnAttr(Attribute::NoUnwind); }
         
     FunctionCallee runtime_register_recv = M->getOrInsertFunction("mdmp_register_recv", 
         Type::getVoidTy(Ctx), PointerType::getUnqual(Ctx), Type::getInt64Ty(Ctx), 
-        Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx));
+        Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx));
     if (Function *FRegRecv = dyn_cast<Function>(runtime_register_recv.getCallee())) { FRegRecv->addFnAttr(Attribute::NoUnwind); }
 
     FunctionCallee runtime_register_reduce = M->getOrInsertFunction("mdmp_register_reduce", 
         Type::getVoidTy(Ctx), PointerType::getUnqual(Ctx), PointerType::getUnqual(Ctx), 
-        Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx));
+        Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx)); // Added i64 bytes
     if (Function *FRegReduce = dyn_cast<Function>(runtime_register_reduce.getCallee())) { FRegReduce->addFnAttr(Attribute::NoUnwind); }
         
     FunctionCallee runtime_register_gather = M->getOrInsertFunction("mdmp_register_gather", 
         Type::getVoidTy(Ctx), PointerType::getUnqual(Ctx), Type::getInt64Ty(Ctx), 
-        PointerType::getUnqual(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx));
+        PointerType::getUnqual(Ctx), Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx)); // Added i64 bytes
     if (Function *FRegGather = dyn_cast<Function>(runtime_register_gather.getCallee())) { FRegGather->addFnAttr(Attribute::NoUnwind); }
 
     FunctionCallee runtime_register_allreduce = M->getOrInsertFunction("mdmp_register_allreduce",
         Type::getVoidTy(Ctx), PointerType::getUnqual(Ctx), PointerType::getUnqual(Ctx), 
-        Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx));
+        Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx)); // Added i64 bytes
     if (Function *FRegAllreduce = dyn_cast<Function>(runtime_register_allreduce.getCallee())) { FRegAllreduce->addFnAttr(Attribute::NoUnwind); }
 
     FunctionCallee runtime_register_allgather = M->getOrInsertFunction("mdmp_register_allgather",
         Type::getVoidTy(Ctx), PointerType::getUnqual(Ctx), Type::getInt64Ty(Ctx), 
-        PointerType::getUnqual(Ctx), Type::getInt32Ty(Ctx));
+        PointerType::getUnqual(Ctx), Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx)); // Added i64 bytes
     if (Function *FRegAllgather = dyn_cast<Function>(runtime_register_allgather.getCallee())) { FRegAllgather->addFnAttr(Attribute::NoUnwind); }
-
 
     FunctionCallee runtime_commit = M->getOrInsertFunction("mdmp_commit", Type::getInt32Ty(Ctx));
 
@@ -167,8 +171,10 @@ void MDMPPragmaPass::transformPragmasToCalls(Function &F, AAResults &AA, Dominat
                 std::vector<MemoryLocation> Locs = { MemoryLocation(BufferPtr, LocSize) };
                 
                 bool isSend = (Name == "__mdmp_marker_send");
+                
                 CallInst *NewCall = Builder.CreateCall(isSend ? runtime_send : runtime_recv, 
-                    {BufferPtr, CountVal, TypeVal, ActorRank, PeerRank, TagVal});
+                    {BufferPtr, CountVal, TypeVal, ByteSize, ActorRank, PeerRank, TagVal});
+                
                 CI->replaceAllUsesWith(NewCall);
                 
                 hoistInitiation(NewCall, Locs, AA, DT, LI, isSend);
@@ -192,8 +198,10 @@ void MDMPPragmaPass::transformPragmasToCalls(Function &F, AAResults &AA, Dominat
                 ActiveRegionLocs.push_back(MemoryLocation(BufferPtr, LocSize));
 
                 bool isSend = (Name == "__mdmp_marker_register_send");
+                
                 CallInst *NewCall = Builder.CreateCall(isSend ? runtime_register_send : runtime_register_recv, 
-                    {BufferPtr, CountVal, TypeVal, ActorRank, PeerRank, TagVal});
+                    {BufferPtr, CountVal, TypeVal, ByteSize, ActorRank, PeerRank, TagVal});
+                
                 CI->replaceAllUsesWith(NewCall);
                 toDelete.push_back(CI);
             }
@@ -302,7 +310,7 @@ void MDMPPragmaPass::transformPragmasToCalls(Function &F, AAResults &AA, Dominat
 
                 LocationSize LocSize = LocationSize::beforeOrAfterPointer();
                 if (auto *ConstBytes = dyn_cast<ConstantInt>(ByteSize)) { 
-                    // The macro only passes the size of the SEND buffer.
+                    // The macro only passes the size of the send buffer.
                     // We must multiply it by the global comm size to protect the whole array.
                     // For safety in the pass without looking up comm size, we just use unknown.
                     LocSize = LocationSize::beforeOrAfterPointer(); 

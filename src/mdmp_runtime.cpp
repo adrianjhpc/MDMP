@@ -13,6 +13,7 @@ struct RegisteredMsg {
     void* buffer;
     size_t count;
     int type;
+    size_t bytes;
     int rank; 
     int tag;
 };
@@ -65,14 +66,15 @@ static int allocate_request_slot(MPI_Request req) {
 static std::vector<RegisteredMsg> send_queue;
 static std::vector<RegisteredMsg> recv_queue;
 
-struct RegisteredReduce { void* sendbuf; void* recvbuf; size_t count; int type; int root; int op; };
-struct RegisteredGather { void* sendbuf; size_t sendcount; void* recvbuf; int type; int root; };
+struct RegisteredReduce { void* sendbuf; void* recvbuf; size_t count; int type; size_t bytes; int root; int op; };
+struct RegisteredGather { void* sendbuf; size_t sendcount; void* recvbuf; int type; size_t bytes; int root; };
 
 static std::vector<RegisteredReduce> reduce_queue;
 static std::vector<RegisteredGather> gather_queue;
 
-struct RegisteredAllreduce { void* sendbuf; void* recvbuf; size_t count; int type; int op; };
-struct RegisteredAllgather { void* sendbuf; size_t count; void* recvbuf; int type; };
+struct RegisteredAllreduce { void* sendbuf; void* recvbuf; size_t count; int type; size_t bytes; int op; };
+struct RegisteredAllgather { void* sendbuf; size_t count; void* recvbuf; int type; size_t bytes; };
+
 
 static std::vector<RegisteredAllreduce> allreduce_queue;
 static std::vector<RegisteredAllgather> allgather_queue;
@@ -143,104 +145,98 @@ void mdmp_wait(int req_id) {
     mdmp_log("[MDMP] Rank %d WAIT COMPLETE for request ID: %d\n", global_my_rank, req_id);
 }
 
-int mdmp_send(void* buf, size_t c, int t, int s, int d, int tag) {
+int mdmp_send(void* buf, size_t c, int t, size_t bytes, int s, int d, int tag) {
     if (d < 0 || d >= global_size || global_my_rank != s) return -2;
     MPI_Request req;
-    MPI_Isend(buf, (int)c, get_mpi_type(t), d, tag, MPI_COMM_WORLD, &req);
+    
+    // If it's a custom struct (MPI_BYTE), the true count is the total bytes
+    int actual_count = (t == 4) ? (int)bytes : (int)c;
+    
+    MPI_Isend(buf, actual_count, get_mpi_type(t), d, tag, MPI_COMM_WORLD, &req);
     return allocate_request_slot(req);
 }
 
-int mdmp_recv(void* buf, size_t c, int t, int r, int s, int tag) {
+int mdmp_recv(void* buf, size_t c, int t, size_t bytes, int r, int s, int tag) {
     if (s < 0 || s >= global_size || global_my_rank != r) return -2;
     MPI_Request req;
-    MPI_Irecv(buf, (int)c, get_mpi_type(t), s, tag, MPI_COMM_WORLD, &req);
-    return allocate_request_slot(req);
-}
-
-// (Collectives mdmp_reduce and mdmp_gather remain standard as per your previous code)
-int mdmp_reduce(void* sendbuf, void* recvbuf, size_t count, int type, int op, int root) {
-    MPI_Request req;
-
-    const void* final_sendbuf = sendbuf;
-    if (sendbuf == recvbuf && global_my_rank == root) {
-        final_sendbuf = MPI_IN_PLACE; // IN_PLACE is only valid at the root for standard reduce
-    }
-
-    MPI_Ireduce(final_sendbuf, recvbuf, (int)count, 
-                get_mpi_type(type), get_mpi_op(op), 
-                root, MPI_COMM_WORLD, &req);
     
+    int actual_count = (t == 4) ? (int)bytes : (int)c;
+    
+    MPI_Irecv(buf, actual_count, get_mpi_type(t), s, tag, MPI_COMM_WORLD, &req);
     return allocate_request_slot(req);
 }
 
-int mdmp_gather(void* sb, size_t sc, void* rb, int t, int root) {
+// Collectives
+int mdmp_reduce(void* sendbuf, void* recvbuf, size_t count, int type, size_t bytes, int root, int op) {
     MPI_Request req;
-
-    const void* final_sb = sb;
-    if (sb == rb && global_my_rank == root) {
-        final_sb = MPI_IN_PLACE;
-    }
-
-    MPI_Igather(final_sb, (int)sc, get_mpi_type(t), rb, (int)sc, get_mpi_type(t), root, MPI_COMM_WORLD, &req);
-    return allocate_request_slot(req);
-}
-
-int mdmp_allreduce(void* sendbuf, void* recvbuf, size_t count, int type, int op) {
-    MPI_Request req;
-
     const void* final_sendbuf = sendbuf;
-    if (sendbuf == recvbuf) {
-        final_sendbuf = MPI_IN_PLACE;
-    }
+    if (sendbuf == recvbuf && global_my_rank == root) final_sendbuf = MPI_IN_PLACE;
 
-    MPI_Op mpi_op = (MPI_Op)(intptr_t)op; 
-    MPI_Iallreduce(final_sendbuf, recvbuf, (int)count, get_mpi_type(type), mpi_op, MPI_COMM_WORLD, &req);
-
+    int actual_count = (type == 4) ? (int)bytes : (int)count;
+    MPI_Ireduce(final_sendbuf, recvbuf, actual_count, get_mpi_type(type), get_mpi_op(op), root, MPI_COMM_WORLD, &req);
     return allocate_request_slot(req);
 }
 
-int mdmp_allgather(void* sb, size_t c, void* rb, int t) {
+int mdmp_gather(void* sb, size_t sc, void* rb, int t, size_t bytes, int root) {
     MPI_Request req;
-
     const void* final_sb = sb;
-    // For Allgather, every rank is effectively a root, so anyone can be IN_PLACE
-    if (sb == rb) {
-        final_sb = MPI_IN_PLACE;
-    }
+    if (sb == rb && global_my_rank == root) final_sb = MPI_IN_PLACE;
 
-    // Note: recvcount is the number of elements *per rank* in MPI_Allgather
-    MPI_Iallgather(final_sb, (int)c, get_mpi_type(t), rb, (int)c, get_mpi_type(t), MPI_COMM_WORLD, &req);
+    int actual_count = (t == 4) ? (int)bytes : (int)sc;
+    MPI_Igather(final_sb, actual_count, get_mpi_type(t), rb, actual_count, get_mpi_type(t), root, MPI_COMM_WORLD, &req);
     return allocate_request_slot(req);
 }
 
-void mdmp_register_send(void* b, size_t c, int t, int s, int d, int tag) {
-    if (d >= 0 && d < global_size && global_my_rank == s) send_queue.push_back({b, c, t, d, tag});
-    mdmp_log("[MDMP] Rank %d queued SEND to %d (tag %d). Queue size: %zu\n", global_my_rank, d, tag, send_queue.size());
+int mdmp_allreduce(void* sendbuf, void* recvbuf, size_t count, int type, size_t bytes, int op) {
+    MPI_Request req;
+    const void* final_sendbuf = sendbuf;
+    if (sendbuf == recvbuf) final_sendbuf = MPI_IN_PLACE;
+
+    int actual_count = (type == 4) ? (int)bytes : (int)count;
+    MPI_Op mpi_op = (MPI_Op)(intptr_t)op; 
+    MPI_Iallreduce(final_sendbuf, recvbuf, actual_count, get_mpi_type(type), mpi_op, MPI_COMM_WORLD, &req);
+    return allocate_request_slot(req);
 }
 
-void mdmp_register_recv(void* b, size_t c, int t, int r, int s, int tag) {
-    if (s >= 0 && s < global_size && global_my_rank == r) recv_queue.push_back({b, c, t, s, tag});
-    mdmp_log("[MDMP] Rank %d queued RECV from %d (tag %d). Queue size: %zu\n", global_my_rank, s, tag, recv_queue.size());
+int mdmp_allgather(void* sb, size_t c, void* rb, int t, size_t bytes) {
+    MPI_Request req;
+    const void* final_sb = sb;
+    if (sb == rb) final_sb = MPI_IN_PLACE;
+
+    int actual_count = (t == 4) ? (int)bytes : (int)c;
+    MPI_Iallgather(final_sb, actual_count, get_mpi_type(t), rb, actual_count, get_mpi_type(t), MPI_COMM_WORLD, &req);
+    return allocate_request_slot(req);
 }
 
-void mdmp_register_reduce(void* sb, void* rb, size_t c, int t, int root, int op) {
-    reduce_queue.push_back({sb, rb, c, t, root, op});
+void mdmp_register_send(void* b, size_t c, int t, size_t bytes, int s, int d, int tag) {
+    if (d >= 0 && d < global_size && global_my_rank == s) {
+        send_queue.push_back({b, c, t, bytes, d, tag}); // Store 'bytes'
+    }
+}
+
+void mdmp_register_recv(void* b, size_t c, int t, size_t bytes, int r, int s, int tag) {
+    if (s >= 0 && s < global_size && global_my_rank == r) {
+        recv_queue.push_back({b, c, t, bytes, s, tag}); // Store 'bytes'
+    }
+}
+
+void mdmp_register_reduce(void* sb, void* rb, size_t c, int t, size_t bytes, int root, int op) {
+    reduce_queue.push_back({sb, rb, c, t, bytes, root, op});
     mdmp_log("[MDMP] Rank %d queue REDUCE. Queue size %zu\n", global_my_rank, reduce_queue.size());
 }
 
-void mdmp_register_gather(void* sb, size_t sc, void* rb, int t, int root) {
-    gather_queue.push_back({sb, sc, rb, t, root});
+void mdmp_register_gather(void* sb, size_t sc, void* rb, int t, size_t bytes, int root) {
+    gather_queue.push_back({sb, sc, rb, t, bytes, root});
     mdmp_log("[MDMP] Rank %d queue GATHER. Queue size %zu\n", global_my_rank, gather_queue.size());
-
 }
 
-void mdmp_register_allreduce(void* sb, void* rb, size_t c, int t, int op) {
-    allreduce_queue.push_back({sb, rb, c, t, op});
+void mdmp_register_allreduce(void* sb, void* rb, size_t c, int t, size_t bytes, int op) {
+    allreduce_queue.push_back({sb, rb, c, t, bytes, op});
     mdmp_log("[MDMP] Rank %d queue ALLREDUCE. Queue size %zu\n", global_my_rank, allreduce_queue.size());
 }
 
-void mdmp_register_allgather(void* sb, size_t c, void* rb, int t) {
-    allgather_queue.push_back({sb, c, rb, t});
+void mdmp_register_allgather(void* sb, size_t c, void* rb, int t, size_t bytes) {
+    allgather_queue.push_back({sb, c, rb, t, bytes});
     mdmp_log("[MDMP] Rank %d queue ALLGATHER. Queue size %zu\n", global_my_rank, allgather_queue.size());
 }
 
@@ -273,8 +269,10 @@ int mdmp_commit() {
             // Fire individually if there is only 1 message
             if (count == 1) { 
                 MPI_Request req;
-                if (isSend) MPI_Isend(queue[i].buffer, (int)queue[i].count, get_mpi_type(queue[i].type), peer, current_tag, MPI_COMM_WORLD, &req);
-                else        MPI_Irecv(queue[i].buffer, (int)queue[i].count, get_mpi_type(queue[i].type), peer, current_tag, MPI_COMM_WORLD, &req);
+                int actual_count = (queue[i].type == 4) ? (int)queue[i].bytes : (int)queue[i].count;
+                
+                if (isSend) MPI_Isend(queue[i].buffer, actual_count, get_mpi_type(queue[i].type), peer, current_tag, MPI_COMM_WORLD, &req);
+                else        MPI_Irecv(queue[i].buffer, actual_count, get_mpi_type(queue[i].type), peer, current_tag, MPI_COMM_WORLD, &req);
                 allocate_request_slot(req);
             } 
             // 4. Fire the Zero-Copy Hardware Datatype if there are multiple
@@ -282,13 +280,14 @@ int mdmp_commit() {
                 std::vector<int> blens(count);
                 std::vector<MPI_Aint> disps(count);
                 for (size_t k = 0; k < count; k++) {
-                    blens[k] = (int)queue[i + k].count;
+                    // Use 'bytes' for structs, otherwise use 'count'
+                    blens[k] = (queue[i + k].type == 4) ? (int)queue[i + k].bytes : (int)queue[i + k].count;
                     MPI_Get_address(queue[i + k].buffer, &disps[k]);
                 }
                 MPI_Datatype ntype;
                 MPI_Type_create_hindexed((int)count, blens.data(), disps.data(), get_mpi_type(queue[i].type), &ntype);
                 MPI_Type_commit(&ntype);
-                custom_types_to_free.push_back(ntype); // Saved so mdmp_wait can free it
+                custom_types_to_free.push_back(ntype);
 
                 MPI_Request req;
                 if (isSend) MPI_Isend(MPI_BOTTOM, 1, ntype, peer, current_tag, MPI_COMM_WORLD, &req);
