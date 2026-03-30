@@ -322,42 +322,16 @@ void MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
 }
 
 void MDMPPass::hoistInitiation(CallInst *CI, std::vector<TrackedBuffer> &Buffers, AAResults &AA, DominatorTree &DT, LoopInfo &LI, bool isSend) {
-  Loop *L = LI.getLoopFor(CI->getParent());
-  if (L && isSend) {
-    bool isSafeToHoistOut = true;
-    for (Value *Op : CI->operands()) {
-      if (Instruction *OpInst = dyn_cast<Instruction>(Op)) {
-        if (L->contains(OpInst)) { isSafeToHoistOut = false; break; }
-      }
-    }
-    if (isSafeToHoistOut) {
-      for (BasicBlock *BB : L->blocks()) {
-        for (Instruction &I : *BB) {
-          if (auto *Call = dyn_cast<CallInst>(&I)) {
-            if (Call->getCalledFunction() && Call->getCalledFunction()->getName() == "mdmp_commregion_begin") { isSafeToHoistOut = false; break; }
-          }
-          if (I.mayWriteToMemory()) {
-            for (auto &Buf : Buffers) {
-              if (isModSet(AA.getModRefInfo(&I, Buf.Loc))) { isSafeToHoistOut = false; break; }
-            }
-          }
-        }
-        if (!isSafeToHoistOut) break;
-      }
-    }
-    if (isSafeToHoistOut) {
-      BasicBlock *Preheader = L->getLoopPreheader();
-      if (Preheader) {
-        CI->moveBefore(Preheader->getTerminator()->getIterator());
-        return; 
-      }
-    }
-  }
+  
+  // (The aggressive Loop-Invariant code block has been completely removed)
 
   Instruction *InsertPoint = CI;
   Instruction *Prev = CI->getPrevNode();
+  
+  // Safely slide the network call upward locally, stopping at control flow bounds
   while (Prev) {
     if (isa<PHINode>(Prev)) break;
+    
     bool usesPrev = false;
     for (Value *Op : CI->operands()) { if (Op == Prev) { usesPrev = true; break; } }
     if (usesPrev) break;
