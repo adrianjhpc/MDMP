@@ -8,10 +8,13 @@ int main(int argc, char** argv) {
     int rank = MDMP_GET_RANK();
     int size = MDMP_GET_SIZE();
 
-    if (size < 2) return 0;
+    if (size < 2) {
+        MDMP_COMM_FINAL();
+        return 0;
+    }
 
-    const int num_vertices = 10000;
-    const int num_ghosts = 1000;
+    const int num_vertices = 100000;
+    const int num_ghosts = 10000;
     int right_neighbor = (rank + 1) % size;
     int left_neighbor = (rank - 1 + size) % size;
 
@@ -25,29 +28,32 @@ int main(int argc, char** argv) {
 
     for (int iter = 0; iter < 100; ++iter) {
         
+        // Begin the Asynchronous Region
         MDMP_COMMREGION_BEGIN();
         
         MDMP_REGISTER_SEND(ghost_vals_send.data(), num_ghosts, rank, right_neighbor, 0);
         MDMP_REGISTER_RECV(ghost_vals_recv.data(), num_ghosts, rank, left_neighbor, 0);
         
+        // Push the requests to the
         MDMP_COMMIT(); 
 
-        MDMP_COMMREGION_END();
-
+        // Process Local Edges
+        // Because this loop is inside the commregion, it executes alongside the network.
         for (int i = 0; i < num_vertices; ++i) {
             double vertex_sum = 0.0;
-
-            // Compute local edges (Wasted overlap opportunity!)
             for (int e = 0; e < 50; ++e) { 
                 vertex_sum += local_vals[(i + e) % num_vertices] * 0.01;
             }
-
-            // Compute remote edges
-            if (i % 10 == 0) { 
-                vertex_sum += ghost_vals_recv[i % num_ghosts] * 0.05;
-            }
-
             new_vals[i] = vertex_sum;
+        }
+
+        // Close the region (hard wait)
+        // This forces the program to halt until MDMP_COMMIT finishes.
+        MDMP_COMMREGION_END();
+
+        // Process remote edges safely
+        for (int i = 0; i < num_vertices; i += 10) { 
+            new_vals[i] += ghost_vals_recv[i % num_ghosts] * 0.05;
         }
 
         local_vals.swap(new_vals);
@@ -57,13 +63,10 @@ int main(int argc, char** argv) {
 
     if (rank == 0) {
         printf("Validation Check (Prevents DCE): %f\n", local_vals[0]); 
-    }
-
-    if (rank == 0) {
         printf("------------------------------------------------\n");
         printf(" BENCHMARK: Graph Analytics (Declarative MDMP)\n");
         printf("------------------------------------------------\n");
-        printf("Bulk-Sync forced the CPU to wait unnecessarily.\n");
+        printf("Declarative Region now successfully overlaps compute and comm!\n");
         printf("Elapsed Time: %f seconds\n", end_time - start_time);
     }
 

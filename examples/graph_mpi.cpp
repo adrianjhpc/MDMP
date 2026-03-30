@@ -15,8 +15,8 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    const int num_vertices = 10000;
-    const int num_ghosts = 1000;
+    const int num_vertices = 100000;
+    const int num_ghosts = 10000;
     int right_neighbor = (rank + 1) % size;
     int left_neighbor = (rank - 1 + size) % size;
 
