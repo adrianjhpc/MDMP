@@ -36,6 +36,10 @@ static inline MPI_Datatype get_mpi_type(int type_code) {
 }
 
 static inline MPI_Op get_mpi_op(int op_code) {
+    // If the user accidentally passed a raw MPI macro (which are massive hex values), 
+    // safely cast it and use it directly to prevent defaulting to SUM!
+    if (op_code > 10) return (MPI_Op)(intptr_t)op_code;
+    
     switch(op_code) {
         case 0: return MPI_SUM;
         case 1: return MPI_MAX;
@@ -240,7 +244,9 @@ int mdmp_allreduce(void* sendbuf, void* recvbuf, size_t count, int type, size_t 
     if (sendbuf == recvbuf) final_sendbuf = MPI_IN_PLACE;
 
     int actual_count = (type == 4) ? (int)bytes : (int)count;
-    MPI_Op mpi_op = (MPI_Op)(intptr_t)op; 
+    
+    MPI_Op mpi_op = get_mpi_op(op); 
+    
     MPI_Iallreduce(final_sendbuf, recvbuf, actual_count, get_mpi_type(type), mpi_op, MPI_COMM_WORLD, &req);
     return allocate_request_slot(req);
 }

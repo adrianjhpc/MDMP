@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <assert.h>
+#include <mpi.h>
 #include "mdmp_interface.h"
 
 int main(int argc, char** argv) {
@@ -12,7 +13,7 @@ int main(int argc, char** argv) {
     int recv_val = 0;
 
     // Execute Imperative Allreduce
-    MDMP_ALLREDUCE(&send_val, &recv_val, 1, MDMP_SUM);
+    MDMP_ALLREDUCE(&send_val, &recv_val, 1, MPI_SUM);
 
     // The sum of 1 to N is N*(N+1)/2
     int expected_sum = (size * (size + 1)) / 2;

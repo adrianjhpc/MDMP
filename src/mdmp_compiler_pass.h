@@ -37,7 +37,7 @@ private:
     // FG Traversal Engine: Uses LoopInfo to prevent "Inner-Loop Poisoning" 
     // by ensuring waits are safely dropped at the loop preheader/terminator boundaries.
     void injectWaitsForRegion(Instruction *RegionEnd, AAResults &AA, LoopInfo &LI, 
-                              LLVMContext &Ctx, Module *M);
+                              LLVMContext &Ctx, Module *M, DominatorTree &DT);
 };
 
 } // namespace llvm

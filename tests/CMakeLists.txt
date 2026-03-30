@@ -62,6 +62,7 @@ add_mdmp_test(mdmp_test_reduce_non_zero_root_regcom test_reduce_non_zero_root_md
 add_mdmp_test(mdmp_test_gather test_gather_mdmp.cpp)
 add_mdmp_test(mdmp_test_gather_regcom test_gather_mdmp_regcom.cpp)
 add_mdmp_test(mdmp_test_allreduce test_mdmp_allreduce.cpp)
+add_mdmp_test(mdmp_test_allreduce_mpi_sum test_mdmp_allreduce_mpi_sum.cpp)
 add_mdmp_test(mdmp_test_allreduce_min test_mdmp_allreduce_min.cpp)
 add_mdmp_test(mdmp_test_allreduce_max test_mdmp_allreduce_max.cpp)
 add_mdmp_test(mdmp_test_allreduce_regcom test_mdmp_allreduce_regcom.cpp)
