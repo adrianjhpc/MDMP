@@ -172,6 +172,7 @@ void mdmp_abort(int error_code) {
 
 void mdmp_wait(int req_id) {
     mdmp_log("[MDMP] Rank %d WAITING on request ID: %d\n", global_my_rank, req_id);
+
     if (req_id == -1) {
         // Bulk Wait for Declarative API
         if (!active_requests.empty()) {
@@ -179,7 +180,6 @@ void mdmp_wait(int req_id) {
             active_requests.clear();
             free_request_slots.clear();
             
-            // Safe to free custom coalesced types now that the transfers are complete
             for (auto T : custom_types_to_free) {
                 if (T != MPI_DATATYPE_NULL) MPI_Type_free(&T);
             }
@@ -188,9 +188,39 @@ void mdmp_wait(int req_id) {
     } else if (req_id >= 0 && req_id < (int)active_requests.size()) {
         // Individual Wait for Imperative API
         if (active_requests[req_id] != MPI_REQUEST_NULL) {
-            MPI_Wait(&active_requests[req_id], MPI_STATUS_IGNORE);
-            active_requests[req_id] = MPI_REQUEST_NULL;
-            free_request_slots.push_back(req_id);
+            
+            // Count how many active requests we currently have in flight
+            int in_flight_count = 0;
+            for (auto r : active_requests) {
+                if (r != MPI_REQUEST_NULL) in_flight_count++;
+            }
+
+            mdmp_log("[MDMP] Rank %d check - In flight count: %d\n", global_my_rank, in_flight_count);
+
+            // If there are multiple active requests (like inside a COMMREGION), 
+            // force a Waitall to prevent Eager/Rendezvous Deadlocks
+            if (in_flight_count > 1) {
+                std::vector<MPI_Request> reqs;
+                std::vector<int> active_ids;
+                for (int i = 0; i < active_requests.size(); ++i) {
+                    if (active_requests[i] != MPI_REQUEST_NULL) {
+                        reqs.push_back(active_requests[i]);
+                        active_ids.push_back(i);
+                    }
+                }
+                
+                MPI_Waitall(reqs.size(), reqs.data(), MPI_STATUSES_IGNORE);
+                
+                for (int id : active_ids) {
+                    active_requests[id] = MPI_REQUEST_NULL;
+                    free_request_slots.push_back(id);
+                }
+            } else {
+                // Just a single standalone request, normal wait is safe
+                MPI_Wait(&active_requests[req_id], MPI_STATUS_IGNORE);
+                active_requests[req_id] = MPI_REQUEST_NULL;
+                free_request_slots.push_back(req_id);
+            }
         }
     }
     mdmp_log("[MDMP] Rank %d WAIT COMPLETE for request ID: %d\n", global_my_rank, req_id);

@@ -397,16 +397,50 @@ void MDMPPass::hoistInitiation(CallInst *CI, std::vector<MemoryLocation> &Locs, 
         bool usesPrev = false;
         for (Value *Op : CI->operands()) { if (Op == Prev) { usesPrev = true; break; } }
         if (usesPrev) break;
+        
         if (auto *Call = dyn_cast<CallInst>(Prev)) {
             if (Call->getCalledFunction() && Call->getCalledFunction()->getName() == "mdmp_commregion_begin") break; 
         }
+        
         bool memoryCollision = false;
-        if (Prev->mayWriteToMemory()) {
-            for (auto &Loc : Locs) {
-                if (isModSet(AA.getModRefInfo(Prev, Loc))) { memoryCollision = true; break; }
+        
+        if (Prev->mayWriteToMemory() || (!isSend && Prev->mayReadFromMemory())) {
+            
+            // 1. Extreme Exact Match (Bypasses TBAA Blindspots)
+            if (auto *SI = dyn_cast<StoreInst>(Prev)) {
+                MemoryLocation AccessedLoc = MemoryLocation::get(SI);
+                for (auto &Loc : Locs) {
+                    if (AccessedLoc.Ptr->stripPointerCasts() == Loc.Ptr->stripPointerCasts() ||
+                        getUnderlyingObject(AccessedLoc.Ptr) == getUnderlyingObject(Loc.Ptr) ||
+                        AA.alias(AccessedLoc, Loc) != llvm::AliasResult::NoAlias) {
+                        memoryCollision = true; break;
+                    }
+                }
+            } else if (auto *LI = dyn_cast<LoadInst>(Prev)) {
+                MemoryLocation AccessedLoc = MemoryLocation::get(LI);
+                for (auto &Loc : Locs) {
+                    if (AccessedLoc.Ptr->stripPointerCasts() == Loc.Ptr->stripPointerCasts() ||
+                        getUnderlyingObject(AccessedLoc.Ptr) == getUnderlyingObject(Loc.Ptr) ||
+                        AA.alias(AccessedLoc, Loc) != llvm::AliasResult::NoAlias) {
+                        memoryCollision = true; break;
+                    }
+                }
+            } else {
+                // 2. Fallback to AA for Opaque calls/Intrinsics
+                for (auto &Loc : Locs) {
+                    if (isModSet(AA.getModRefInfo(Prev, Loc))) { 
+                        memoryCollision = true; break; 
+                    }
+                    if (!isSend && isModOrRefSet(AA.getModRefInfo(Prev, Loc))) {
+                        memoryCollision = true; break;
+                    }
+                }
             }
         }
+        
+        // If we hit a collision, we must immediately stop pulling the network call backward
         if (memoryCollision) break; 
+        
         InsertPoint = Prev;
         Prev = Prev->getPrevNode();
     }
@@ -488,7 +522,7 @@ void MDMPPass::injectWaitsForRegion(Instruction *RegionEnd, AAResults &AA, LoopI
                     // Collision Router
                     bool memoryCollision = false;
 
-                    // Protect Finalize and Abort paths
+                    // 1. THE HARD BARRIER
                     if (auto *Call = dyn_cast<CallInst>(Inst)) {
                         if (Function *CalledFn = Call->getCalledFunction()) {
                             StringRef Name = CalledFn->getName();
@@ -502,62 +536,109 @@ void MDMPPass::injectWaitsForRegion(Instruction *RegionEnd, AAResults &AA, LoopI
 
                     if (!memoryCollision && !isAsyncCall) {
                         
-                        // Catch TBAA/SROA blindspots by checking operands directly
-                        for (Value *Op : Inst->operands()) {
+                        // 2. PRECISE LOAD/STORE TRACKING
+                        if (auto *LI = dyn_cast<LoadInst>(Inst)) {
+                            MemoryLocation AccessedLoc = MemoryLocation::get(LI);
                             for (auto &Loc : Req.Locs) {
-                                // Strip away all macro (void*) bitcasts and compare the raw allocations
-                                if (Op == Loc.Ptr || 
-                                    Op->stripPointerCasts() == Loc.Ptr->stripPointerCasts() ||
-                                    getUnderlyingObject(Op) == getUnderlyingObject(Loc.Ptr)) {
-                                    memoryCollision = true; 
-                                    break;
+                                if (AccessedLoc.Ptr->stripPointerCasts() == Loc.Ptr->stripPointerCasts() ||
+                                    getUnderlyingObject(AccessedLoc.Ptr) == getUnderlyingObject(Loc.Ptr) ||
+                                    AA.alias(AccessedLoc, Loc) != llvm::AliasResult::NoAlias) {
+                                    memoryCollision = true; break;
                                 }
                             }
-                            if (memoryCollision) break;
+                        } 
+                        else if (auto *SI = dyn_cast<StoreInst>(Inst)) {
+                            MemoryLocation AccessedLoc = MemoryLocation::get(SI);
+                            for (auto &Loc : Req.Locs) {
+                                if (AccessedLoc.Ptr->stripPointerCasts() == Loc.Ptr->stripPointerCasts() ||
+                                    getUnderlyingObject(AccessedLoc.Ptr) == getUnderlyingObject(Loc.Ptr) ||
+                                    AA.alias(AccessedLoc, Loc) != llvm::AliasResult::NoAlias) {
+                                    memoryCollision = true; break;
+                                }
+                            }
                         }
-
-                        // Alias analysis fallback (For complex pointer math or opaque functions)
-                        if (!memoryCollision) {
-                            if (auto *Call = dyn_cast<CallInst>(Inst)) {
-                                StringRef FnName = "";
-                                if (Call->getCalledFunction()) FnName = Call->getCalledFunction()->getName();
+                        // 3. OPAQUE FUNCTION CALL CAPTURE
+                        else if (auto *Call = dyn_cast<CallInst>(Inst)) {
+                            StringRef FnName = "";
+                            if (Call->getCalledFunction()) FnName = Call->getCalledFunction()->getName();
+                            
+                            bool isHarmlessSetup = FnName.starts_with("_ZNSt6vector") || 
+                                                   FnName.starts_with("_ZNKSt6vector") ||
+                                                   FnName.contains("dataEv") || 
+                                                   FnName.contains("sizeEv") || 
+                                                   FnName.contains("swap");
+                            
+                            if (!isHarmlessSetup) {
+                                // Does the function capture the buffer directly as an argument?
+                                for (Value *Arg : Call->args()) {
+                                    for (auto &Loc : Req.Locs) {
+                                        if (Arg->stripPointerCasts() == Loc.Ptr->stripPointerCasts() ||
+                                            getUnderlyingObject(Arg) == getUnderlyingObject(Loc.Ptr)) {
+                                            memoryCollision = true; break;
+                                        }
+                                    }
+                                    if (memoryCollision) break;
+                                }
                                 
-                                for (auto &Loc : Req.Locs) {
-                                    if (isModOrRefSet(AA.getModRefInfo(Inst, Loc))) {
-                                        memoryCollision = true; break;
-                                    }
-                                }
-                            } else if (Inst->mayReadOrWriteMemory()) {
-                                for (auto &Loc : Req.Locs) {
-                                    if (isModOrRefSet(AA.getModRefInfo(Inst, Loc))) {
-                                        memoryCollision = true; break;
+                                // Alias Analysis fallback for complex C++ calls
+                                if (!memoryCollision) {
+                                    for (auto &Loc : Req.Locs) {
+                                        if (isModOrRefSet(AA.getModRefInfo(Call, Loc))) {
+                                            memoryCollision = true; break;
+                                        }
                                     }
                                 }
                             }
                         }
+                        // 4. FALLBACK FOR OTHER MEMORY INSTRUCTIONS (e.g. LLVM Intrinsics)
+                        else if (Inst->mayReadOrWriteMemory()) {
+                            for (auto &Loc : Req.Locs) {
+                                if (isModOrRefSet(AA.getModRefInfo(Inst, Loc))) {
+                                    memoryCollision = true; break;
+                                }
+                            }
+                        }
+                    }
+                    if (memoryCollision) {
+                        WaitInsertionPoints.push_back(Inst);
+                        foundWaitPoint = true;
+                        break; 
                     }
                 }
             } 
             if (!foundWaitPoint) {
                 bool hasSuccessors = false;
-                
-                // Grab the loop where the network request was originally created
                 Loop *ReqLoop = LI.getLoopFor(Req.RuntimeCall->getParent());
 
                 for (BasicBlock *Succ : successors(BB)) {
                     hasSuccessors = true;
                     
-                    // Prevent requests from leaking into the next iteration of their origin loop
-                    if (ReqLoop && Succ == ReqLoop->getHeader()) {
-                        llvm::errs() << "[MDMP PASS DEBUG] Wait forced at Loop Backedge.\n";
-                        WaitInsertionPoints.push_back(BB->getTerminator());
-                    } else {
-                        // Safe to keep exploring forward (including diving into inner loops)
-                        Worklist.push_back({Succ, Succ->begin()});
+                    bool isBackedge = false;
+                    Loop *EdgeLoop = LI.getLoopFor(BB);
+                    while (EdgeLoop) {
+                        if (EdgeLoop->getHeader() == Succ) {
+                            isBackedge = true;
+                            break;
+                        }
+                        EdgeLoop = EdgeLoop->getParentLoop();
                     }
+
+                    if (isBackedge && EdgeLoop) {
+                        // If we cross the backedge of the exact loop where the request was made 
+                        // (e.g., dir=0..4), allow it to wrap so we don't serialize neighbor exchanges!
+                        // BUT if we cross the backedge of an OUTER loop (e.g., the timestep),
+                        // we MUST force a wait to prevent flooding the network.
+                        if (!ReqLoop || (EdgeLoop != ReqLoop && EdgeLoop->contains(ReqLoop))) {
+                            llvm::errs() << "[MDMP PASS DEBUG] Wait forced at Outer Loop Backedge.\n";
+                            WaitInsertionPoints.push_back(BB->getTerminator());
+                            continue; 
+                        }
+                    }
+
+                    // Safe to keep exploring forward
+                    Worklist.push_back({Succ, Succ->begin()});
                 }
                 
-                // If we hit the end of the function (e.g., return block)
                 if (!hasSuccessors) {
                     llvm::errs() << "[MDMP PASS DEBUG] Wait forced at End of Function.\n";
                     WaitInsertionPoints.push_back(BB->getTerminator());
