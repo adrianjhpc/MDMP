@@ -9,4 +9,4 @@ INCLUDES="-I${MDMP_DIR}/../src"
 LIBS="-L${MDMP_DIR}/../build/src -lmdmp_runtime"
 
 # Call the real compiler (clang), forcing at least -O1, injecting our plugin, and passing along user args
-clang -O3 -fno-math-errno ${PLUGIN} ${INCLUDES} "$@" ${LIBS}
+clang -O3 ${PLUGIN} ${INCLUDES} "$@" ${LIBS}
