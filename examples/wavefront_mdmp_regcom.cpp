@@ -43,12 +43,11 @@ int main(int argc, char** argv) {
         MDMP_COMMREGION_END();
 
         // By the time we reach this loop, the overlap opportunity is completely gone.
-        for (int i = 0; i < num_elements; ++i) {
+        for (int i = 0; i < num_elements-1; ++i) {
             local_data[i] = heavy_math(local_data[i]); 
-            if (i == num_elements - 1) {
-                local_data[i] += remote_ghost; 
-            }
-        }
+         }
+         local_data[num_elements-1] += remote_ghost; 
+         
     }
 
     double end_time = MDMP_WTIME();

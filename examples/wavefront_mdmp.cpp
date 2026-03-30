@@ -33,16 +33,14 @@ int main(int argc, char** argv) {
     else if (rank == 1) {
         MDMP_RECV(&remote_ghost, 1, rank, 0, 0);
 
-        for (int i = 0; i < num_elements; ++i) {
+        for (int i = 0; i < num_elements-1; ++i) {
             
             // Most of the work is purely local.
             local_data[i] = heavy_math(local_data[i]); 
-            
-            // Only the very last element needs the remote ghost cell.
-            if (i == num_elements - 1) {
-                local_data[i] += remote_ghost; 
-            }
-        }
+        }    
+        // Only the very last element needs the remote ghost cell.
+        local_data[num_elements-1] += remote_ghost; 
+       
     }
 
     double end_time = MDMP_WTIME();
