@@ -2,7 +2,6 @@
 
 using namespace llvm;
 
-
 PreservedAnalyses MDMPPass::run(Module &M, ModuleAnalysisManager &MAM) {
   bool changed = false;
   auto &FAM = MAM.getResult<FunctionAnalysisManagerModuleProxy>(M).getManager();
@@ -24,8 +23,6 @@ bool MDMPPass::runOnFunction(Function &F, AAResults &AA, DominatorTree &DT, Loop
     
   transformFunctionsToCalls(F, AA, DT, LI);
     
-  // If the function ends and we still have pending imperative calls 
-  // that weren't part of a CommRegion, trace and inject their waits now!
   if (!PendingRequests.empty()) {
     LLVMContext &Ctx = F.getContext();
     Module *M = F.getParent();
@@ -39,7 +36,6 @@ void MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
   Module *M = F.getParent();
   LLVMContext &Ctx = M->getContext();
 
-  // Utility functions
   FunctionCallee runtime_begin = M->getOrInsertFunction("mdmp_commregion_begin", Type::getVoidTy(Ctx));
   FunctionCallee runtime_end   = M->getOrInsertFunction("mdmp_commregion_end", Type::getVoidTy(Ctx));
   FunctionCallee runtime_sync  = M->getOrInsertFunction("mdmp_sync", Type::getVoidTy(Ctx));
@@ -51,8 +47,6 @@ void MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
   FunctionCallee runtime_set_debug = M->getOrInsertFunction("mdmp_set_debug", Type::getVoidTy(Ctx), Type::getInt32Ty(Ctx));
   FunctionCallee runtime_abort = M->getOrInsertFunction("mdmp_abort", Type::getVoidTy(Ctx), Type::getInt32Ty(Ctx));
 
- 
-  // Imperative functionality apis (Returns i32 Req ID) 
   FunctionCallee runtime_send = M->getOrInsertFunction("mdmp_send", 
 						       Type::getInt32Ty(Ctx), PointerType::getUnqual(Ctx), Type::getInt64Ty(Ctx), 
 						       Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx));
@@ -65,9 +59,6 @@ void MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
 						       Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx));
   if (Function *FRecv = dyn_cast<Function>(runtime_recv.getCallee())) { FRecv->addFnAttr(Attribute::NoUnwind); }
 
-  // ==========================================
-  // Imperative Collective apis
-  // ==========================================
   FunctionCallee runtime_reduce = M->getOrInsertFunction("mdmp_reduce", 
 							 Type::getInt32Ty(Ctx), PointerType::getUnqual(Ctx), PointerType::getUnqual(Ctx), 
 							 Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx)); 
@@ -89,9 +80,6 @@ void MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
   if (Function *FAllgather = dyn_cast<Function>(runtime_allgather.getCallee())) { FAllgather->addFnAttr(Attribute::NoUnwind); }
 
 
-  // ==========================================
-  // Declarative Collective apis
-  // ==========================================
   FunctionCallee runtime_register_send = M->getOrInsertFunction("mdmp_register_send", 
 								Type::getVoidTy(Ctx), PointerType::getUnqual(Ctx), Type::getInt64Ty(Ctx), 
 								Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx));
@@ -125,7 +113,7 @@ void MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
   FunctionCallee runtime_commit = M->getOrInsertFunction("mdmp_commit", Type::getInt32Ty(Ctx));
 
   std::vector<Instruction*> toDelete;
-  std::vector<TrackedBuffer> ActiveRegionLocs; // Tracks buffers for the Declarative paradigm
+  std::vector<TrackedBuffer> ActiveRegionLocs;
 
   for (auto &BB : F) {
     for (auto &I : BB) {
@@ -136,188 +124,178 @@ void MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
       IRBuilder<> Builder(CI);
 
       if (Name == "__mdmp_marker_commregion_begin") {
-	CallInst *NewCall = Builder.CreateCall(runtime_begin);
-	CI->replaceAllUsesWith(NewCall);
-	ActiveRegionLocs.clear(); 
-	toDelete.push_back(CI);
+        CallInst *NewCall = Builder.CreateCall(runtime_begin);
+        CI->replaceAllUsesWith(NewCall);
+        ActiveRegionLocs.clear(); 
+        toDelete.push_back(CI);
       }
-      // ==========================================
-      // Imperative functions (sends/recvs)
-      // ==========================================
       else if (Name == "__mdmp_marker_send" || Name == "__mdmp_marker_recv") {
-	Value *BufferPtr = CI->getArgOperand(0);
-	Value *CountVal  = CI->getArgOperand(1);
-	Value *TypeVal   = CI->getArgOperand(2);
-	Value *ByteSize  = CI->getArgOperand(3);
-	Value *ActorRank = CI->getArgOperand(4);
-	Value *PeerRank  = CI->getArgOperand(5);
-	Value *TagVal    = CI->getArgOperand(6); 
+        Value *BufferPtr = CI->getArgOperand(0);
+        Value *CountVal  = CI->getArgOperand(1);
+        Value *TypeVal   = CI->getArgOperand(2);
+        Value *ByteSize  = CI->getArgOperand(3);
+        Value *ActorRank = CI->getArgOperand(4);
+        Value *PeerRank  = CI->getArgOperand(5);
+        Value *TagVal    = CI->getArgOperand(6); 
 
-	LocationSize LocSize = LocationSize::beforeOrAfterPointer();
-	if (auto *ConstBytes = dyn_cast<ConstantInt>(ByteSize)) {
-	  LocSize = LocationSize::precise(ConstBytes->getZExtValue());
-	}
+        LocationSize LocSize = LocationSize::beforeOrAfterPointer();
+        if (auto *ConstBytes = dyn_cast<ConstantInt>(ByteSize)) {
+          LocSize = LocationSize::precise(ConstBytes->getZExtValue());
+        }
 
-	bool isSend = (Name == "__mdmp_marker_send");
-	std::vector<TrackedBuffer> TrackedLocs = { {MemoryLocation(BufferPtr, LocSize), isSend} };
+        bool isSend = (Name == "__mdmp_marker_send");
+        std::vector<TrackedBuffer> TrackedLocs = { {MemoryLocation(BufferPtr, LocSize), isSend} };
                 
-	CallInst *NewCall = Builder.CreateCall(isSend ? runtime_send : runtime_recv, 
+        CallInst *NewCall = Builder.CreateCall(isSend ? runtime_send : runtime_recv, 
 					       {BufferPtr, CountVal, TypeVal, ByteSize, ActorRank, PeerRank, TagVal});
                 
-	CI->replaceAllUsesWith(NewCall);
+        CI->replaceAllUsesWith(NewCall);
                 
-	hoistInitiation(NewCall, TrackedLocs, AA, DT, LI, isSend);
-	PendingRequests.push_back({TrackedLocs, NewCall});
-	toDelete.push_back(CI);
+        hoistInitiation(NewCall, TrackedLocs, AA, DT, LI, isSend);
+        PendingRequests.push_back({TrackedLocs, NewCall});
+        toDelete.push_back(CI);
       } 
-      // ==========================================
-      // Declarative functionality (register/commit)
-      // ==========================================
       else if (Name == "__mdmp_marker_register_send" || Name == "__mdmp_marker_register_recv") {
-	Value *BufferPtr = CI->getArgOperand(0);
-	Value *CountVal  = CI->getArgOperand(1);
-	Value *TypeVal   = CI->getArgOperand(2);
-	Value *ByteSize  = CI->getArgOperand(3);
-	Value *ActorRank = CI->getArgOperand(4);
-	Value *PeerRank  = CI->getArgOperand(5);
-	Value *TagVal    = CI->getArgOperand(6); 
+        Value *BufferPtr = CI->getArgOperand(0);
+        Value *CountVal  = CI->getArgOperand(1);
+        Value *TypeVal   = CI->getArgOperand(2);
+        Value *ByteSize  = CI->getArgOperand(3);
+        Value *ActorRank = CI->getArgOperand(4);
+        Value *PeerRank  = CI->getArgOperand(5);
+        Value *TagVal    = CI->getArgOperand(6); 
 
-	LocationSize LocSize = LocationSize::beforeOrAfterPointer();
-	if (auto *ConstBytes = dyn_cast<ConstantInt>(ByteSize)) { LocSize = LocationSize::precise(ConstBytes->getZExtValue()); }
+        LocationSize LocSize = LocationSize::beforeOrAfterPointer();
+        if (auto *ConstBytes = dyn_cast<ConstantInt>(ByteSize)) { LocSize = LocationSize::precise(ConstBytes->getZExtValue()); }
 
-	bool isSend = (Name == "__mdmp_marker_register_send");
-	ActiveRegionLocs.push_back({MemoryLocation(BufferPtr, LocSize), isSend});
+        bool isSend = (Name == "__mdmp_marker_register_send");
+        ActiveRegionLocs.push_back({MemoryLocation(BufferPtr, LocSize), isSend});
                 
-	CallInst *NewCall = Builder.CreateCall(isSend ? runtime_register_send : runtime_register_recv, 
+        CallInst *NewCall = Builder.CreateCall(isSend ? runtime_register_send : runtime_register_recv, 
 					       {BufferPtr, CountVal, TypeVal, ByteSize, ActorRank, PeerRank, TagVal});
                 
-	CI->replaceAllUsesWith(NewCall);
-	toDelete.push_back(CI);
+        CI->replaceAllUsesWith(NewCall);
+        toDelete.push_back(CI);
       }
       else if (Name == "__mdmp_marker_register_reduce") {
-	Value *InBuf = CI->getArgOperand(0); Value *OutBuf = CI->getArgOperand(1);
-	Value *ByteSize = CI->getArgOperand(4); 
+        Value *InBuf = CI->getArgOperand(0); Value *OutBuf = CI->getArgOperand(1);
+        Value *ByteSize = CI->getArgOperand(4); 
 
-	LocationSize LocSize = LocationSize::beforeOrAfterPointer();
-	if (auto *ConstBytes = dyn_cast<ConstantInt>(ByteSize)) { LocSize = LocationSize::precise(ConstBytes->getZExtValue()); }
+        LocationSize LocSize = LocationSize::beforeOrAfterPointer();
+        if (auto *ConstBytes = dyn_cast<ConstantInt>(ByteSize)) { LocSize = LocationSize::precise(ConstBytes->getZExtValue()); }
                 
-	// Track both buffers to protect them
-	ActiveRegionLocs.push_back({MemoryLocation(InBuf, LocSize), true});   // InBuf is Send
-	ActiveRegionLocs.push_back({MemoryLocation(OutBuf, LocSize), false}); // OutBuf is Recv	
+        // Corrected Tags: InBuf is Send (True), OutBuf is Recv (False)
+        ActiveRegionLocs.push_back({MemoryLocation(InBuf, LocSize), true});   
+        ActiveRegionLocs.push_back({MemoryLocation(OutBuf, LocSize), false}); 
 
-	CallInst *NewCall = Builder.CreateCall(runtime_register_reduce, 
+        CallInst *NewCall = Builder.CreateCall(runtime_register_reduce, 
 					       {InBuf, OutBuf, CI->getArgOperand(2), CI->getArgOperand(3), CI->getArgOperand(4), CI->getArgOperand(5), CI->getArgOperand(6)});
-	CI->replaceAllUsesWith(NewCall);
-	toDelete.push_back(CI);
+        CI->replaceAllUsesWith(NewCall);
+        toDelete.push_back(CI);
       }
       else if (Name == "__mdmp_marker_register_gather") {
-	Value *SendBuf = CI->getArgOperand(0); Value *RecvBuf = CI->getArgOperand(2);
-	Value *ByteSize = CI->getArgOperand(4); 
+        Value *SendBuf = CI->getArgOperand(0); Value *RecvBuf = CI->getArgOperand(2);
+        Value *ByteSize = CI->getArgOperand(4); 
 
-	LocationSize LocSize = LocationSize::beforeOrAfterPointer();
-	if (auto *ConstBytes = dyn_cast<ConstantInt>(ByteSize)) { LocSize = LocationSize::precise(ConstBytes->getZExtValue()); }
+        LocationSize LocSize = LocationSize::beforeOrAfterPointer();
+        if (auto *ConstBytes = dyn_cast<ConstantInt>(ByteSize)) { LocSize = LocationSize::precise(ConstBytes->getZExtValue()); }
                 
-	// Track both buffers to protect them
-	ActiveRegionLocs.push_back({MemoryLocation(SendBuf, LocSize), true});
-	ActiveRegionLocs.push_back({MemoryLocation(RecvBuf, LocSize), false});
-	
-	CallInst *NewCall = Builder.CreateCall(runtime_register_gather, 
+        // Corrected Tags
+        ActiveRegionLocs.push_back({MemoryLocation(SendBuf, LocSize), true});
+        ActiveRegionLocs.push_back({MemoryLocation(RecvBuf, LocSize), false});
+        
+        CallInst *NewCall = Builder.CreateCall(runtime_register_gather, 
 					       {SendBuf, CI->getArgOperand(1), RecvBuf, CI->getArgOperand(3), CI->getArgOperand(4), CI->getArgOperand(5)});
-	CI->replaceAllUsesWith(NewCall);
-	toDelete.push_back(CI);
+        CI->replaceAllUsesWith(NewCall);
+        toDelete.push_back(CI);
       } 
       else if (Name == "__mdmp_marker_commit") {
-	CallInst *NewCommit = Builder.CreateCall(runtime_commit);
-	CI->replaceAllUsesWith(NewCommit);
+        CallInst *NewCommit = Builder.CreateCall(runtime_commit);
+        CI->replaceAllUsesWith(NewCommit);
                 
-	// Hoist commits to overall user work with the coalesced network payload
-	hoistInitiation(NewCommit, ActiveRegionLocs, AA, DT, LI, true);
-	PendingRequests.push_back({ActiveRegionLocs, NewCommit});
+        hoistInitiation(NewCommit, ActiveRegionLocs, AA, DT, LI, true);
+        PendingRequests.push_back({ActiveRegionLocs, NewCommit});
                 
-	ActiveRegionLocs.clear(); // Reset in case the programmer has called commit multiple times
-	toDelete.push_back(CI);
+        ActiveRegionLocs.clear(); 
+        toDelete.push_back(CI);
       }
-      // ==========================================
-      // Collective operations
-      // ==========================================
       else if (Name == "__mdmp_marker_reduce") {
-	CallInst *NewCall = Builder.CreateCall(runtime_reduce, 
+        CallInst *NewCall = Builder.CreateCall(runtime_reduce, 
 					       {CI->getArgOperand(0), CI->getArgOperand(1), CI->getArgOperand(2), CI->getArgOperand(3), CI->getArgOperand(4), CI->getArgOperand(5), CI->getArgOperand(6)});
-	CI->replaceAllUsesWith(NewCall);
+        CI->replaceAllUsesWith(NewCall);
                 
-	std::vector<TrackedBuffer> Locs = {
-	  {MemoryLocation(CI->getArgOperand(1), LocationSize::beforeOrAfterPointer()), true}, // Out Buf
-	  {MemoryLocation(CI->getArgOperand(0), LocationSize::beforeOrAfterPointer()), false}  // In Buf
-	};
-	hoistInitiation(NewCall, Locs, AA, DT, LI, false);
-	PendingRequests.push_back({Locs, NewCall});
-	toDelete.push_back(CI);
+        std::vector<TrackedBuffer> Locs = {
+          {MemoryLocation(CI->getArgOperand(1), LocationSize::beforeOrAfterPointer()), false}, // Out Buf (Recv)
+          {MemoryLocation(CI->getArgOperand(0), LocationSize::beforeOrAfterPointer()), true}   // In Buf (Send)
+        };
+        hoistInitiation(NewCall, Locs, AA, DT, LI, false);
+        PendingRequests.push_back({Locs, NewCall});
+        toDelete.push_back(CI);
       }
       else if (Name == "__mdmp_marker_gather") {
-	CallInst *NewCall = Builder.CreateCall(runtime_gather, 
+        CallInst *NewCall = Builder.CreateCall(runtime_gather, 
 					       {CI->getArgOperand(0), CI->getArgOperand(1), CI->getArgOperand(2), CI->getArgOperand(3), CI->getArgOperand(4), CI->getArgOperand(5)});
-	CI->replaceAllUsesWith(NewCall);
+        CI->replaceAllUsesWith(NewCall);
                 
-	std::vector<TrackedBuffer> Locs = {
-	  {MemoryLocation(CI->getArgOperand(2), LocationSize::beforeOrAfterPointer()), false}, // Recv Buf
-	  {MemoryLocation(CI->getArgOperand(0), LocationSize::beforeOrAfterPointer()), true}   // Send Buf
-	};
-	hoistInitiation(NewCall, Locs, AA, DT, LI, false);
-	PendingRequests.push_back({Locs, NewCall});
-	toDelete.push_back(CI);
+        std::vector<TrackedBuffer> Locs = {
+          {MemoryLocation(CI->getArgOperand(2), LocationSize::beforeOrAfterPointer()), false}, // Recv Buf (Recv)
+          {MemoryLocation(CI->getArgOperand(0), LocationSize::beforeOrAfterPointer()), true}   // Send Buf (Send)
+        };
+        hoistInitiation(NewCall, Locs, AA, DT, LI, false);
+        PendingRequests.push_back({Locs, NewCall});
+        toDelete.push_back(CI);
       }
       else if (Name == "__mdmp_marker_allreduce" || Name == "__mdmp_marker_register_allreduce") {
-	FunctionCallee target_func = (Name == "__mdmp_marker_allreduce") ? runtime_allreduce : runtime_register_allreduce;
-	CallInst *NewCall = Builder.CreateCall(target_func, 
+        FunctionCallee target_func = (Name == "__mdmp_marker_allreduce") ? runtime_allreduce : runtime_register_allreduce;
+        CallInst *NewCall = Builder.CreateCall(target_func, 
 					       {CI->getArgOperand(0), CI->getArgOperand(1), CI->getArgOperand(2), CI->getArgOperand(3), CI->getArgOperand(4), CI->getArgOperand(5)});
-	CI->replaceAllUsesWith(NewCall);
+        CI->replaceAllUsesWith(NewCall);
                 
-	std::vector<TrackedBuffer> Locs = {
-	  {MemoryLocation(CI->getArgOperand(1), LocationSize::beforeOrAfterPointer()), true}, // Out Buf
-	  {MemoryLocation(CI->getArgOperand(0), LocationSize::beforeOrAfterPointer()), false}  // In Buf
-	};
+        std::vector<TrackedBuffer> Locs = {
+          {MemoryLocation(CI->getArgOperand(1), LocationSize::beforeOrAfterPointer()), false}, // Out Buf (Recv)
+          {MemoryLocation(CI->getArgOperand(0), LocationSize::beforeOrAfterPointer()), true}   // In Buf (Send)
+        };
 
-	if (Name == "__mdmp_marker_allreduce") {
-	  hoistInitiation(NewCall, Locs, AA, DT, LI, false); 
-	  AsyncRequest Req;
-	  Req.RuntimeCall = NewCall;
-	  Req.Locs = Locs;
-	  PendingRequests.push_back(Req);
-	  llvm::errs() << "[MDMP PASS DEBUG] Caught Imperative Allreduce.\n";
-	} else {
-	  ActiveRegionLocs.push_back(Locs[0]);
-	  ActiveRegionLocs.push_back(Locs[1]);
-	}
-	toDelete.push_back(CI);
+        if (Name == "__mdmp_marker_allreduce") {
+          hoistInitiation(NewCall, Locs, AA, DT, LI, false); 
+          AsyncRequest Req;
+          Req.RuntimeCall = NewCall;
+          Req.Buffers = Locs;
+          PendingRequests.push_back(Req);
+          llvm::errs() << "[MDMP PASS DEBUG] Caught Imperative Allreduce.\n";
+        } else {
+          ActiveRegionLocs.push_back(Locs[0]);
+          ActiveRegionLocs.push_back(Locs[1]);
+        }
+        toDelete.push_back(CI);
       }
       else if (Name == "__mdmp_marker_allgather" || Name == "__mdmp_marker_register_allgather") {
-	FunctionCallee target_func = (Name == "__mdmp_marker_allgather") ? runtime_allgather : runtime_register_allgather;
-	CallInst *NewCall = Builder.CreateCall(target_func, 
+        FunctionCallee target_func = (Name == "__mdmp_marker_allgather") ? runtime_allgather : runtime_register_allgather;
+        CallInst *NewCall = Builder.CreateCall(target_func, 
 					       {CI->getArgOperand(0), CI->getArgOperand(1), CI->getArgOperand(2), CI->getArgOperand(3), CI->getArgOperand(4)});
-	CI->replaceAllUsesWith(NewCall);
+        CI->replaceAllUsesWith(NewCall);
                 
-	std::vector<TrackedBuffer> Locs = {
-	  {MemoryLocation(CI->getArgOperand(2), LocationSize::beforeOrAfterPointer()), true}, // Out Buf
-	   {MemoryLocation(CI->getArgOperand(0), LocationSize::beforeOrAfterPointer()), false}  // In Buf
-	};
+        std::vector<TrackedBuffer> Locs = {
+          {MemoryLocation(CI->getArgOperand(2), LocationSize::beforeOrAfterPointer()), false}, // Out Buf (Recv)
+	  {MemoryLocation(CI->getArgOperand(0), LocationSize::beforeOrAfterPointer()), true}  // In Buf (Send)
+        };
 
-	if (Name == "__mdmp_marker_allgather") {
-	  hoistInitiation(NewCall, Locs, AA, DT, LI, false);
-	  AsyncRequest Req;
-	  Req.RuntimeCall = NewCall;
-	  Req.Locs = Locs;
-	  PendingRequests.push_back(Req);
-	  llvm::errs() << "[MDMP PASS DEBUG] Caught Imperative Allgather.\n";
-	} else {
-	  ActiveRegionLocs.push_back(Locs[0]);
-	  ActiveRegionLocs.push_back(Locs[1]);
-	}
-	toDelete.push_back(CI);
+        if (Name == "__mdmp_marker_allgather") {
+          hoistInitiation(NewCall, Locs, AA, DT, LI, false);
+          AsyncRequest Req;
+          Req.RuntimeCall = NewCall;
+          Req.Buffers = Locs;
+          PendingRequests.push_back(Req);
+          llvm::errs() << "[MDMP PASS DEBUG] Caught Imperative Allgather.\n";
+        } else {
+          ActiveRegionLocs.push_back(Locs[0]);
+          ActiveRegionLocs.push_back(Locs[1]);
+        }
+        toDelete.push_back(CI);
       } 
       else if (Name == "__mdmp_marker_commregion_end") {
-	CallInst *NewEnd = Builder.CreateCall(runtime_end);
-	injectWaitsForRegion(NewEnd, AA, LI, Ctx, M, DT);
-	toDelete.push_back(CI);
+        CallInst *NewEnd = Builder.CreateCall(runtime_end);
+        injectWaitsForRegion(NewEnd, AA, LI, Ctx, M, DT);
+        toDelete.push_back(CI);
       }
       else if (Name == "__mdmp_marker_get_rank") { CallInst *NewCall = Builder.CreateCall(runtime_get_rank); CI->replaceAllUsesWith(NewCall); toDelete.push_back(CI); }
       else if (Name == "__mdmp_marker_get_size") { CallInst *NewCall = Builder.CreateCall(runtime_get_size); CI->replaceAllUsesWith(NewCall); toDelete.push_back(CI); }
@@ -326,16 +304,16 @@ void MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
       else if (Name == "__mdmp_marker_sync") { Builder.CreateCall(runtime_sync); toDelete.push_back(CI); }
       else if (Name == "__mdmp_marker_wtime") { CallInst *NewCall = Builder.CreateCall(runtime_wtime); CI->replaceAllUsesWith(NewCall); toDelete.push_back(CI); }
       else if (Name == "__mdmp_marker_set_debug") {
-	Value *EnableArg = CI->getArgOperand(0); 
-	CallInst *NewCall = Builder.CreateCall(runtime_set_debug, {EnableArg});
-	CI->replaceAllUsesWith(NewCall);
-	toDelete.push_back(CI);
+        Value *EnableArg = CI->getArgOperand(0); 
+        CallInst *NewCall = Builder.CreateCall(runtime_set_debug, {EnableArg});
+        CI->replaceAllUsesWith(NewCall);
+        toDelete.push_back(CI);
       }
       else if (Name == "__mdmp_marker_abort") {
-	Value *EnableArg = CI->getArgOperand(0);
-	CallInst *NewCall = Builder.CreateCall(runtime_abort, {EnableArg});
-	CI->replaceAllUsesWith(NewCall);
-	toDelete.push_back(CI);
+        Value *EnableArg = CI->getArgOperand(0);
+        CallInst *NewCall = Builder.CreateCall(runtime_abort, {EnableArg});
+        CI->replaceAllUsesWith(NewCall);
+        toDelete.push_back(CI);
       }
     }
   }
@@ -343,35 +321,35 @@ void MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
 
 }
 
-void MDMPPass::hoistInitiation(CallInst *CI, std::vector<TrackedBuffer> &Locs, AAResults &AA, DominatorTree &DT, LoopInfo &LI, bool isSend) {
+void MDMPPass::hoistInitiation(CallInst *CI, std::vector<TrackedBuffer> &Buffers, AAResults &AA, DominatorTree &DT, LoopInfo &LI, bool isSend) {
   Loop *L = LI.getLoopFor(CI->getParent());
   if (L && isSend) {
     bool isSafeToHoistOut = true;
     for (Value *Op : CI->operands()) {
       if (Instruction *OpInst = dyn_cast<Instruction>(Op)) {
-	if (L->contains(OpInst)) { isSafeToHoistOut = false; break; }
+        if (L->contains(OpInst)) { isSafeToHoistOut = false; break; }
       }
     }
     if (isSafeToHoistOut) {
       for (BasicBlock *BB : L->blocks()) {
-	for (Instruction &I : *BB) {
-	  if (auto *Call = dyn_cast<CallInst>(&I)) {
-	    if (Call->getCalledFunction() && Call->getCalledFunction()->getName() == "mdmp_commregion_begin") { isSafeToHoistOut = false; break; }
-	  }
-	  if (I.mayWriteToMemory()) {
-	    for (auto &Buf : Buffers) {
-	      if (isModSet(AA.getModRefInfo(&I, Buf.Loc))) { isSafeToHoistOut = false; break; }
-	    }
-	  }
-	}
-	if (!isSafeToHoistOut) break;
+        for (Instruction &I : *BB) {
+          if (auto *Call = dyn_cast<CallInst>(&I)) {
+            if (Call->getCalledFunction() && Call->getCalledFunction()->getName() == "mdmp_commregion_begin") { isSafeToHoistOut = false; break; }
+          }
+          if (I.mayWriteToMemory()) {
+            for (auto &Buf : Buffers) {
+              if (isModSet(AA.getModRefInfo(&I, Buf.Loc))) { isSafeToHoistOut = false; break; }
+            }
+          }
+        }
+        if (!isSafeToHoistOut) break;
       }
     }
     if (isSafeToHoistOut) {
       BasicBlock *Preheader = L->getLoopPreheader();
       if (Preheader) {
-	CI->moveBefore(Preheader->getTerminator()->getIterator());
-	return; 
+        CI->moveBefore(Preheader->getTerminator()->getIterator());
+        return; 
       }
     }
   }
@@ -394,37 +372,35 @@ void MDMPPass::hoistInitiation(CallInst *CI, std::vector<TrackedBuffer> &Locs, A
             
       // Extreme Exact Match (Bypasses TBAA Blindspots)
       if (auto *SI = dyn_cast<StoreInst>(Prev)) {
-	MemoryLocation AccessedLoc = MemoryLocation::get(SI);
-	for (auto &Loc : Locs) {
-	  if (AccessedLoc.Ptr->stripPointerCasts() == Loc.Ptr->stripPointerCasts() ||
-	      getUnderlyingObject(AccessedLoc.Ptr) == getUnderlyingObject(Loc.Ptr) ||
-	      AA.alias(AccessedLoc, Loc) != llvm::AliasResult::NoAlias) {
-	    memoryCollision = true; break;
-	  }
-	}
+        MemoryLocation AccessedLoc = MemoryLocation::get(SI);
+        for (auto &Buf : Buffers) {
+          if (AccessedLoc.Ptr->stripPointerCasts() == Buf.Loc.Ptr->stripPointerCasts() ||
+              getUnderlyingObject(AccessedLoc.Ptr) == getUnderlyingObject(Buf.Loc.Ptr) ||
+              AA.alias(AccessedLoc, Buf.Loc) != llvm::AliasResult::NoAlias) {
+            memoryCollision = true; break;
+          }
+        }
       } else if (auto *LI = dyn_cast<LoadInst>(Prev)) {
-	MemoryLocation AccessedLoc = MemoryLocation::get(LI);
-	for (auto &Loc : Locs) {
-	  if (AccessedLoc.Ptr->stripPointerCasts() == Loc.Ptr->stripPointerCasts() ||
-	      getUnderlyingObject(AccessedLoc.Ptr) == getUnderlyingObject(Loc.Ptr) ||
-	      AA.alias(AccessedLoc, Loc) != llvm::AliasResult::NoAlias) {
-	    memoryCollision = true; break;
-	  }
-	}
+        MemoryLocation AccessedLoc = MemoryLocation::get(LI);
+        for (auto &Buf : Buffers) {
+          if (!Buf.isNetworkReadOnly) { 
+            if (AccessedLoc.Ptr->stripPointerCasts() == Buf.Loc.Ptr->stripPointerCasts() ||
+                getUnderlyingObject(AccessedLoc.Ptr) == getUnderlyingObject(Buf.Loc.Ptr) ||
+                AA.alias(AccessedLoc, Buf.Loc) != llvm::AliasResult::NoAlias) {
+              memoryCollision = true; break;
+            }
+          }
+        }
       } else {
-	// Fallback to AA for Opaque calls/Intrinsics
-	for (auto &Loc : Locs) {
-	  if (isModSet(AA.getModRefInfo(Prev, Loc))) { 
-	    memoryCollision = true; break; 
-	  }
-	  if (!isSend && isModOrRefSet(AA.getModRefInfo(Prev, Loc))) {
-	    memoryCollision = true; break;
-	  }
-	}
+        // Fallback to AA for Opaque calls/Intrinsics
+        for (auto &Buf : Buffers) {
+          auto MR = AA.getModRefInfo(Prev, Buf.Loc);
+          if (Buf.isNetworkReadOnly && isModSet(MR)) { memoryCollision = true; break; }
+          else if (!Buf.isNetworkReadOnly && isModOrRefSet(MR)) { memoryCollision = true; break; }
+        }
       }
     }
         
-    // If we hit a collision, we must immediately stop pulling the network call backward
     if (memoryCollision) break; 
         
     InsertPoint = Prev;
@@ -461,97 +437,121 @@ void MDMPPass::injectWaitsForRegion(Instruction *RegionEnd, AAResults &AA, LoopI
             
       bool foundWaitPoint = false;
       for (auto It = State.StartIt; It != BB->end(); ++It) {
-	Instruction *Inst = &*It;
+        Instruction *Inst = &*It;
                 
-	if (Inst == RegionEnd) {
-	  WaitInsertionPoints.push_back(Inst); foundWaitPoint = true; break;
-	}
+        if (Inst == RegionEnd) {
+          WaitInsertionPoints.push_back(Inst); foundWaitPoint = true; break;
+        }
                 
-	if (Inst->mayReadOrWriteMemory()) {
-	  bool isAsyncCall = false;
-	  if (auto *Call = dyn_cast<CallInst>(Inst)) {
-	    if (Function *CalledFn = Call->getCalledFunction()) {
-	      StringRef FnName = CalledFn->getName();
-	      if (FnName == "mdmp_send" || FnName == "mdmp_recv" || FnName == "mdmp_reduce" || 
-		  FnName == "mdmp_allreduce" || FnName == "mdmp_allgather" || 
-		  FnName == "mdmp_gather" || FnName == "mdmp_commit" || 
-		  FnName == "mdmp_wait" || FnName == "mdmp_wtime" || // <-- ADDED THESE TWO
-		  FnName == "mdmp_register_send" || FnName == "mdmp_register_recv" ||
-		  FnName == "mdmp_register_reduce" || FnName == "mdmp_register_gather" ||
-		  FnName == "mdmp_register_allreduce" || FnName == "mdmp_register_allgather" ||
-		  FnName.starts_with("__mdmp_marker_")) {
-		isAsyncCall = true;
-	      }
-	    }
-	  }
+        if (Inst->mayReadOrWriteMemory()) {
+          bool isAsyncCall = false;
+          if (auto *Call = dyn_cast<CallInst>(Inst)) {
+            if (Function *CalledFn = Call->getCalledFunction()) {
+              StringRef FnName = CalledFn->getName();
+              if (FnName == "mdmp_send" || FnName == "mdmp_recv" || FnName == "mdmp_reduce" || 
+                  FnName == "mdmp_allreduce" || FnName == "mdmp_allgather" || 
+                  FnName == "mdmp_gather" || FnName == "mdmp_commit" || 
+                  FnName == "mdmp_wait" || FnName == "mdmp_wtime" || 
+                  FnName == "mdmp_register_send" || FnName == "mdmp_register_recv" ||
+                  FnName == "mdmp_register_reduce" || FnName == "mdmp_register_gather" ||
+                  FnName == "mdmp_register_allreduce" || FnName == "mdmp_register_allgather" ||
+                  FnName.starts_with("__mdmp_marker_")) {
+                isAsyncCall = true;
+              }
+            }
+          }
                     
-	  // Manual check for exact pointer matches (bypasses AA limitations)
-	  bool exactMatch = false;
-	  if (auto *LInst = dyn_cast<LoadInst>(Inst)) {
-	    Value *LoadPtr = LInst->getPointerOperand()->stripPointerCasts();
-	    for (auto &Loc : Req.Locs) {
-	      if (LoadPtr == Loc.Ptr->stripPointerCasts() || 
-		  getUnderlyingObject(LoadPtr) == getUnderlyingObject(Loc.Ptr)) { 
-		exactMatch = true; break; 
-	      }
-	    }
-	  } else if (auto *SInst = dyn_cast<StoreInst>(Inst)) {
-	    Value *StorePtr = SInst->getPointerOperand()->stripPointerCasts();
-	    for (auto &Loc : Req.Locs) {
-	      if (StorePtr == Loc.Ptr->stripPointerCasts() || 
-		  getUnderlyingObject(StorePtr) == getUnderlyingObject(Loc.Ptr)) { 
-		exactMatch = true; break; 
-	      }
-	    }
-	  }
+          bool exactMatch = false;
+          if (auto *LInst = dyn_cast<LoadInst>(Inst)) {
+            Value *LoadPtr = LInst->getPointerOperand()->stripPointerCasts();
+            for (auto &Buf : Req.Buffers) {
+              if (LoadPtr == Buf.Loc.Ptr->stripPointerCasts() || 
+                  getUnderlyingObject(LoadPtr) == getUnderlyingObject(Buf.Loc.Ptr)) { 
+                exactMatch = true; break; 
+              }
+            }
+          } else if (auto *SInst = dyn_cast<StoreInst>(Inst)) {
+            Value *StorePtr = SInst->getPointerOperand()->stripPointerCasts();
+            for (auto &Buf : Req.Buffers) {
+              if (StorePtr == Buf.Loc.Ptr->stripPointerCasts() || 
+                  getUnderlyingObject(StorePtr) == getUnderlyingObject(Buf.Loc.Ptr)) { 
+                exactMatch = true; break; 
+              }
+            }
+          }
 
-	  // Collision Router
-	  bool memoryCollision = false;
+          // Collision Router
+          bool memoryCollision = false;
 
-	  // Find any hard barriers we have
-	  if (auto *Call = dyn_cast<CallInst>(Inst)) {
-	    if (Function *CalledFn = Call->getCalledFunction()) {
-	      StringRef Name = CalledFn->getName();
-	      if (Name == "mdmp_final" || Name == "__mdmp_marker_final" || 
-		  Name == "MPI_Finalize" || Name == "mdmp_abort" || Name == "__mdmp_marker_abort") {
-		llvm::errs() << "[MDMP PASS DEBUG] Collision triggered by Finalize/Abort Barrier.\n";
-		memoryCollision = true;
-	      }
-	    }
-	  }
+          // Find any hard barriers we have
+          if (auto *Call = dyn_cast<CallInst>(Inst)) {
+            if (Function *CalledFn = Call->getCalledFunction()) {
+              StringRef Name = CalledFn->getName();
+              
+              // MDMP explicit syncs and shutdowns
+              bool isMDMPBarrier = (Name == "mdmp_final" || Name == "__mdmp_marker_final" || 
+                                    Name == "mdmp_abort" || Name == "__mdmp_marker_abort" ||
+                                    Name == "mdmp_sync"  || Name == "__mdmp_marker_sync");
+                                    
+              // Standard MPI Thread-Blocking Collectives & Waits
+              bool isMPIBarrier = Name.starts_with("MPI_Wait") || 
+		Name == "MPI_Barrier" ||
+		Name == "MPI_Bcast" || 
+		Name == "MPI_Allreduce" || 
+		Name == "MPI_Reduce" || 
+		Name == "MPI_Gather" || 
+		Name == "MPI_Scatter" || 
+		Name == "MPI_Alltoall" || 
+		Name == "MPI_Allgather" ||
+		Name == "MPI_Finalize";
+                                  
+              // Blocking Point-to-Point
+              bool isMPIP2P = (Name == "MPI_Send" || Name == "MPI_Recv" || Name == "MPI_Sendrecv");
+              
+              // Topology/Communicator changes must flush the network first
+              bool isMPITopology = Name.contains("MPI_Comm_") || Name == "MPI_Cart_create";
+              
+              // Safe exceptions that look like topology but are just local math
+              if (Name == "MPI_Comm_rank" || Name == "MPI_Comm_size") isMPITopology = false;
 
-	  if (!memoryCollision && !isAsyncCall) {
+              if (isMDMPBarrier || isMPIBarrier || isMPIP2P || isMPITopology) {
+                llvm::errs() << "[MDMP PASS DEBUG] Collision triggered by Hard Network Barrier: " << Name << "\n";
+                memoryCollision = true;
+              }
+            }
+          }
+
+          if (!memoryCollision && !isAsyncCall) {
                         
-	    // Track loading and storing
-	    if (auto *LI = dyn_cast<LoadInst>(Inst)) {
-	      MemoryLocation AccessedLoc = MemoryLocation::get(LI);
-	      for (auto &Buf : Req.Buffers) {
-		// Reads from a send buffer are ok
-		if (!Buf.isNetworkReadOnly) { 
-		  if (AccessedLoc.Ptr->stripPointerCasts() == Buf.Loc.Ptr->stripPointerCasts() ||
-		      getUnderlyingObject(AccessedLoc.Ptr) == getUnderlyingObject(Buf.Loc.Ptr) ||
-		      AA.alias(AccessedLoc, Buf.Loc) != llvm::AliasResult::NoAlias) {
-		    memoryCollision = true; break;
-		  }
-		}
-	      }
-	    } 
-	    else if (auto *SI = dyn_cast<StoreInst>(Inst)) {
-	      MemoryLocation AccessedLoc = MemoryLocation::get(SI);
-	      for (auto &Buf : Req.Buffers) {
-		// CPU writes always collide, whether it's a Send or Recv buffer
-		if (AccessedLoc.Ptr->stripPointerCasts() == Buf.Loc.Ptr->stripPointerCasts() ||
-		    getUnderlyingObject(AccessedLoc.Ptr) == getUnderlyingObject(Buf.Loc.Ptr) ||
-		    AA.alias(AccessedLoc, Buf.Loc) != llvm::AliasResult::NoAlias) {
-		  memoryCollision = true; break;
-		}
-	      }
-	    }
-	    // Capture opaque function calls
-	    else if (auto *Call = dyn_cast<CallInst>(Inst)) {
-	      StringRef FnName = "";
-	      if (Call->getCalledFunction()) FnName = Call->getCalledFunction()->getName();
-                            
+            // Track loading and storing
+            if (auto *LI = dyn_cast<LoadInst>(Inst)) {
+              MemoryLocation AccessedLoc = MemoryLocation::get(LI);
+              for (auto &Buf : Req.Buffers) {
+                // Reads from a send buffer are ok
+                if (!Buf.isNetworkReadOnly) { 
+                  if (AccessedLoc.Ptr->stripPointerCasts() == Buf.Loc.Ptr->stripPointerCasts() ||
+                      getUnderlyingObject(AccessedLoc.Ptr) == getUnderlyingObject(Buf.Loc.Ptr) ||
+                      AA.alias(AccessedLoc, Buf.Loc) != llvm::AliasResult::NoAlias) {
+                    memoryCollision = true; break;
+                  }
+                }
+              }
+            } 
+            else if (auto *SI = dyn_cast<StoreInst>(Inst)) {
+              MemoryLocation AccessedLoc = MemoryLocation::get(SI);
+              for (auto &Buf : Req.Buffers) {
+                // CPU writes always collide, whether it's a Send or Recv buffer
+                if (AccessedLoc.Ptr->stripPointerCasts() == Buf.Loc.Ptr->stripPointerCasts() ||
+                    getUnderlyingObject(AccessedLoc.Ptr) == getUnderlyingObject(Buf.Loc.Ptr) ||
+                    AA.alias(AccessedLoc, Buf.Loc) != llvm::AliasResult::NoAlias) {
+                  memoryCollision = true; break;
+                }
+              }
+            }
+            // Capture opaque function calls
+            else if (auto *Call = dyn_cast<CallInst>(Inst)) {
+              StringRef FnName = "";
+              if (Call->getCalledFunction()) FnName = Call->getCalledFunction()->getName();
                             
 	      for (Value *Arg : Call->args()) {
 		for (auto &Buf : Req.Buffers) {
@@ -561,80 +561,73 @@ void MDMPPass::injectWaitsForRegion(Instruction *RegionEnd, AAResults &AA, LoopI
 		  }
 		}
 		if (memoryCollision) break;
-	      }
                                 
-	      // Alias Analysis fallback for complex C++ calls
-	      if (!memoryCollision) {
-		for (auto &Buf : Req.Buffers) {
-		  auto MR = AA.getModRefInfo(Call, Buf.Loc);
-		  if (Buf.isNetworkReadOnly && isModSet(MR)) { memoryCollision = true; break; }
-		  else if (!Buf.isNetworkReadOnly && isModOrRefSet(MR)) { memoryCollision = true; break; }
-		}
-	      }
-	    }
-	    // Fallback for other memory instructions
-	    else if (Inst->mayReadOrWriteMemory()) {
-	      for (auto &Buf : Req.Buffers) {
-		auto MR = AA.getModRefInfo(Inst, Buf.Loc);
-		if (Buf.isNetworkReadOnly && isModSet(MR)) { memoryCollision = true; break; }
-		else if (!Buf.isNetworkReadOnly && isModOrRefSet(MR)) { memoryCollision = true; break; }
-	      }
-	    }
-	  }
-	  if (memoryCollision) {
-	    WaitInsertionPoints.push_back(Inst);
-	    foundWaitPoint = true;
-	    break; 
-	  }
-	}
+                // Alias Analysis fallback for complex C++ calls
+                if (!memoryCollision) {
+                  for (auto &Buf : Req.Buffers) {
+                    auto MR = AA.getModRefInfo(Call, Buf.Loc);
+                    if (Buf.isNetworkReadOnly && isModSet(MR)) { memoryCollision = true; break; }
+                    else if (!Buf.isNetworkReadOnly && isModOrRefSet(MR)) { memoryCollision = true; break; }
+                  }
+                }
+              }
+            }
+            // Fallback for other memory instructions
+            else if (Inst->mayReadOrWriteMemory()) {
+              for (auto &Buf : Req.Buffers) {
+                auto MR = AA.getModRefInfo(Inst, Buf.Loc);
+                if (Buf.isNetworkReadOnly && isModSet(MR)) { memoryCollision = true; break; }
+                else if (!Buf.isNetworkReadOnly && isModOrRefSet(MR)) { memoryCollision = true; break; }
+              }
+            }
+          }
+          if (memoryCollision) {
+            WaitInsertionPoints.push_back(Inst);
+            foundWaitPoint = true;
+            break; 
+          }
+        }
       } 
       if (!foundWaitPoint) {
-	bool hasSuccessors = false;
-	Loop *ReqLoop = LI.getLoopFor(Req.RuntimeCall->getParent());
+        bool hasSuccessors = false;
+        Loop *ReqLoop = LI.getLoopFor(Req.RuntimeCall->getParent());
 
-	for (BasicBlock *Succ : successors(BB)) {
-	  hasSuccessors = true;
+        for (BasicBlock *Succ : successors(BB)) {
+          hasSuccessors = true;
                     
-	  bool isBackedge = false;
-	  Loop *EdgeLoop = LI.getLoopFor(BB);
-	  while (EdgeLoop) {
-	    if (EdgeLoop->getHeader() == Succ) {
-	      isBackedge = true;
-	      break;
-	    }
-	    EdgeLoop = EdgeLoop->getParentLoop();
-	  }
+          bool isBackedge = false;
+          Loop *EdgeLoop = LI.getLoopFor(BB);
+          while (EdgeLoop) {
+            if (EdgeLoop->getHeader() == Succ) {
+              isBackedge = true;
+              break;
+            }
+            EdgeLoop = EdgeLoop->getParentLoop();
+          }
 
-	  if (isBackedge && EdgeLoop) {
-	    // If we cross the backedge of the exact loop where the request was made 
-	    // (e.g., dir=0..4), allow it to wrap so we don't serialize neighbor exchanges
-	    // However if we cross the backedge of an outer loop (e.g., the timestep),
-	    // we must force a wait to prevent flooding the network.
-	    if (!ReqLoop || (EdgeLoop != ReqLoop && EdgeLoop->contains(ReqLoop))) {
-	      llvm::errs() << "[MDMP PASS DEBUG] Wait forced at Outer Loop Backedge.\n";
-	      WaitInsertionPoints.push_back(BB->getTerminator());
-	      continue; 
-	    }
-	  }
+          if (isBackedge && EdgeLoop) {
+            if (!ReqLoop || (EdgeLoop != ReqLoop && EdgeLoop->contains(ReqLoop))) {
+              llvm::errs() << "[MDMP PASS DEBUG] Wait forced at Outer Loop Backedge.\n";
+              WaitInsertionPoints.push_back(BB->getTerminator());
+              continue; 
+            }
+          }
 
-	  // Safe to keep exploring forward
-	  Worklist.push_back({Succ, Succ->begin()});
-	}
+          Worklist.push_back({Succ, Succ->begin()});
+        }
                 
-	if (!hasSuccessors) {
-	  llvm::errs() << "[MDMP PASS DEBUG] Wait forced at End of Function.\n";
-	  WaitInsertionPoints.push_back(BB->getTerminator());
-	}
+        if (!hasSuccessors) {
+          llvm::errs() << "[MDMP PASS DEBUG] Wait forced at End of Function.\n";
+          WaitInsertionPoints.push_back(BB->getTerminator());
+        }
       } 
     }
         
     SmallPtrSet<Instruction*, 4> UniqueWaitPoints;
     for (Instruction *InsertPt : WaitInsertionPoints) {
             
-      // If the collision happens in a block not mathematically dominated by the network request,
-      // we force the wait to happen immediately before the flow leaves the safe dominated block
       if (!DT.dominates(Req.RuntimeCall, InsertPt)) {
-	InsertPt = Req.RuntimeCall->getParent()->getTerminator();
+        InsertPt = Req.RuntimeCall->getParent()->getTerminator();
       }
 
       Instruction *HoistPt = InsertPt;
@@ -642,20 +635,19 @@ void MDMPPass::injectWaitsForRegion(Instruction *RegionEnd, AAResults &AA, LoopI
       Loop *ReqLoop = LI.getLoopFor(Req.RuntimeCall->getParent());
 
       while (L && L != ReqLoop) {
-	BasicBlock *Latch = L->getLoopLatch();
-	if (Latch && DT.dominates(HoistPt->getParent(), Latch)) {
-	  BasicBlock *Preheader = L->getLoopPreheader();
-	  if (Preheader) {
-	    Instruction *PotentialHoistPt = Preheader->getTerminator();
-	    // Never hoist the Wait instruction above the actual Request creation
-	    if (DT.dominates(Req.RuntimeCall, PotentialHoistPt)) {
-	      HoistPt = PotentialHoistPt;
-	      L = LI.getLoopFor(HoistPt->getParent());
-	      continue;
-	    }
-	  }
-	}
-	break; 
+        BasicBlock *Latch = L->getLoopLatch();
+        if (Latch && DT.dominates(HoistPt->getParent(), Latch)) {
+          BasicBlock *Preheader = L->getLoopPreheader();
+          if (Preheader) {
+            Instruction *PotentialHoistPt = Preheader->getTerminator();
+            if (DT.dominates(Req.RuntimeCall, PotentialHoistPt)) {
+              HoistPt = PotentialHoistPt;
+              L = LI.getLoopFor(HoistPt->getParent());
+              continue;
+            }
+          }
+        }
+        break; 
       }
       UniqueWaitPoints.insert(HoistPt);
     }
