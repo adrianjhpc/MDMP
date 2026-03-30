@@ -17,28 +17,43 @@
 
 namespace llvm {
 
-class MDMPPass : public PassInfoMixin<MDMPPass> {
-public:
+  class MDMPPass : public PassInfoMixin<MDMPPass> {
+  public:
     // Main entry point for the Pass Manager
     PreservedAnalyses run(Module &M, ModuleAnalysisManager &MAM);
 
-private:
+  private:
+
+    struct TrackedBuffer {
+      MemoryLocation Loc;
+      bool isNetworkReadOnly; // True = Send buffer (CPU reads ok), False = Recv buffer (CPU reads/writes collide)
+    };
+  
+    struct AsyncRequest {
+      std::vector<TrackedBuffer> Buffers;
+      CallInst *RuntimeCall;
+    };
+  
+    // Global tracker for the current function being processed
+    std::vector<AsyncRequest> PendingRequests;
+  
+  
     // Core function processor requiring Alias, Dominator, and Loop analyses
     bool runOnFunction(Function &F, AAResults &AA, DominatorTree &DT, LoopInfo &LI);
     
     // Translates user markers to either Imperative (Send/Recv) or Declarative (Commit) calls
     void transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTree &DT, LoopInfo &LI);
     
-    // Upgraded Hoisting Engine: Accepts a vector of MemoryLocations to safely hoist 
+    // Accepts a vector of MemoryLocations to safely hoist 
     // collectives and declarative bulk-commits without breaking data dependencies.
-    void hoistInitiation(CallInst *CI, std::vector<MemoryLocation> &Locs, 
+    void hoistInitiation(CallInst *CI, std::vector<TrackedBuffer> &Locs, 
                          AAResults &AA, DominatorTree &DT, LoopInfo &LI, bool isSend);
     
     // FG Traversal Engine: Uses LoopInfo to prevent "Inner-Loop Poisoning" 
     // by ensuring waits are safely dropped at the loop preheader/terminator boundaries.
     void injectWaitsForRegion(Instruction *RegionEnd, AAResults &AA, LoopInfo &LI, 
                               LLVMContext &Ctx, Module *M, DominatorTree &DT);
-};
+  };
 
 } // namespace llvm
 
