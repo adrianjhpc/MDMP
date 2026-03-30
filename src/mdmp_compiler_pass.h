@@ -1,6 +1,10 @@
 #ifndef MDMP_PASS_H
 #define MDMP_PASS_H
 
+#define LLVM_VERSION_GE(major, minor)                                          \
+  (LLVM_VERSION_MAJOR > (major) ||                                             \
+   LLVM_VERSION_MAJOR == (major) && LLVM_VERSION_MINOR >= (minor))
+
 #include "llvm/IR/PassManager.h"
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Module.h"
@@ -12,7 +16,11 @@
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/Passes/PassBuilder.h"
+#if LLVM_VERSION_GE(23, 0)
 #include "llvm/Plugins/PassPlugin.h"
+#else
+#include "llvm/Passes/PassPlugin.h"
+#endif
 #include <vector>
 
 namespace llvm {
