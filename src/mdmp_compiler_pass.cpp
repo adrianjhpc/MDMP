@@ -5,9 +5,13 @@
 
 using namespace llvm;
 
-// Upgraded Request Tracker: Handles multiple memory locations for Collectives and Declarative Commits
+struct TrackedBuffer {
+    MemoryLocation Loc;
+    bool isNetworkReadOnly; // True = Send buffer (CPU reads ok), False = Recv buffer (CPU reads/writes collide)
+};
+
 struct AsyncRequest {
-    std::vector<MemoryLocation> Locs;
+    std::vector<TrackedBuffer> Buffers;
     CallInst *RuntimeCall;
 };
 
@@ -136,7 +140,8 @@ void MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
     FunctionCallee runtime_commit = M->getOrInsertFunction("mdmp_commit", Type::getInt32Ty(Ctx));
 
     std::vector<Instruction*> toDelete;
-    std::vector<MemoryLocation> ActiveRegionLocs; // Tracks buffers for the Declarative paradigm
+    std::vector<TrackedBuffer> ActiveRegionLocs; // Tracks buffers for the Declarative paradigm
+    std::vector<MemoryLocation> ActiveRegionLocs; 
 
     for (auto &BB : F) {
         for (auto &I : BB) {
@@ -169,16 +174,17 @@ void MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
                     LocSize = LocationSize::precise(ConstBytes->getZExtValue());
                 }
                 std::vector<MemoryLocation> Locs = { MemoryLocation(BufferPtr, LocSize) };
-                
-                bool isSend = (Name == "__mdmp_marker_send");
+
+		bool isSend = (Name == "__mdmp_marker_send");
+                std::vector<TrackedBuffer> TrackedLocs = { {MemoryLocation(BufferPtr, LocSize), isSend} };
                 
                 CallInst *NewCall = Builder.CreateCall(isSend ? runtime_send : runtime_recv, 
                     {BufferPtr, CountVal, TypeVal, ByteSize, ActorRank, PeerRank, TagVal});
                 
                 CI->replaceAllUsesWith(NewCall);
                 
-                hoistInitiation(NewCall, Locs, AA, DT, LI, isSend);
-                PendingRequests.push_back({Locs, NewCall});
+                hoistInitiation(NewCall, TrackedLocs, AA, DT, LI, isSend);
+                PendingRequests.push_back({TrackedLocs, NewCall});
                 toDelete.push_back(CI);
             } 
             // ==========================================
@@ -197,7 +203,8 @@ void MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
                 if (auto *ConstBytes = dyn_cast<ConstantInt>(ByteSize)) { LocSize = LocationSize::precise(ConstBytes->getZExtValue()); }
                 ActiveRegionLocs.push_back(MemoryLocation(BufferPtr, LocSize));
 
-                bool isSend = (Name == "__mdmp_marker_register_send");
+		bool isSend = (Name == "__mdmp_marker_register_send");
+                ActiveRegionLocs.push_back({MemoryLocation(BufferPtr, LocSize), isSend});
                 
                 CallInst *NewCall = Builder.CreateCall(isSend ? runtime_register_send : runtime_register_recv, 
                     {BufferPtr, CountVal, TypeVal, ByteSize, ActorRank, PeerRank, TagVal});
@@ -325,9 +332,6 @@ void MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
                 }
                 toDelete.push_back(CI);
             } 
-            // ==================================================================
-            // Process the end of a region to stop things going beyond that point
-            // ==================================================================
             else if (Name == "__mdmp_marker_commregion_end") {
                 CallInst *NewEnd = Builder.CreateCall(runtime_end);
                 injectWaitsForRegion(NewEnd, AA, LI, Ctx, M, DT);
@@ -406,7 +410,7 @@ void MDMPPass::hoistInitiation(CallInst *CI, std::vector<MemoryLocation> &Locs, 
         
         if (Prev->mayWriteToMemory() || (!isSend && Prev->mayReadFromMemory())) {
             
-            // 1. Extreme Exact Match (Bypasses TBAA Blindspots)
+            // Extreme Exact Match (Bypasses TBAA Blindspots)
             if (auto *SI = dyn_cast<StoreInst>(Prev)) {
                 MemoryLocation AccessedLoc = MemoryLocation::get(SI);
                 for (auto &Loc : Locs) {
@@ -426,7 +430,7 @@ void MDMPPass::hoistInitiation(CallInst *CI, std::vector<MemoryLocation> &Locs, 
                     }
                 }
             } else {
-                // 2. Fallback to AA for Opaque calls/Intrinsics
+                // Fallback to AA for Opaque calls/Intrinsics
                 for (auto &Loc : Locs) {
                     if (isModSet(AA.getModRefInfo(Prev, Loc))) { 
                         memoryCollision = true; break; 
@@ -519,10 +523,10 @@ void MDMPPass::injectWaitsForRegion(Instruction *RegionEnd, AAResults &AA, LoopI
                         }
                     }
 
-                    // Collision Router
+		    // Collision Router
                     bool memoryCollision = false;
 
-                    // 1. THE HARD BARRIER
+                    // Find any hard barriers we have
                     if (auto *Call = dyn_cast<CallInst>(Inst)) {
                         if (Function *CalledFn = Call->getCalledFunction()) {
                             StringRef Name = CalledFn->getName();
@@ -536,28 +540,32 @@ void MDMPPass::injectWaitsForRegion(Instruction *RegionEnd, AAResults &AA, LoopI
 
                     if (!memoryCollision && !isAsyncCall) {
                         
-                        // 2. PRECISE LOAD/STORE TRACKING
+                        // Track loading and storing
                         if (auto *LI = dyn_cast<LoadInst>(Inst)) {
                             MemoryLocation AccessedLoc = MemoryLocation::get(LI);
-                            for (auto &Loc : Req.Locs) {
-                                if (AccessedLoc.Ptr->stripPointerCasts() == Loc.Ptr->stripPointerCasts() ||
-                                    getUnderlyingObject(AccessedLoc.Ptr) == getUnderlyingObject(Loc.Ptr) ||
-                                    AA.alias(AccessedLoc, Loc) != llvm::AliasResult::NoAlias) {
-                                    memoryCollision = true; break;
+                            for (auto &Buf : Req.Buffers) {
+                                // Reads from a send buffer are ok
+                                if (!Buf.isNetworkReadOnly) { 
+                                    if (AccessedLoc.Ptr->stripPointerCasts() == Buf.Loc.Ptr->stripPointerCasts() ||
+                                        getUnderlyingObject(AccessedLoc.Ptr) == getUnderlyingObject(Buf.Loc.Ptr) ||
+                                        AA.alias(AccessedLoc, Buf.Loc) != llvm::AliasResult::NoAlias) {
+                                        memoryCollision = true; break;
+                                    }
                                 }
                             }
                         } 
                         else if (auto *SI = dyn_cast<StoreInst>(Inst)) {
                             MemoryLocation AccessedLoc = MemoryLocation::get(SI);
-                            for (auto &Loc : Req.Locs) {
-                                if (AccessedLoc.Ptr->stripPointerCasts() == Loc.Ptr->stripPointerCasts() ||
-                                    getUnderlyingObject(AccessedLoc.Ptr) == getUnderlyingObject(Loc.Ptr) ||
-                                    AA.alias(AccessedLoc, Loc) != llvm::AliasResult::NoAlias) {
+                            for (auto &Buf : Req.Buffers) {
+                                // CPU writes always collide, whether it's a Send or Recv buffer
+                                if (AccessedLoc.Ptr->stripPointerCasts() == Buf.Loc.Ptr->stripPointerCasts() ||
+                                    getUnderlyingObject(AccessedLoc.Ptr) == getUnderlyingObject(Buf.Loc.Ptr) ||
+                                    AA.alias(AccessedLoc, Buf.Loc) != llvm::AliasResult::NoAlias) {
                                     memoryCollision = true; break;
                                 }
                             }
                         }
-                        // 3. OPAQUE FUNCTION CALL CAPTURE
+                        // Capture opaque function calls
                         else if (auto *Call = dyn_cast<CallInst>(Inst)) {
                             StringRef FnName = "";
                             if (Call->getCalledFunction()) FnName = Call->getCalledFunction()->getName();
@@ -569,11 +577,10 @@ void MDMPPass::injectWaitsForRegion(Instruction *RegionEnd, AAResults &AA, LoopI
                                                    FnName.contains("swap");
                             
                             if (!isHarmlessSetup) {
-                                // Does the function capture the buffer directly as an argument?
                                 for (Value *Arg : Call->args()) {
-                                    for (auto &Loc : Req.Locs) {
-                                        if (Arg->stripPointerCasts() == Loc.Ptr->stripPointerCasts() ||
-                                            getUnderlyingObject(Arg) == getUnderlyingObject(Loc.Ptr)) {
+                                    for (auto &Buf : Req.Buffers) {
+                                        if (Arg->stripPointerCasts() == Buf.Loc.Ptr->stripPointerCasts() ||
+                                            getUnderlyingObject(Arg) == getUnderlyingObject(Buf.Loc.Ptr)) {
                                             memoryCollision = true; break;
                                         }
                                     }
@@ -582,20 +589,20 @@ void MDMPPass::injectWaitsForRegion(Instruction *RegionEnd, AAResults &AA, LoopI
                                 
                                 // Alias Analysis fallback for complex C++ calls
                                 if (!memoryCollision) {
-                                    for (auto &Loc : Req.Locs) {
-                                        if (isModOrRefSet(AA.getModRefInfo(Call, Loc))) {
-                                            memoryCollision = true; break;
-                                        }
+                                    for (auto &Buf : Req.Buffers) {
+                                        auto MR = AA.getModRefInfo(Call, Buf.Loc);
+                                        if (Buf.isNetworkReadOnly && isModSet(MR)) { memoryCollision = true; break; }
+                                        else if (!Buf.isNetworkReadOnly && isModOrRefSet(MR)) { memoryCollision = true; break; }
                                     }
                                 }
                             }
                         }
-                        // 4. FALLBACK FOR OTHER MEMORY INSTRUCTIONS (e.g. LLVM Intrinsics)
+                        // Fallback for other memory instructions
                         else if (Inst->mayReadOrWriteMemory()) {
-                            for (auto &Loc : Req.Locs) {
-                                if (isModOrRefSet(AA.getModRefInfo(Inst, Loc))) {
-                                    memoryCollision = true; break;
-                                }
+                            for (auto &Buf : Req.Buffers) {
+                                auto MR = AA.getModRefInfo(Inst, Buf.Loc);
+                                if (Buf.isNetworkReadOnly && isModSet(MR)) { memoryCollision = true; break; }
+                                else if (!Buf.isNetworkReadOnly && isModOrRefSet(MR)) { memoryCollision = true; break; }
                             }
                         }
                     }
@@ -625,9 +632,9 @@ void MDMPPass::injectWaitsForRegion(Instruction *RegionEnd, AAResults &AA, LoopI
 
                     if (isBackedge && EdgeLoop) {
                         // If we cross the backedge of the exact loop where the request was made 
-                        // (e.g., dir=0..4), allow it to wrap so we don't serialize neighbor exchanges!
-                        // BUT if we cross the backedge of an OUTER loop (e.g., the timestep),
-                        // we MUST force a wait to prevent flooding the network.
+                        // (e.g., dir=0..4), allow it to wrap so we don't serialize neighbor exchanges
+                        // However if we cross the backedge of an outer loop (e.g., the timestep),
+                        // we must force a wait to prevent flooding the network.
                         if (!ReqLoop || (EdgeLoop != ReqLoop && EdgeLoop->contains(ReqLoop))) {
                             llvm::errs() << "[MDMP PASS DEBUG] Wait forced at Outer Loop Backedge.\n";
                             WaitInsertionPoints.push_back(BB->getTerminator());
