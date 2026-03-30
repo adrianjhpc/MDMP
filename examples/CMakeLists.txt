@@ -3,7 +3,7 @@ find_package(MPI REQUIRED)
 set(MDMP_HARNESS_C "${CMAKE_SOURCE_DIR}/harness/mdmpc")
 set(MDMP_HARNESS_CXX "${CMAKE_SOURCE_DIR}/harness/mdmpc++")
 
-set(BENCHMARK_RANKS 4)
+set(BENCHMARK_RANKS 256)
 
 add_custom_target(run_examples
     COMMENT "Executing all benchmarks: MPI vs MDMP Imperative vs MDMP RegCom..."
@@ -103,3 +103,4 @@ add_comparison_example(grid_halo cpp RANKS 16 RUN_ARGS --mpi 2.2.2.2)
 add_comparison_example(nbody cpp)
 add_comparison_example(graph cpp)
 add_comparison_example(wavefront cpp)
+add_comparison_example(stencil cpp)

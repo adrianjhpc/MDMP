@@ -152,9 +152,9 @@ void update ( int id, int p )
   int i;
   int j;
   int j_min = 0;
-  int j_max = 200000;
-  int n = 2000; 
-  double k = 0.000001;
+  int j_max = 20000000;
+  int n = 200000; 
+  double k = 0.00000001;
   MPI_Status status;
   int tag;
   double time;
