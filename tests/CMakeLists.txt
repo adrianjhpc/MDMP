@@ -6,7 +6,7 @@ string(REPLACE ";" " -I" MPI_INC_FLAGS "${MPI_CXX_INCLUDE_DIRS}")
 if(MPI_INC_FLAGS)
     set(MPI_INC_FLAGS "-I${MPI_INC_FLAGS}")
 else()
-    set(MPI_INC_FLAGS "-I/usr/include/mpich-x86_64") # Safe fallback
+    set(MPI_INC_FLAGS "-I${MPI_CXX_HEADER_DIR}")
 endif()
 
 # Find MPI to locate the mpirun/mpiexec executable
@@ -18,7 +18,6 @@ set(TEST_NUM_RANKS 7)
 function(add_mdmp_test TEST_NAME SOURCE_FILE)
     add_custom_command(
         OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${TEST_NAME}
-        # REMOVED ${MPI_CXX_COMPILE_FLAGS} below:
         COMMAND ${MDMPCXX} ${CMAKE_CURRENT_SOURCE_DIR}/${SOURCE_FILE}
                 ${MPI_INC_FLAGS} ${MPI_LIBRARIES}
                 -o ${CMAKE_CURRENT_BINARY_DIR}/${TEST_NAME}
@@ -62,7 +61,7 @@ add_mdmp_test(mdmp_test_reduce_non_zero_root_regcom test_reduce_non_zero_root_md
 add_mdmp_test(mdmp_test_gather test_gather_mdmp.cpp)
 add_mdmp_test(mdmp_test_gather_regcom test_gather_mdmp_regcom.cpp)
 add_mdmp_test(mdmp_test_allreduce test_mdmp_allreduce.cpp)
-add_mdmp_test(mdmp_test_allreduce_mpi_sum test_mdmp_allreduce_mpi_sum.cpp)
+add_mdmp_test(mdmp_test_allreduce_mpi_sum test_mdmp_allreduce_mpi_sum.cpp )
 add_mdmp_test(mdmp_test_allreduce_min test_mdmp_allreduce_min.cpp)
 add_mdmp_test(mdmp_test_allreduce_max test_mdmp_allreduce_max.cpp)
 add_mdmp_test(mdmp_test_allreduce_regcom test_mdmp_allreduce_regcom.cpp)

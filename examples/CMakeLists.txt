@@ -29,15 +29,19 @@ function(add_comparison_example EXAMPLE_NAME EXT)
 
     if("${EXT}" STREQUAL "c")
         set(CURRENT_HARNESS ${MDMP_HARNESS_C})
+        set(MPI_INC ${MPI_CXX_HEADER_DIR})
+        set(MPI_LIB ${MPI_CXX_LIBRARIES})
     else()
         set(CURRENT_HARNESS ${MDMP_HARNESS_CXX})
+        set(MPI_INC ${MPI_C_HEADER_DIR})
+        set(MPI_LIB ${MPI_C_LIBRARIES})
     endif()
 
     add_custom_command(
         OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${EXAMPLE_NAME}_mdmp
         COMMAND ${CURRENT_HARNESS} ${CMAKE_CURRENT_SOURCE_DIR}/${EXAMPLE_NAME}_mdmp.${EXT}
-                -I${CMAKE_SOURCE_DIR}/src -I/usr/include/mpich-x86_64
-                /usr/lib64/mpich/lib/libmpi.so ${ARG_LINK_LIBS}
+                -I${CMAKE_SOURCE_DIR}/src -I${MPI_INC}
+                ${MPI_LIB} ${ARG_LINK_LIBS}
                 -o ${CMAKE_CURRENT_BINARY_DIR}/${EXAMPLE_NAME}_mdmp
         DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/${EXAMPLE_NAME}_mdmp.${EXT} mdmp_compiler_pass mdmp_runtime
         COMMENT "Compiling ${EXAMPLE_NAME}_mdmp (Imperative)..."
@@ -47,8 +51,8 @@ function(add_comparison_example EXAMPLE_NAME EXT)
     add_custom_command(
         OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${EXAMPLE_NAME}_mdmp_regcom
         COMMAND ${CURRENT_HARNESS} ${CMAKE_CURRENT_SOURCE_DIR}/${EXAMPLE_NAME}_mdmp_regcom.${EXT}
-                -I${CMAKE_SOURCE_DIR}/src -I/usr/include/mpich-x86_64
-                /usr/lib64/mpich/lib/libmpi.so ${ARG_LINK_LIBS}
+                -I${CMAKE_SOURCE_DIR}/src -I${MPI_INC}
+                ${MPI_LIB} ${ARG_LINK_LIBS}
                 -o ${CMAKE_CURRENT_BINARY_DIR}/${EXAMPLE_NAME}_mdmp_regcom
         DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/${EXAMPLE_NAME}_mdmp_regcom.${EXT} mdmp_compiler_pass mdmp_runtime
         COMMENT "Compiling ${EXAMPLE_NAME}_mdmp_regcom (Declarative)..."
