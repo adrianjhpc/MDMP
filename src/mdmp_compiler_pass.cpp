@@ -531,12 +531,12 @@ void MDMPPass::injectWaitsForRegion(Instruction *RegionEnd, AAResults &AA, LoopI
           }
 
           if (isBackedge && EdgeLoop) {
-            if (!ReqLoop || (EdgeLoop != ReqLoop && EdgeLoop->contains(ReqLoop))) {
-              llvm::errs() << "[MDMP PASS DEBUG] Wait forced at Outer Loop Backedge.\n";
+            if (!ReqLoop || EdgeLoop == ReqLoop || EdgeLoop->contains(ReqLoop)) {
+              llvm::errs() << "[MDMP PASS DEBUG] Wait forced at Loop Latch (Backedge).\n";
               WaitInsertionPoints.push_back(BB->getTerminator());
               continue; 
             }
-          } 
+          }
 
           Worklist.push_back({Succ, Succ->begin()});
         }
