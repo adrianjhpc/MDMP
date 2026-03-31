@@ -341,28 +341,18 @@ void MDMPPass::hoistInitiation(CallInst *CI, std::vector<TrackedBuffer> &Buffers
         bool memoryCollision = false;
         
         if (Prev->mayWriteToMemory() || (!isSend && Prev->mayReadFromMemory())) {
-            // Extreme Exact Match (Bypasses TBAA Blindspots)
-            if (auto *SI = dyn_cast<StoreInst>(Prev)) {
-                MemoryLocation AccessedLoc = MemoryLocation::get(SI);
-                for (auto &Buf : Buffers) {
-                    if (AccessedLoc.Ptr->stripPointerCasts() == Buf.Loc.Ptr->stripPointerCasts() ||
-                        getUnderlyingObject(AccessedLoc.Ptr) == getUnderlyingObject(Buf.Loc.Ptr)) {
-                        memoryCollision = true; break;
-                    }
-                }
-            } else if (auto *LI = dyn_cast<LoadInst>(Prev)) {
-                MemoryLocation AccessedLoc = MemoryLocation::get(LI);
-                for (auto &Buf : Buffers) {
+            for (auto &Buf : Buffers) {
+                if (auto *SI = dyn_cast<StoreInst>(Prev)) {
+                    AliasResult AR = AA.alias(MemoryLocation::get(SI), Buf.Loc);
+                    if (AR == AliasResult::MustAlias || AR == AliasResult::MayAlias) { memoryCollision = true; break; }
+                } 
+                else if (auto *LI = dyn_cast<LoadInst>(Prev)) {
                     if (!Buf.isNetworkReadOnly) { 
-                        if (AccessedLoc.Ptr->stripPointerCasts() == Buf.Loc.Ptr->stripPointerCasts() ||
-                            getUnderlyingObject(AccessedLoc.Ptr) == getUnderlyingObject(Buf.Loc.Ptr)) {
-                            memoryCollision = true; break;
-                        }
+                        AliasResult AR = AA.alias(MemoryLocation::get(LI), Buf.Loc);
+                        if (AR == AliasResult::MustAlias || AR == AliasResult::MayAlias) { memoryCollision = true; break; }
                     }
-                }
-            } else {
-                // Fallback to AA for Opaque calls/Intrinsics
-                for (auto &Buf : Buffers) {
+                } 
+                else {
                     auto MR = AA.getModRefInfo(Prev, Buf.Loc);
                     if (Buf.isNetworkReadOnly && isModSet(MR)) { memoryCollision = true; break; }
                     else if (!Buf.isNetworkReadOnly && isModOrRefSet(MR)) { memoryCollision = true; break; }
@@ -490,62 +480,33 @@ void MDMPPass::injectWaitsForRegion(Instruction *RegionEnd, AAResults &AA, LoopI
             }
           }
 
-         if (!memoryCollision && !isAsyncCall) {
-                        
-                        // 2. PRECISE LOAD/STORE TRACKING (Ignoring cowardly AA fallbacks)
-                        if (auto *LI = dyn_cast<LoadInst>(Inst)) {
-                            MemoryLocation AccessedLoc = MemoryLocation::get(LI);
-                            for (auto &Buf : Req.Buffers) {
-                                // Reads from a send buffer are ok
-                                if (!Buf.isNetworkReadOnly) { 
-                                    if (AccessedLoc.Ptr->stripPointerCasts() == Buf.Loc.Ptr->stripPointerCasts() ||
-                                        getUnderlyingObject(AccessedLoc.Ptr) == getUnderlyingObject(Buf.Loc.Ptr)) {
-                                        memoryCollision = true; break;
-                                    }
-                                }
-                            }
-                        } 
-                        else if (auto *SI = dyn_cast<StoreInst>(Inst)) {
-                            MemoryLocation AccessedLoc = MemoryLocation::get(SI);
-                            for (auto &Buf : Req.Buffers) {
-                                // CPU writes always collide, whether it's a Send or Recv buffer
-                                if (AccessedLoc.Ptr->stripPointerCasts() == Buf.Loc.Ptr->stripPointerCasts() ||
-                                    getUnderlyingObject(AccessedLoc.Ptr) == getUnderlyingObject(Buf.Loc.Ptr)) {
-                                    memoryCollision = true; break;
-                                }
-                            }
-                        }
-                        // 3. ROBUST FUNCTION CALL ROUTER
-                        else if (auto *Call = dyn_cast<CallInst>(Inst)) {
-                            bool touchesBuffer = false;
-                            
-                            // Check if the function explicitly takes our buffer as an argument
-                            for (Value *Arg : Call->args()) {
-                                for (auto &Buf : Req.Buffers) {
-                                    if (Arg->stripPointerCasts() == Buf.Loc.Ptr->stripPointerCasts() ||
-                                        getUnderlyingObject(Arg) == getUnderlyingObject(Buf.Loc.Ptr)) {
-                                        touchesBuffer = true; break;
-                                    }
-                                }
-                                if (touchesBuffer) break;
-                            }
-                            
-                            // If it took our buffer, it's a collision. 
-                            // If it didn't, it's mathematically impossible for it to modify our local variables!
-                            if (touchesBuffer) {
-                                memoryCollision = true;
-                            }
-                        }
-                        // 4. Fallback for other memory instructions (e.g. LLVM Intrinsics)
-                        else if (Inst->mayReadOrWriteMemory()) {
-                            for (auto &Buf : Req.Buffers) {
-                                auto MR = AA.getModRefInfo(Inst, Buf.Loc);
-                                if (Buf.isNetworkReadOnly && isModSet(MR)) { memoryCollision = true; break; }
-                                else if (!Buf.isNetworkReadOnly && isModOrRefSet(MR)) { memoryCollision = true; break; }
-                            }
-                        }
-                    }
+          if (!memoryCollision && !isAsyncCall) {
+              for (auto &Buf : Req.Buffers) {
+                  if (auto *LInst = dyn_cast<LoadInst>(Inst)) {
+                      if (!Buf.isNetworkReadOnly) { 
+                          AliasResult AR = AA.alias(MemoryLocation::get(LInst), Buf.Loc);
+                          if (AR == AliasResult::MustAlias || AR == AliasResult::MayAlias) { 
+                              memoryCollision = true; break; 
+                          }
+                      }
+                  } 
+                  else if (auto *SInst = dyn_cast<StoreInst>(Inst)) {
+                      AliasResult AR = AA.alias(MemoryLocation::get(SInst), Buf.Loc);
+                      if (AR == AliasResult::MustAlias || AR == AliasResult::MayAlias) { 
+                          memoryCollision = true; break; 
+                      }
+                  } 
+                  else if (Inst->mayReadOrWriteMemory()) {
+                      // Catch-all for Intrinsics, memcpy, and remaining opaque function calls
+                      auto MR = AA.getModRefInfo(Inst, Buf.Loc);
+                      if (Buf.isNetworkReadOnly && isModSet(MR)) { memoryCollision = true; break; }
+                      else if (!Buf.isNetworkReadOnly && isModOrRefSet(MR)) { memoryCollision = true; break; }
+                  }
+              }
+          }
+          
           if (memoryCollision) {
+            llvm::errs() << "[MDMP PASS DEBUG] Collision triggered by Memory Load/Store/ModRef!\n";
             WaitInsertionPoints.push_back(Inst);
             foundWaitPoint = true;
             break; 
@@ -630,11 +591,19 @@ extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo llvmGetPassPluginIn
     LLVM_PLUGIN_API_VERSION, "MDMP", "v0.2",
     [](PassBuilder &PB) {
       PB.registerPipelineParsingCallback(
-					 [](StringRef Name, ModulePassManager &MPM, ArrayRef<PassBuilder::PipelineElement>) {
-					   if (Name == "mdmp") { MPM.addPass(MDMPPass()); return true; } return false;
-					 });
-      PB.registerPipelineStartEPCallback(
-					 [](ModulePassManager &MPM, OptimizationLevel Level) { MPM.addPass(MDMPPass()); });
+          [](StringRef Name, ModulePassManager &MPM, ArrayRef<PassBuilder::PipelineElement>) {
+            if (Name == "mdmp") { MPM.addPass(MDMPPass()); return true; } return false;
+          });
+      
+      PB.registerOptimizerLastEPCallback(
+          [](ModulePassManager &MPM, OptimizationLevel Level, ThinOrFullLTOPhase Phase) { 
+              MPM.addPass(MDMPPass()); 
+          });
+      
+      PB.registerFullLinkTimeOptimizationLastEPCallback(
+          [](ModulePassManager &MPM, OptimizationLevel Level) { 
+              MPM.addPass(MDMPPass()); 
+          });
     }
   };
 }
