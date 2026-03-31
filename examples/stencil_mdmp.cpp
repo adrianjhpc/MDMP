@@ -33,12 +33,12 @@ int main(int argc, char** argv) {
     for (int iter = 0; iter < 500; ++iter) {
         
         // Send top row to upper neighbor, receive their bottom row into our top halo
-        MDMP_SEND(&grid[0], N, rank, up_neighbor, 0);
         MDMP_RECV(halo_top_recv.data(), N, rank, up_neighbor, 1);
+        MDMP_SEND(&grid[0], N, rank, up_neighbor, 0);
 
         // Send bottom row to lower neighbor, receive their top row into our bottom halo
-        MDMP_SEND(&grid[(N - 1) * N], N, rank, down_neighbor, 1);
         MDMP_RECV(halo_bottom_recv.data(), N, rank, down_neighbor, 0);
+        MDMP_SEND(&grid[(N - 1) * N], N, rank, down_neighbor, 1);
 
 
         for (int y = 1; y < N - 1; ++y) {
