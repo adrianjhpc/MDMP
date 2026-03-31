@@ -46,7 +46,7 @@ function(add_comparison_example EXAMPLE_NAME EXT)
         DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/${EXAMPLE_NAME}_mdmp.${EXT} mdmp_compiler_pass mdmp_runtime
         COMMENT "Compiling ${EXAMPLE_NAME}_mdmp (Imperative)..."
     )
-    add_custom_target(target_${EXAMPLE_NAME}_mdmp DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/${EXAMPLE_NAME}_mdmp)
+    add_custom_target(target_${EXAMPLE_NAME}_mdmp ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/${EXAMPLE_NAME}_mdmp)
 
     add_custom_command(
         OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${EXAMPLE_NAME}_mdmp_regcom
@@ -57,7 +57,7 @@ function(add_comparison_example EXAMPLE_NAME EXT)
         DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/${EXAMPLE_NAME}_mdmp_regcom.${EXT} mdmp_compiler_pass mdmp_runtime
         COMMENT "Compiling ${EXAMPLE_NAME}_mdmp_regcom (Declarative)..."
     )
-    add_custom_target(target_${EXAMPLE_NAME}_mdmp_regcom DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/${EXAMPLE_NAME}_mdmp_regcom)
+    add_custom_target(target_${EXAMPLE_NAME}_mdmp_regcom ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/${EXAMPLE_NAME}_mdmp_regcom)
 
     set(RUN_MPI ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${ARG_RANKS} ${CMAKE_CURRENT_BINARY_DIR}/${EXAMPLE_NAME}_mpi ${ARG_RUN_ARGS})
     set(RUN_MDMP ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${ARG_RANKS} ${CMAKE_CURRENT_BINARY_DIR}/${EXAMPLE_NAME}_mdmp ${ARG_RUN_ARGS})
