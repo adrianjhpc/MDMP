@@ -201,7 +201,7 @@ void mdmp_wait(int req_id) {
       MPI_Wait(&mdmp_request_pool[req_id], MPI_STATUS_IGNORE);
     }
   }
-  else if (req_id == MDMP_PROCESS_NOT_INVOLVED {
+  else if (req_id == MDMP_PROCESS_NOT_INVOLVED) {
       // Do nothing
   }
   else {
