@@ -155,9 +155,9 @@ void update ( int id, int p )
   int i;
   int j;
   int j_min = 0;
-  int j_max = 20000000;
-  int n = 200000;
-  double k = 0.00000001;
+  long j_max = 2654208000;
+  int n = 17361;
+  double k = 7.5e-11;
   double time;
   double time_delta;
   double time_max = 10.0;
@@ -190,7 +190,7 @@ void update ( int id, int p )
     printf ( "  differential equation.\n" );
     printf ( "\n" );
     printf ( "  This uses %d equally spaced points in X\n", p * n );
-    printf ( "  and %d equally spaced points in time.\n", j_max );
+    printf ( "  and %ld equally spaced points in time.\n", j_max );
     printf ( "\n" );
     printf ( "  Parallel execution is done using %d processors.\n", p );
     printf ( "  Domain decomposition is used.\n" );

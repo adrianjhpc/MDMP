@@ -22,7 +22,7 @@ int main(int argc, char** argv) {
     std::vector<Particle> send_list(num_migrating);
     std::vector<Particle> recv_list(num_migrating);
 
-    // 1. SEED INITIAL STATE: Set x to the current rank ID
+    // SEED INITIAL STATE: Set x to the current rank ID
     for (int i = 0; i < num_migrating; ++i) {
         send_list[i].x = (double)rank;
     }
@@ -57,7 +57,7 @@ int main(int argc, char** argv) {
     double end_time = MDMP_WTIME();
 
     // ==========================================
-    // 2. CORRECTNESS CHECK
+    // CORRECTNESS CHECK
     // ==========================================
     
     // Calculate which rank's data we should be holding after 'iterations' shifts
@@ -85,7 +85,9 @@ int main(int argc, char** argv) {
     if (!correct) {
         printf("[MDMP] Rank %d Validation FAILED! Expected x = %f, but got %f\n", rank, expected_x, send_list[0].x);
     } else {
-        printf("[MDMP] Rank %d Validation PASSED!\n", rank);
+        if (rank == 0) {
+            printf("[MDMP] Rank %d Validation PASSED!\n", rank);
+        }
     }
     // ==========================================
 

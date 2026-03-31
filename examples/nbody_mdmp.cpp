@@ -48,6 +48,41 @@ int main(int argc, char** argv) {
 
     double end_time = MDMP_WTIME();
 
+    // ==========================================
+    // CORRECTNESS CHECK
+    // ==========================================
+
+    // Calculate which rank's data we should be holding after 'iterations' shifts
+    int expected_origin_rank = (rank - (iterations % size) + size) % size;
+
+    // Calculate the exact expected floating-point accumulation
+    double expected_dummy_total = 0.0;
+    for (int iter = 0; iter < iterations; ++iter) {
+        double dummy_work = 0.0;
+        for (int i = 0; i < 100000; ++i) { dummy_work += 0.0001; }
+        expected_dummy_total += dummy_work;
+    }
+
+    double expected_x = (double)expected_origin_rank + expected_dummy_total;
+
+    bool correct = true;
+    for (int i = 0; i < num_migrating; ++i) {
+        // Use an epsilon to account for standard IEEE 754 floating-point jitter
+        if (std::abs(send_list[i].x - expected_x) > 1e-5) {
+            correct = false;
+            break;
+        }
+    }
+
+    if (!correct) {
+        printf("[MDMP] Rank %d Validation FAILED! Expected x = %f, but got %f\n", rank, expected_x, send_list[0].x);
+    } else {
+        if (rank == 0) {
+            printf("[MDMP] Rank %d Validation PASSED!\n", rank);
+        }
+    }
+    // ==========================================
+
     if (rank == 0) {
         printf("------------------------------------------------\n");
         printf(" BENCHMARK: N-Body Particle Exchange (Imperative)\n");
