@@ -368,10 +368,10 @@ int mdmp_commit() {
     static std::vector<int> blens_buffer;
     static std::vector<MPI_Aint> disps_buffer;
     
-    std::lock_guard<std::mutex> lock(mdmp_mpi_mutex);
+    
     
     // Process P2P queues
-    auto ProcessQueue = [](std::vector<RegisteredMsg>& queue, bool isSend) {
+    auto ProcessQueue = [](std::vector<RegisteredMsg>& queue, bool isSend) {     
         if (queue.empty()) return;
 
         // Sort by both rank and tag to group identical destinations/tags together
@@ -426,10 +426,12 @@ int mdmp_commit() {
             i = j;
         }
     };
-
-    ProcessQueue(recv_queue, false);
-    ProcessQueue(send_queue, true);
-
+    {
+      std::lock_guard<std::mutex> lock(mdmp_mpi_mutex);
+      ProcessQueue(recv_queue, false);
+      ProcessQueue(send_queue, true);
+    }
+    
     for (auto& r : reduce_queue) mdmp_reduce(r.sendbuf, r.recvbuf, r.count, r.type, r.bytes, r.root, r.op);
     for (auto& g : gather_queue) mdmp_gather(g.sendbuf, g.sendcount, g.recvbuf, g.type, g.bytes, g.root);
     
