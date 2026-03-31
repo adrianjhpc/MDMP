@@ -7,6 +7,7 @@ static int mdmp_debug_enabled = 0;
 MPI_Comm mdmp_comm; 
 std::atomic<bool> mdmp_runtime_active{false};
 std::thread mdmp_progress_thread;
+std::mutex mdmp_mpi_mutex;
 
 struct RegisteredMsg {
     void* buffer;
@@ -135,7 +136,9 @@ static std::vector<RegisteredAllgather> allgather_queue;
 // ==============================================================================
 void mdmp_progress_loop() {
     int flag;
+    
     while (mdmp_runtime_active) {
+      std::lock_guard<std::mutex> lock(mdmp_mpi_mutex);
         MPI_Iprobe(MPI_ANY_SOURCE, MPI_ANY_TAG, mdmp_comm, &flag, MPI_STATUS_IGNORE);
         std::this_thread::sleep_for(std::chrono::microseconds(10));
     }
@@ -201,7 +204,7 @@ void mdmp_abort(int error_code) {
 
 void mdmp_wait(int req_id) {
     mdmp_log("[MDMP] Rank %d WAITING on request ID: %d\n", global_my_rank, req_id);
-
+    std::lock_guard<std::mutex> lock(mdmp_mpi_mutex);
     if (req_id == -1) {
         // Bulk Wait for Declarative API
         if (!active_requests.empty()) {
@@ -257,6 +260,7 @@ void mdmp_wait(int req_id) {
 
 int mdmp_send(void* buf, size_t c, int t, size_t bytes, int s, int d, int tag) {
     if (d < 0 || d >= global_size || global_my_rank != s) return -2;
+    std::lock_guard<std::mutex> lock(mdmp_mpi_mutex);
     MPI_Request req;
     
     // If it's a custom struct (MPI_BYTE), the true count is the total bytes
@@ -268,6 +272,7 @@ int mdmp_send(void* buf, size_t c, int t, size_t bytes, int s, int d, int tag) {
 
 int mdmp_recv(void* buf, size_t c, int t, size_t bytes, int r, int s, int tag) {
     if (s < 0 || s >= global_size || global_my_rank != r) return -2;
+    std::lock_guard<std::mutex> lock(mdmp_mpi_mutex);
     MPI_Request req;
     
     int actual_count = (t == 4) ? (int)bytes : (int)c;
@@ -279,6 +284,7 @@ int mdmp_recv(void* buf, size_t c, int t, size_t bytes, int r, int s, int tag) {
 // Collectives
 int mdmp_reduce(void* sendbuf, void* recvbuf, size_t count, int type, size_t bytes, int root, int op) {
     MPI_Request req;
+    std::lock_guard<std::mutex> lock(mdmp_mpi_mutex);
     const void* final_sendbuf = sendbuf;
     if (sendbuf == recvbuf && global_my_rank == root) final_sendbuf = MPI_IN_PLACE;
 
@@ -289,6 +295,7 @@ int mdmp_reduce(void* sendbuf, void* recvbuf, size_t count, int type, size_t byt
 
 int mdmp_gather(void* sb, size_t sc, void* rb, int t, size_t bytes, int root) {
     MPI_Request req;
+    std::lock_guard<std::mutex> lock(mdmp_mpi_mutex);
     const void* final_sb = sb;
     if (sb == rb && global_my_rank == root) final_sb = MPI_IN_PLACE;
 
@@ -299,6 +306,7 @@ int mdmp_gather(void* sb, size_t sc, void* rb, int t, size_t bytes, int root) {
 
 int mdmp_allreduce(void* sendbuf, void* recvbuf, size_t count, int type, size_t bytes, int op) {
     MPI_Request req;
+    std::lock_guard<std::mutex> lock(mdmp_mpi_mutex);
     const void* final_sendbuf = sendbuf;
     if (sendbuf == recvbuf) final_sendbuf = MPI_IN_PLACE;
 
@@ -312,6 +320,7 @@ int mdmp_allreduce(void* sendbuf, void* recvbuf, size_t count, int type, size_t 
 
 int mdmp_allgather(void* sb, size_t c, void* rb, int t, size_t bytes) {
     MPI_Request req;
+    std::lock_guard<std::mutex> lock(mdmp_mpi_mutex);
     const void* final_sb = sb;
     if (sb == rb) final_sb = MPI_IN_PLACE;
 
@@ -358,7 +367,9 @@ int mdmp_commit() {
 
     static std::vector<int> blens_buffer;
     static std::vector<MPI_Aint> disps_buffer;
-
+    
+    std::lock_guard<std::mutex> lock(mdmp_mpi_mutex);
+    
     // Process P2P queues
     auto ProcessQueue = [](std::vector<RegisteredMsg>& queue, bool isSend) {
         if (queue.empty()) return;
