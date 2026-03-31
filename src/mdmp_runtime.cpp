@@ -200,7 +200,10 @@ void mdmp_wait(int req_id) {
     if (mdmp_request_pool[req_id] != MPI_REQUEST_NULL) {
       MPI_Wait(&mdmp_request_pool[req_id], MPI_STATUS_IGNORE);
     }
-  } 
+  }
+  else if (req_id == MDMP_PROCESS_NOT_INVOLVED {
+      // Do nothing
+  }
   else {
     fprintf(stderr, "[MDMP Runtime Error] Invalid Request ID: %d\n", req_id);
     mdmp_abort(1);
@@ -208,7 +211,7 @@ void mdmp_wait(int req_id) {
 }
 
 int mdmp_send(void* buf, size_t c, int t, size_t bytes, int s, int d, int tag) {
-  if (d < 0 || d >= global_size || global_my_rank != s) return -2;
+  if (d < 0 || d >= global_size || global_my_rank != s) return MDMP_PROCESS_NOT_INVOLVED;
   std::unique_lock<std::mutex> lock(mdmp_mpi_mutex, std::defer_lock);
   if (mdmp_runtime_active) lock.lock();
   uint32_t id = mdmp_req_counter % MDMP_MAX_REQUESTS;
@@ -227,7 +230,7 @@ int mdmp_send(void* buf, size_t c, int t, size_t bytes, int s, int d, int tag) {
 }
 
 int mdmp_recv(void* buf, size_t c, int t, size_t bytes, int r, int s, int tag) {
-  if (s < 0 || s >= global_size || global_my_rank != r) return -2;
+  if (s < 0 || s >= global_size || global_my_rank != r) return MDMP_PROCESS_NOT_INVOLVED;
   std::unique_lock<std::mutex> lock(mdmp_mpi_mutex, std::defer_lock);
   if (mdmp_runtime_active) lock.lock();
   uint32_t id = mdmp_req_counter % MDMP_MAX_REQUESTS;

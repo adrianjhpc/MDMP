@@ -20,6 +20,7 @@ extern "C" {
 #define MDMP_MAX_REQUESTS 8192
 #define MDMP_MAX_DECLARATIVE_REQS 1024
 #define MDMP_DECLARATIVE_WAIT -1
+#define MDMP_PROCESS_NOT_INVOLVED -2
   
 void mdmp_init();
 void mdmp_final();
