@@ -426,11 +426,10 @@ int mdmp_commit() {
             i = j;
         }
     };
-    {
-      std::lock_guard<std::mutex> lock(mdmp_mpi_mutex);
-      ProcessQueue(recv_queue, false);
-      ProcessQueue(send_queue, true);
-    }
+    
+    ProcessQueue(recv_queue, false);
+    ProcessQueue(send_queue, true);
+    
     
     for (auto& r : reduce_queue) mdmp_reduce(r.sendbuf, r.recvbuf, r.count, r.type, r.bytes, r.root, r.op);
     for (auto& g : gather_queue) mdmp_gather(g.sendbuf, g.sendcount, g.recvbuf, g.type, g.bytes, g.root);
