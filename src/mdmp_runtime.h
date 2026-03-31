@@ -10,12 +10,15 @@
 #include <cstdio>
 #include <cstdlib>
 #include <atomic>
+#include <mutex>
 #include <thread>
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
+#define MDMP_MAX_REQUESTS 8192  
+  
 void mdmp_init();
 void mdmp_final();
 int  mdmp_get_rank();
