@@ -536,7 +536,7 @@ void MDMPPass::injectWaitsForRegion(Instruction *RegionEnd, AAResults &AA, LoopI
               WaitInsertionPoints.push_back(BB->getTerminator());
               continue; 
             }
-          }
+          } 
 
           Worklist.push_back({Succ, Succ->begin()});
         }
