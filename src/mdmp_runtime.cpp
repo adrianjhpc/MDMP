@@ -202,7 +202,7 @@ void mdmp_wait(int req_id) {
     }
   }
   else if (req_id == MDMP_PROCESS_NOT_INVOLVED) {
-      // Do nothing
+    // Do nothing
   }
   else {
     fprintf(stderr, "[MDMP Runtime Error] Invalid Request ID: %d\n", req_id);
@@ -429,15 +429,37 @@ int mdmp_commit() {
   send_queue.clear();
   recv_queue.clear();
 
-  for (auto& r : reduce_queue) mdmp_reduce(r.sendbuf, r.recvbuf, r.count, r.type, r.bytes, r.root, r.op);
-  for (auto& g : gather_queue) mdmp_gather(g.sendbuf, g.sendcount, g.recvbuf, g.type, g.bytes, g.root);
+
+  for (auto& r : reduce_queue) {
+    if (mdmp_declarative_req_count >= MDMP_MAX_DECLARATIVE_REQS) mdmp_abort(1);
+    const void* final_sb = (r.sendbuf == r.recvbuf && global_my_rank == r.root) ? MPI_IN_PLACE : r.sendbuf;
+    int actual_count = (r.type == 4) ? (int)r.bytes : (int)r.count;
+    MPI_Ireduce(final_sb, r.recvbuf, actual_count, get_mpi_type(r.type), get_mpi_op(r.op), r.root, mdmp_comm, &mdmp_declarative_requests[mdmp_declarative_req_count++]);
+  }
+
+  for (auto& g : gather_queue) {
+    if (mdmp_declarative_req_count >= MDMP_MAX_DECLARATIVE_REQS) mdmp_abort(1);
+    const void* final_sb = (g.sendbuf == g.recvbuf && global_my_rank == g.root) ? MPI_IN_PLACE : g.sendbuf;
+    int actual_count = (g.type == 4) ? (int)g.bytes : (int)g.sendcount;
+    MPI_Igather(final_sb, actual_count, get_mpi_type(g.type), g.recvbuf, actual_count, get_mpi_type(g.type), g.root, mdmp_comm, &mdmp_declarative_requests[mdmp_declarative_req_count++]);
+  }
+
+  for (auto& ar : allreduce_queue) {
+    if (mdmp_declarative_req_count >= MDMP_MAX_DECLARATIVE_REQS) mdmp_abort(1);
+    const void* final_sb = (ar.sendbuf == ar.recvbuf) ? MPI_IN_PLACE : ar.sendbuf;
+    int actual_count = (ar.type == 4) ? (int)ar.bytes : (int)ar.count;
+    MPI_Iallreduce(final_sb, ar.recvbuf, actual_count, get_mpi_type(ar.type), get_mpi_op(ar.op), mdmp_comm, &mdmp_declarative_requests[mdmp_declarative_req_count++]);
+  }
+
+  for (auto& ag : allgather_queue) {
+    if (mdmp_declarative_req_count >= MDMP_MAX_DECLARATIVE_REQS) mdmp_abort(1);
+    const void* final_sb = (ag.sendbuf == ag.recvbuf) ? MPI_IN_PLACE : ag.sendbuf;
+    int actual_count = (ag.type == 4) ? (int)ag.bytes : (int)ag.count;
+    MPI_Iallgather(final_sb, actual_count, get_mpi_type(ag.type), ag.recvbuf, actual_count, get_mpi_type(ag.type), mdmp_comm, &mdmp_declarative_requests[mdmp_declarative_req_count++]);
+  }
 
   reduce_queue.clear();
   gather_queue.clear();
-  
-  for (auto& ar : allreduce_queue) mdmp_allreduce(ar.sendbuf, ar.recvbuf, ar.count, ar.type, ar.bytes, ar.op);
-  for (auto& ag : allgather_queue) mdmp_allgather(ag.sendbuf, ag.count, ag.recvbuf, ag.type, ag.bytes);
-  
   allreduce_queue.clear();
   allgather_queue.clear();
 
