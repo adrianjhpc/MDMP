@@ -11,8 +11,14 @@ std::mutex mdmp_mpi_mutex;
 bool mdmp_owns_mpi = false;
 
 MPI_Request mdmp_request_pool[MDMP_MAX_REQUESTS];
-
 uint32_t mdmp_req_counter = 0;
+
+
+MPI_Request mdmp_declarative_requests[MDMP_MAX_DECLARATIVE_REQS];
+int mdmp_declarative_req_count = 0;
+
+MPI_Datatype mdmp_declarative_types_to_free[MDMP_MAX_DECLARATIVE_REQS];
+int mdmp_declarative_type_count = 0;  
 
 struct RegisteredMsg {
   void* buffer;
@@ -173,19 +179,32 @@ void mdmp_abort(int error_code) {
   MPI_Abort(mdmp_comm, error_code);
 }
 
+
 void mdmp_wait(int req_id) {
-    if (req_id >= 0 && req_id < MDMP_MAX_REQUESTS) {
-        
-        // Only wait if there is a real request sitting there
-        if (mdmp_request_pool[req_id] != MPI_REQUEST_NULL) {
-            MPI_Wait(&mdmp_request_pool[req_id], MPI_STATUS_IGNORE);
-            // MPI_Wait automatically sets mdmp_request_pool[req_id] = MPI_REQUEST_NULL here
-        }
-        
-    } else {
-        fprintf(stderr, "[MDMP Runtime Error] Invalid Request ID: %d\n", req_id);
-	mdmp_abort(1);
+  // The Declarative Waitall
+  if (req_id == MDMP_DECLARATIVE_WAIT) {
+    if (mdmp_declarative_req_count > 0) {
+      // Harness the hardware-optimized MPI_Waitall
+      MPI_Waitall(mdmp_declarative_req_count, mdmp_declarative_requests, MPI_STATUSES_IGNORE);
+      mdmp_declarative_req_count = 0;
     }
+        
+    // Free the custom datatypes exactly when it is safe to do so
+    for (int i = 0; i < mdmp_declarative_type_count; ++i) {
+      MPI_Type_free(&mdmp_declarative_types_to_free[i]);
+    }
+    mdmp_declarative_type_count = 0;
+  } 
+  // The Imperative Ring Buffer Wait 
+  else if (req_id >= 0 && req_id < MDMP_MAX_REQUESTS) {
+    if (mdmp_request_pool[req_id] != MPI_REQUEST_NULL) {
+      MPI_Wait(&mdmp_request_pool[req_id], MPI_STATUS_IGNORE);
+    }
+  } 
+  else {
+    fprintf(stderr, "[MDMP Runtime Error] Invalid Request ID: %d\n", req_id);
+    mdmp_abort(1);
+  }
 }
 
 int mdmp_send(void* buf, size_t c, int t, size_t bytes, int s, int d, int tag) {
@@ -339,18 +358,18 @@ void mdmp_register_allgather(void* sb, size_t c, void* rb, int t, size_t bytes) 
 
 int mdmp_commit() {
   mdmp_log("[MDMP] Rank %d ENTERING COMMIT. Processing %zu Sends, %zu Recvs, %zu Allreduces, %zu Allgathers\n", 
-	   global_my_rank, send_queue.size(), recv_queue.size(), allreduce_queue.size(), allgather_queue.size());
+           global_my_rank, send_queue.size(), recv_queue.size(), allreduce_queue.size(), allgather_queue.size());
+
+  // Reset the declarative tracker for this new batch
+  mdmp_declarative_req_count = 0;
+  mdmp_declarative_type_count = 0;
 
   static std::vector<int> blens_buffer;
   static std::vector<MPI_Aint> disps_buffer;
     
-    
-    
-  // Process P2P queues
-  auto ProcessQueue = [](std::vector<RegisteredMsg>& queue, bool isSend) {     
+  auto ProcessQueue = [&](std::vector<RegisteredMsg>& queue, bool isSend) {     
     if (queue.empty()) return;
 
-    // Sort by both rank and tag to group identical destinations/tags together
     std::stable_sort(queue.begin(), queue.end(), [](const RegisteredMsg& a, const RegisteredMsg& b) {
       if (a.rank != b.rank) return a.rank < b.rank;
       return a.tag < b.tag;
@@ -359,75 +378,68 @@ int mdmp_commit() {
     size_t i = 0;
     while (i < queue.size()) {
       int peer = queue[i].rank;
-      int current_tag = queue[i].tag; // Grab the tag for this group
+      int current_tag = queue[i].tag; 
       size_t j = i + 1;
             
-      // Group messages that share both the same peer and same tag
-      while (j < queue.size() && queue[j].rank == peer && queue[j].tag == current_tag) {
-	j++;
-      }
+      while (j < queue.size() && queue[j].rank == peer && queue[j].tag == current_tag) j++;
 
       size_t count = j - i;
 
-      // Get a request id
-      uint32_t id = mdmp_req_counter % MDMP_MAX_REQUESTS;
-      if (mdmp_request_pool[id] != MPI_REQUEST_NULL) {
-	fprintf(stderr, "[MDMP FATAL] Request Ring Buffer Overflow!\n");
+      if (mdmp_declarative_req_count >= MDMP_MAX_DECLARATIVE_REQS) {
+	fprintf(stderr, "[MDMP FATAL] Declarative Request Array Overflow!\n");
 	mdmp_abort(1);
       }
-      mdmp_req_counter++;
             
-      // Fire individually if there is only 1 message
       if (count == 1) { 
-
-	int actual_count = (queue[i].type == 4) ? (int)queue[i].bytes : (int)queue[i].count;
-                
-	if (isSend) MPI_Isend(queue[i].buffer, actual_count, get_mpi_type(queue[i].type), peer, current_tag, mdmp_comm, &mdmp_request_pool[id]);
-	else        MPI_Irecv(queue[i].buffer, actual_count, get_mpi_type(queue[i].type), peer, current_tag, mdmp_comm, &mdmp_request_pool[id]);
+        int actual_count = (queue[i].type == 4) ? (int)queue[i].bytes : (int)queue[i].count;
+        if (isSend) MPI_Isend(queue[i].buffer, actual_count, get_mpi_type(queue[i].type), peer, current_tag, mdmp_comm, &mdmp_declarative_requests[mdmp_declarative_req_count]);
+        else        MPI_Irecv(queue[i].buffer, actual_count, get_mpi_type(queue[i].type), peer, current_tag, mdmp_comm, &mdmp_declarative_requests[mdmp_declarative_req_count]);
       } 
-      // 4. Fire the Zero-Copy Hardware Datatype if there are multiple
       else {
-
-	blens_buffer.resize(count);
-	disps_buffer.resize(count);
+        blens_buffer.resize(count);
+        disps_buffer.resize(count);
                 
-	for (size_t k = 0; k < count; k++) {
-	  blens_buffer[k] = (int)queue[i + k].bytes;
-	  MPI_Get_address(queue[i + k].buffer, &disps_buffer[k]);
-	}
+        for (size_t k = 0; k < count; k++) {
+          blens_buffer[k] = (int)queue[i + k].bytes;
+          MPI_Get_address(queue[i + k].buffer, &disps_buffer[k]);
+        }
         
-	MPI_Datatype ntype;
-	MPI_Type_create_hindexed((int)count, blens_buffer.data(), disps_buffer.data(), MPI_BYTE, &ntype);
-	MPI_Type_commit(&ntype);
-	custom_types_to_free.push_back(ntype); 
+        MPI_Datatype ntype;
+        MPI_Type_create_hindexed((int)count, blens_buffer.data(), disps_buffer.data(), MPI_BYTE, &ntype);
+        MPI_Type_commit(&ntype);
+        
+        // Track the custom type so mdmp_wait(MDMP_DECLARATIVE_WAIT) can free it
+        mdmp_declarative_types_to_free[mdmp_declarative_type_count++] = ntype;
 
-	if (isSend) MPI_Isend(MPI_BOTTOM, 1, ntype, peer, current_tag, mdmp_comm, &mdmp_request_pool[id]);
-	else        MPI_Irecv(MPI_BOTTOM, 1, ntype, peer, current_tag, mdmp_comm, &mdmp_request_pool[id]);
+        if (isSend) MPI_Isend(MPI_BOTTOM, 1, ntype, peer, current_tag, mdmp_comm, &mdmp_declarative_requests[mdmp_declarative_req_count]);
+        else        MPI_Irecv(MPI_BOTTOM, 1, ntype, peer, current_tag, mdmp_comm, &mdmp_declarative_requests[mdmp_declarative_req_count]);
       }
+      
+      mdmp_declarative_req_count++;
       i = j;
     }
   };
     
   ProcessQueue(recv_queue, false);
   ProcessQueue(send_queue, true);
-    
-    
-  for (auto& r : reduce_queue) mdmp_reduce(r.sendbuf, r.recvbuf, r.count, r.type, r.bytes, r.root, r.op);
-  for (auto& g : gather_queue) mdmp_gather(g.sendbuf, g.sendcount, g.recvbuf, g.type, g.bytes, g.root);
-    
-  for (auto& ar : allreduce_queue) mdmp_allreduce(ar.sendbuf, ar.recvbuf, ar.count, ar.type, ar.bytes, ar.op);
-  for (auto& ag : allgather_queue) mdmp_allgather(ag.sendbuf, ag.count, ag.recvbuf, ag.type, ag.bytes);
- 
+     
   send_queue.clear();
   recv_queue.clear();
 
+  for (auto& r : reduce_queue) mdmp_reduce(r.sendbuf, r.recvbuf, r.count, r.type, r.bytes, r.root, r.op);
+  for (auto& g : gather_queue) mdmp_gather(g.sendbuf, g.sendcount, g.recvbuf, g.type, g.bytes, g.root);
+
   reduce_queue.clear();
   gather_queue.clear();
-
+  
+  for (auto& ar : allreduce_queue) mdmp_allreduce(ar.sendbuf, ar.recvbuf, ar.count, ar.type, ar.bytes, ar.op);
+  for (auto& ag : allgather_queue) mdmp_allgather(ag.sendbuf, ag.count, ag.recvbuf, ag.type, ag.bytes);
+  
   allreduce_queue.clear();
   allgather_queue.clear();
 
-  mdmp_log("[MDMP] Rank %d EXITED COMMIT. Hardware datatypes dispatched.\n", global_my_rank);
+  mdmp_log("[MDMP] Rank %d EXITED COMMIT. Dispatched %d requests.\n", global_my_rank, mdmp_declarative_req_count);
 
-  return -1;
+  // Return MDMP_DECLARATIVE_WAIT to trigger Waitall
+  return MDMP_DECLARATIVE_WAIT;
 }
