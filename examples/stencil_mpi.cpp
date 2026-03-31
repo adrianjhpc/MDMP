@@ -55,6 +55,7 @@ int main(int argc, char** argv) {
         printf("------------------------------------------------\n");
         printf(" BENCHMARK: 2D Heat Equation (Raw MPI)\n");
         printf("------------------------------------------------\n");
+        printf("Grid Size per Rank: %d x %d\n", N, N);
         printf("Elapsed Time: %f seconds\n", end_time - start_time);
         printf("Validation: %f\n", grid[N/2 + N/2]); 
     }
