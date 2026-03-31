@@ -63,7 +63,6 @@ static int gc_counter = 0;
 static void mdmp_garbage_collect_requests() {
     int active_count = 0;
     
-    // Pass 1: Non-blocking sweep using MPI_Test
     // This allows the MPI library to its internal handles for completed transfers
     // and ensure we don't run out of resources in that library.
     for (size_t i = 0; i < active_requests.size(); ++i) {
@@ -79,7 +78,6 @@ static void mdmp_garbage_collect_requests() {
         }
     }
 
-    // Pass 2: The Safety Valve
     // If the network is completely saturated and we are hoarding too many 
     // active handles, force a blocking wait to prevent an mpi library crash.
     if (active_count > MDMP_GC_HARD_LIMIT) {
@@ -154,7 +152,9 @@ void mdmp_init() {
 
     if (!is_initialised) {
         // MPI is not running. We take control and demand multithreading.
-        MPI_Init_thread(NULL, NULL, MPI_THREAD_MULTIPLE, &provided);
+//        MPI_Init_thread(NULL, NULL, MPI_THREAD_MULTIPLE, &provided);
+        MPI_Init(NULL, NULL);
+        provided = MPI_THREAD_SINGLE;
         mdmp_owns_mpi = true;
     } else {
         // The test suite already started MPI. Query what thread level we actually have.
@@ -231,7 +231,7 @@ void mdmp_abort(int error_code) {
 
 void mdmp_wait(int req_id) {
     mdmp_log("[MDMP] Rank %d WAITING on request ID: %d\n", global_my_rank, req_id);
-    std::lock_guard<std::mutex> lock(mdmp_mpi_mutex);
+    if(mdmp_runtime_active) std::lock_guard<std::mutex> lock(mdmp_mpi_mutex);
     if (req_id == -1) {
         // Bulk Wait for Declarative API
         if (!active_requests.empty()) {
@@ -287,7 +287,7 @@ void mdmp_wait(int req_id) {
 
 int mdmp_send(void* buf, size_t c, int t, size_t bytes, int s, int d, int tag) {
     if (d < 0 || d >= global_size || global_my_rank != s) return -2;
-    std::lock_guard<std::mutex> lock(mdmp_mpi_mutex);
+    if(mdmp_runtime_active) std::lock_guard<std::mutex> lock(mdmp_mpi_mutex);
     MPI_Request req;
     
     // If it's a custom struct (MPI_BYTE), the true count is the total bytes
@@ -299,7 +299,7 @@ int mdmp_send(void* buf, size_t c, int t, size_t bytes, int s, int d, int tag) {
 
 int mdmp_recv(void* buf, size_t c, int t, size_t bytes, int r, int s, int tag) {
     if (s < 0 || s >= global_size || global_my_rank != r) return -2;
-    std::lock_guard<std::mutex> lock(mdmp_mpi_mutex);
+    if(mdmp_runtime_active)  std::lock_guard<std::mutex> lock(mdmp_mpi_mutex);
     MPI_Request req;
     
     int actual_count = (t == 4) ? (int)bytes : (int)c;
@@ -311,7 +311,7 @@ int mdmp_recv(void* buf, size_t c, int t, size_t bytes, int r, int s, int tag) {
 // Collectives
 int mdmp_reduce(void* sendbuf, void* recvbuf, size_t count, int type, size_t bytes, int root, int op) {
     MPI_Request req;
-    std::lock_guard<std::mutex> lock(mdmp_mpi_mutex);
+    if(mdmp_runtime_active)  std::lock_guard<std::mutex> lock(mdmp_mpi_mutex);
     const void* final_sendbuf = sendbuf;
     if (sendbuf == recvbuf && global_my_rank == root) final_sendbuf = MPI_IN_PLACE;
 
@@ -322,7 +322,7 @@ int mdmp_reduce(void* sendbuf, void* recvbuf, size_t count, int type, size_t byt
 
 int mdmp_gather(void* sb, size_t sc, void* rb, int t, size_t bytes, int root) {
     MPI_Request req;
-    std::lock_guard<std::mutex> lock(mdmp_mpi_mutex);
+    if(mdmp_runtime_active) std::lock_guard<std::mutex> lock(mdmp_mpi_mutex);
     const void* final_sb = sb;
     if (sb == rb && global_my_rank == root) final_sb = MPI_IN_PLACE;
 
@@ -333,7 +333,7 @@ int mdmp_gather(void* sb, size_t sc, void* rb, int t, size_t bytes, int root) {
 
 int mdmp_allreduce(void* sendbuf, void* recvbuf, size_t count, int type, size_t bytes, int op) {
     MPI_Request req;
-    std::lock_guard<std::mutex> lock(mdmp_mpi_mutex);
+    if(mdmp_runtime_active) std::lock_guard<std::mutex> lock(mdmp_mpi_mutex);
     const void* final_sendbuf = sendbuf;
     if (sendbuf == recvbuf) final_sendbuf = MPI_IN_PLACE;
 
@@ -347,7 +347,7 @@ int mdmp_allreduce(void* sendbuf, void* recvbuf, size_t count, int type, size_t 
 
 int mdmp_allgather(void* sb, size_t c, void* rb, int t, size_t bytes) {
     MPI_Request req;
-    std::lock_guard<std::mutex> lock(mdmp_mpi_mutex);
+    if(mdmp_runtime_active) std::lock_guard<std::mutex> lock(mdmp_mpi_mutex);
     const void* final_sb = sb;
     if (sb == rb) final_sb = MPI_IN_PLACE;
 
