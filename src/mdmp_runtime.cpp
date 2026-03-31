@@ -8,6 +8,7 @@ MPI_Comm mdmp_comm;
 std::atomic<bool> mdmp_runtime_active{false};
 std::thread mdmp_progress_thread;
 std::mutex mdmp_mpi_mutex;
+bool mdmp_owns_mpi = false;
 
 struct RegisteredMsg {
     void* buffer;
@@ -136,17 +137,30 @@ static std::vector<RegisteredAllgather> allgather_queue;
 // ==============================================================================
 void mdmp_progress_loop() {
     int flag;
-    
     while (mdmp_runtime_active) {
-      std::lock_guard<std::mutex> lock(mdmp_mpi_mutex);
-        MPI_Iprobe(MPI_ANY_SOURCE, MPI_ANY_TAG, mdmp_comm, &flag, MPI_STATUS_IGNORE);
+        {
+            std::lock_guard<std::mutex> lock(mdmp_mpi_mutex);
+            MPI_Iprobe(MPI_ANY_SOURCE, MPI_ANY_TAG, mdmp_comm, &flag, MPI_STATUS_IGNORE);
+        }
         std::this_thread::sleep_for(std::chrono::microseconds(10));
     }
 }
 
 void mdmp_init() {
     int provided;
-    MPI_Init_thread(NULL, NULL, MPI_THREAD_FUNNELED, &provided);
+    int is_initialised;
+
+    MPI_Initialized(&is_initialised);
+
+    if (!is_initialised) {
+        // MPI is not running. We take control and demand multithreading.
+        MPI_Init_thread(NULL, NULL, MPI_THREAD_MULTIPLE, &provided);
+        mdmp_owns_mpi = true;
+    } else {
+        // The test suite already started MPI. Query what thread level we actually have.
+        MPI_Query_thread(&provided);
+        mdmp_owns_mpi = false;
+    }
 
     MPI_Comm_rank(MPI_COMM_WORLD, &global_my_rank);
     MPI_Comm_size(MPI_COMM_WORLD, &global_size);
@@ -160,26 +174,39 @@ void mdmp_init() {
     }
 
     mdmp_log("[MDMP Runtime] Starting up thread progress engine on rank %dn", global_my_rank);
-    mdmp_runtime_active = true;
-    mdmp_progress_thread = std::thread(mdmp_progress_loop);
-    
+    if (provided == MPI_THREAD_MULTIPLE) {
+        mdmp_runtime_active = true;
+        mdmp_progress_thread = std::thread(mdmp_progress_loop);
+    } else {
+        if (mdmp_get_rank() == 0) {
+            printf("[MDMP Warning] MPI initialized without MPI_THREAD_MULTIPLE (Level: %d).\n", provided);
+            printf("[MDMP Warning] Background progress engine DISABLED to prevent segfaults.\n");
+        }
+    }   
+ 
     mdmp_log("[MDMP Runtime] Initialised Rank %d / %d\n", global_my_rank, global_size);
 }
 
 void mdmp_final() {
     // Gracefully spin down the progress engine
-    mdmp_runtime_active = false;
-    if (mdmp_progress_thread.joinable()) {
-        mdmp_progress_thread.join();
+    if (mdmp_runtime_active) {
+        mdmp_runtime_active = false;
+        if (mdmp_progress_thread.joinable()) {
+            mdmp_progress_thread.join();
+        }
+        mdmp_log("[MDMP Runtime] Shut down thread progress engine on rank %dn", global_my_rank);
     }
-    mdmp_log("[MDMP Runtime] Shut down thread progress engine on rank %dn", global_my_rank);
     
     // Free our private communicator before shutting down MPI
     MPI_Comm_free(&mdmp_comm);
 
     mdmp_log("[MDMP Runtime] Finalised Rank %d / %d\n", global_my_rank, global_size);
+   
+    // Only shut down MPI if we were the ones who started it
+    if (mdmp_owns_mpi) {
+        MPI_Finalize();
+    }
 
-  MPI_Finalize();
 }
 
 int mdmp_get_rank() { return global_my_rank; }
