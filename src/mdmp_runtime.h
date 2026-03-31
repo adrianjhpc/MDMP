@@ -4,6 +4,13 @@
 #include <stddef.h>
 #include <string.h> 
 #include <stdlib.h>
+#include <mpi.h>
+#include <vector>
+#include <algorithm>
+#include <cstdio>
+#include <cstdlib>
+#include <atomic>
+#include <thread>
 
 #ifdef __cplusplus
 extern "C" {

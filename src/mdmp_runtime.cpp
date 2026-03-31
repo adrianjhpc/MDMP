@@ -1,13 +1,12 @@
 #include "mdmp_runtime.h"
-#include <mpi.h>
-#include <vector>
-#include <algorithm>
-#include <cstdio>
-#include <cstdlib>
 
 static int global_my_rank = -1;
 static int global_size = -1;
 static int mdmp_debug_enabled = 0;
+
+MPI_Comm mdmp_comm; 
+std::atomic<bool> mdmp_runtime_active{false};
+std::thread mdmp_progress_thread;
 
 struct RegisteredMsg {
     void* buffer;
@@ -131,29 +130,59 @@ struct RegisteredAllgather { void* sendbuf; size_t count; void* recvbuf; int typ
 static std::vector<RegisteredAllreduce> allreduce_queue;
 static std::vector<RegisteredAllgather> allgather_queue;
 
+// ==============================================================================
+// Background progress engine
+// ==============================================================================
+void mdmp_progress_loop() {
+    int flag;
+    while (mdmp_runtime_active) {
+        MPI_Iprobe(MPI_ANY_SOURCE, MPI_ANY_TAG, mdmp_comm, &flag, MPI_STATUS_IGNORE);
+        std::this_thread::sleep_for(std::chrono::microseconds(10));
+    }
+}
+
 void mdmp_init() {
     int provided;
     MPI_Init_thread(NULL, NULL, MPI_THREAD_FUNNELED, &provided);
+
     MPI_Comm_rank(MPI_COMM_WORLD, &global_my_rank);
     MPI_Comm_size(MPI_COMM_WORLD, &global_size);
-
+    
+    MPI_Comm_dup(MPI_COMM_WORLD, &mdmp_comm);
+    
    // Read the environment variable once at startup
     const char* env_debug = getenv("MDMP_DEBUG");
     if (env_debug != NULL && atoi(env_debug) > 0) {
         mdmp_debug_enabled = 1;
     }
 
-    mdmp_log("[MDMP Runtime] Initialized Rank %d / %d\n", global_my_rank, global_size);
+    mdmp_log("[MDMP Runtime] Starting up thread progress engine on rank %dn", global_my_rank);
+    mdmp_runtime_active = true;
+    mdmp_progress_thread = std::thread(mdmp_progress_loop);
+    
+    mdmp_log("[MDMP Runtime] Initialised Rank %d / %d\n", global_my_rank, global_size);
 }
 
 void mdmp_final() {
-    MPI_Finalize();
+    // Gracefully spin down the progress engine
+    mdmp_runtime_active = false;
+    if (mdmp_progress_thread.joinable()) {
+        mdmp_progress_thread.join();
+    }
+    mdmp_log("[MDMP Runtime] Shut down thread progress engine on rank %dn", global_my_rank);
+    
+    // Free our private communicator before shutting down MPI
+    MPI_Comm_free(&mdmp_comm);
+
+    mdmp_log("[MDMP Runtime] Finalised Rank %d / %d\n", global_my_rank, global_size);
+
+  MPI_Finalize();
 }
 
 int mdmp_get_rank() { return global_my_rank; }
 int mdmp_get_size() { return global_size; }
 double mdmp_wtime() { return MPI_Wtime(); }
-void mdmp_sync()    { MPI_Barrier(MPI_COMM_WORLD); }
+void mdmp_sync()    { MPI_Barrier(mdmp_comm); }
 
 void mdmp_set_debug(int enable) {
     mdmp_debug_enabled = enable;
@@ -167,7 +196,7 @@ void mdmp_abort(int error_code) {
     fflush(stdout); 
     fprintf(stderr, "[MDMP FATAL] Rank %d called ABORT with error code %d. Terminating...\n", global_my_rank, error_code);
     fflush(stderr);
-    MPI_Abort(MPI_COMM_WORLD, error_code);
+    MPI_Abort(mdmp_comm, error_code);
 }
 
 void mdmp_wait(int req_id) {
@@ -233,7 +262,7 @@ int mdmp_send(void* buf, size_t c, int t, size_t bytes, int s, int d, int tag) {
     // If it's a custom struct (MPI_BYTE), the true count is the total bytes
     int actual_count = (t == 4) ? (int)bytes : (int)c;
     
-    MPI_Isend(buf, actual_count, get_mpi_type(t), d, tag, MPI_COMM_WORLD, &req);
+    MPI_Isend(buf, actual_count, get_mpi_type(t), d, tag, mdmp_comm, &req);
     return allocate_request_slot(req);
 }
 
@@ -243,7 +272,7 @@ int mdmp_recv(void* buf, size_t c, int t, size_t bytes, int r, int s, int tag) {
     
     int actual_count = (t == 4) ? (int)bytes : (int)c;
     
-    MPI_Irecv(buf, actual_count, get_mpi_type(t), s, tag, MPI_COMM_WORLD, &req);
+    MPI_Irecv(buf, actual_count, get_mpi_type(t), s, tag, mdmp_comm, &req);
     return allocate_request_slot(req);
 }
 
@@ -254,7 +283,7 @@ int mdmp_reduce(void* sendbuf, void* recvbuf, size_t count, int type, size_t byt
     if (sendbuf == recvbuf && global_my_rank == root) final_sendbuf = MPI_IN_PLACE;
 
     int actual_count = (type == 4) ? (int)bytes : (int)count;
-    MPI_Ireduce(final_sendbuf, recvbuf, actual_count, get_mpi_type(type), get_mpi_op(op), root, MPI_COMM_WORLD, &req);
+    MPI_Ireduce(final_sendbuf, recvbuf, actual_count, get_mpi_type(type), get_mpi_op(op), root, mdmp_comm, &req);
     return allocate_request_slot(req);
 }
 
@@ -264,7 +293,7 @@ int mdmp_gather(void* sb, size_t sc, void* rb, int t, size_t bytes, int root) {
     if (sb == rb && global_my_rank == root) final_sb = MPI_IN_PLACE;
 
     int actual_count = (t == 4) ? (int)bytes : (int)sc;
-    MPI_Igather(final_sb, actual_count, get_mpi_type(t), rb, actual_count, get_mpi_type(t), root, MPI_COMM_WORLD, &req);
+    MPI_Igather(final_sb, actual_count, get_mpi_type(t), rb, actual_count, get_mpi_type(t), root, mdmp_comm, &req);
     return allocate_request_slot(req);
 }
 
@@ -277,7 +306,7 @@ int mdmp_allreduce(void* sendbuf, void* recvbuf, size_t count, int type, size_t 
     
     MPI_Op mpi_op = get_mpi_op(op); 
     
-    MPI_Iallreduce(final_sendbuf, recvbuf, actual_count, get_mpi_type(type), mpi_op, MPI_COMM_WORLD, &req);
+    MPI_Iallreduce(final_sendbuf, recvbuf, actual_count, get_mpi_type(type), mpi_op, mdmp_comm, &req);
     return allocate_request_slot(req);
 }
 
@@ -287,7 +316,7 @@ int mdmp_allgather(void* sb, size_t c, void* rb, int t, size_t bytes) {
     if (sb == rb) final_sb = MPI_IN_PLACE;
 
     int actual_count = (t == 4) ? (int)bytes : (int)c;
-    MPI_Iallgather(final_sb, actual_count, get_mpi_type(t), rb, actual_count, get_mpi_type(t), MPI_COMM_WORLD, &req);
+    MPI_Iallgather(final_sb, actual_count, get_mpi_type(t), rb, actual_count, get_mpi_type(t), mdmp_comm, &req);
     return allocate_request_slot(req);
 }
 
@@ -358,8 +387,8 @@ int mdmp_commit() {
                 MPI_Request req;
                 int actual_count = (queue[i].type == 4) ? (int)queue[i].bytes : (int)queue[i].count;
                 
-                if (isSend) MPI_Isend(queue[i].buffer, actual_count, get_mpi_type(queue[i].type), peer, current_tag, MPI_COMM_WORLD, &req);
-                else        MPI_Irecv(queue[i].buffer, actual_count, get_mpi_type(queue[i].type), peer, current_tag, MPI_COMM_WORLD, &req);
+                if (isSend) MPI_Isend(queue[i].buffer, actual_count, get_mpi_type(queue[i].type), peer, current_tag, mdmp_comm, &req);
+                else        MPI_Irecv(queue[i].buffer, actual_count, get_mpi_type(queue[i].type), peer, current_tag, mdmp_comm, &req);
                 allocate_request_slot(req);
             } 
             // 4. Fire the Zero-Copy Hardware Datatype if there are multiple
@@ -379,8 +408,8 @@ int mdmp_commit() {
                 custom_types_to_free.push_back(ntype); 
 
                 MPI_Request req;
-                if (isSend) MPI_Isend(MPI_BOTTOM, 1, ntype, peer, current_tag, MPI_COMM_WORLD, &req);
-                else        MPI_Irecv(MPI_BOTTOM, 1, ntype, peer, current_tag, MPI_COMM_WORLD, &req);
+                if (isSend) MPI_Isend(MPI_BOTTOM, 1, ntype, peer, current_tag, mdmp_comm, &req);
+                else        MPI_Irecv(MPI_BOTTOM, 1, ntype, peer, current_tag, mdmp_comm, &req);
                 allocate_request_slot(req);
             }
             i = j;
