@@ -2,6 +2,450 @@
 
 using namespace llvm;
 
+bool MDMPPass::isAsyncMDMPOpName(StringRef FnName) {
+  return FnName == "mdmp_send" ||
+    FnName == "mdmp_recv" ||
+    FnName == "mdmp_reduce" ||
+    FnName == "mdmp_allreduce" ||
+    FnName == "mdmp_allgather" ||
+    FnName == "mdmp_gather" ||
+    FnName == "mdmp_bcast" ||
+    FnName == "mdmp_commit" ||
+    FnName == "mdmp_register_send" ||
+    FnName == "mdmp_register_recv" ||
+    FnName == "mdmp_register_reduce" ||
+    FnName == "mdmp_register_gather" ||
+    FnName == "mdmp_register_allreduce" ||
+    FnName == "mdmp_register_allgather" ||
+    FnName == "mdmp_register_bcast" ||
+    FnName.starts_with("__mdmp_marker_");
+}
+
+bool MDMPPass::isHardBarrierCallName(StringRef Name) {
+  bool isMDMPBarrier =
+    (Name == "mdmp_final" || Name == "__mdmp_marker_final" ||
+     Name == "mdmp_abort" || Name == "__mdmp_marker_abort" ||
+     Name == "mdmp_sync"  || Name == "__mdmp_marker_sync"  ||
+     Name == "mdmp_wait"  ||
+     Name == "mdmp_wait_many" ||
+     Name == "mdmp_commregion_end" ||
+     Name == "__mdmp_marker_commregion_end" ||
+     // Keep this conservative until multi-batch declarative commits are fully supported.
+     Name == "mdmp_commit" || Name == "__mdmp_marker_commit");
+
+  bool isMPIBarrier =
+    Name.starts_with("MPI_Wait") ||
+    Name == "MPI_Barrier" ||
+    Name == "MPI_Bcast" ||
+    Name == "MPI_Allreduce" ||
+    Name == "MPI_Reduce" ||
+    Name == "MPI_Gather" ||
+    Name == "MPI_Scatter" ||
+    Name == "MPI_Alltoall" ||
+    Name == "MPI_Allgather" ||
+    Name == "MPI_Finalize";
+
+  bool isMPIP2P =
+    (Name == "MPI_Send" || Name == "MPI_Recv" || Name == "MPI_Sendrecv");
+
+  bool isMPITopology =
+    Name.contains("MPI_Comm_") || Name == "MPI_Cart_create";
+
+  if (Name == "MPI_Comm_rank" || Name == "MPI_Comm_size")
+    isMPITopology = false;
+
+  return isMDMPBarrier || isMPIBarrier || isMPIP2P || isMPITopology;
+}
+
+void MDMPPass::collectLeafLoops(Loop *L, SmallVectorImpl<Loop *> &Out) {
+  if (L->getSubLoops().empty()) {
+    Out.push_back(L);
+    return;
+  }
+
+  for (Loop *SubL : L->getSubLoops()) {
+    collectLeafLoops(SubL, Out);
+  }
+}
+
+void MDMPPass::collectLeafLoops(LoopInfo &LI, SmallVectorImpl<Loop *> &Out) {
+  for (Loop *TopL : LI) {
+    collectLeafLoops(TopL, Out);
+  }
+}
+
+bool MDMPPass::requestWindowCoversLoopHeader(const RequestWindowInfo &Info, Loop *L, DominatorTree &DT) {
+                                          
+                                          
+  BasicBlock *Header = L->getHeader();
+  if (!Info.LiveBlocks.contains(Header))
+    return false;
+
+  Instruction *HeaderIP = &*Header->getFirstInsertionPt();
+  return DT.dominates(Info.Req->StartPoint, HeaderIP);
+}
+
+SmallVector<MDMPPass::RequestWindowInfo, 8> MDMPPass::analyzeRequestWindows(ArrayRef<AsyncRequest> Requests, Instruction *RegionEnd, AAResults &AA, LoopInfo &LI, Module *M) {
+
+  const DataLayout &DL = M->getDataLayout();
+  SmallVector<RequestWindowInfo, 8> Infos;
+  Infos.reserve(Requests.size());
+
+  for (const AsyncRequest &Req : Requests) {
+    RequestWindowInfo Info;
+    Info.Req = &Req;
+
+    SmallPtrSet<BasicBlock *, 16> VisitedFromBegin;
+    SmallPtrSet<BasicBlock *, 16> VisitedPartial;
+    SmallVector<TraversalState, 16> Worklist;
+
+    auto StartIt = Req.StartPoint->getIterator();
+    ++StartIt;
+    Worklist.push_back({Req.StartPoint->getParent(), StartIt});
+
+    while (!Worklist.empty()) {
+      TraversalState State = Worklist.pop_back_val();
+      BasicBlock *BB = State.BB;
+
+      bool StartsAtBegin = (State.StartIt == BB->begin());
+      if (StartsAtBegin) {
+        if (!VisitedFromBegin.insert(BB).second)
+          continue;
+      } else {
+        if (!VisitedPartial.insert(BB).second)
+          continue;
+      }
+
+      Info.LiveBlocks.insert(BB);
+
+      bool FoundStop = false;
+      for (auto It = State.StartIt; It != BB->end(); ++It) {
+        Instruction *Inst = &*It;
+
+        if (RegionEnd && Inst == RegionEnd) {
+          Info.WaitPoints.push_back(Inst);
+          FoundStop = true;
+          break;
+        }
+
+        if (!Inst->mayReadOrWriteMemory())
+          continue;
+
+        bool StopHere = false;
+        bool IsAsyncCall = false;
+
+        if (auto *CB = dyn_cast<CallBase>(Inst)) {
+          if (Function *CalledFn = CB->getCalledFunction()) {
+            StringRef Name = CalledFn->getName();
+            IsAsyncCall = isAsyncMDMPOpName(Name);
+
+            if (isHardBarrierCallName(Name))
+              StopHere = true;
+          }
+        }
+
+        if (!StopHere && !IsAsyncCall) {
+          StopHere =
+	    instructionConflictsWithAnyTrackedBuffer(Inst, Req.Buffers, AA, DL);
+        }
+
+        if (StopHere) {
+          Info.WaitPoints.push_back(Inst);
+          FoundStop = true;
+          break;
+        }
+      }
+
+      if (FoundStop)
+        continue;
+
+      bool HasSuccessors = false;
+      Loop *ReqLoop = LI.getLoopFor(Req.StartPoint->getParent());
+
+      for (BasicBlock *Succ : successors(BB)) {
+        HasSuccessors = true;
+
+        bool IsBackedge = false;
+        Loop *EdgeLoop = LI.getLoopFor(BB);
+        while (EdgeLoop) {
+          if (EdgeLoop->getHeader() == Succ) {
+            IsBackedge = true;
+            break;
+          }
+          EdgeLoop = EdgeLoop->getParentLoop();
+        }
+
+        if (IsBackedge && EdgeLoop) {
+          if (!ReqLoop || EdgeLoop == ReqLoop || EdgeLoop->contains(ReqLoop)) {
+            Info.WaitPoints.push_back(BB->getTerminator());
+            continue;
+          }
+        }
+
+        Worklist.push_back({Succ, Succ->begin()});
+      }
+
+      if (!HasSuccessors) {
+        Info.WaitPoints.push_back(BB->getTerminator());
+      }
+    }
+
+    Infos.push_back(std::move(Info));
+  }
+
+  return Infos;
+}
+
+std::optional<uint64_t> MDMPPass::getConstU64(Value *V) {
+  if (auto *CI = dyn_cast<ConstantInt>(V))
+    return CI->getZExtValue();
+  return std::nullopt;
+}
+
+std::optional<uint64_t> MDMPPass::getStaticMPITypeBytes(Value *TypeCodeV) {
+  auto TC = getConstU64(TypeCodeV);
+  if (!TC) return std::nullopt;
+
+  switch (*TC) {
+  case 0: return 4; // int
+  case 1: return 8; // double
+  case 2: return 4; // float
+  case 3: return 1; // char
+  case 4: return 1; // byte
+  default: return std::nullopt;
+  }
+}
+
+std::optional<uint64_t> MDMPPass::checkedMulU64(uint64_t A, uint64_t B) {
+  if (A != 0 && B > UINT64_MAX / A) return std::nullopt;
+  return A * B;
+}
+
+LocationSize MDMPPass::derivePreciseSpan(Value *CountV, Value *TypeCodeV, Value *BytesV) {
+  if (auto Bytes = getConstU64(BytesV))
+    return LocationSize::precise(*Bytes);
+
+  auto Count = getConstU64(CountV);
+  auto TypeBytes = getStaticMPITypeBytes(TypeCodeV);
+  if (Count && TypeBytes) {
+    if (auto Total = checkedMulU64(*Count, *TypeBytes))
+      return LocationSize::precise(*Total);
+  }
+
+  return LocationSize::beforeOrAfterPointer();
+}
+
+MDMPPass::TrackedBuffer MDMPPass::makePreciseTrackedBuffer(Value *Ptr, Value *CountV, Value *TypeCodeV,
+							   Value *BytesV, bool IsNetworkReadOnly) {
+  return { MemoryLocation(Ptr, derivePreciseSpan(CountV, TypeCodeV, BytesV)),
+    IsNetworkReadOnly };
+}
+
+MDMPPass::TrackedBuffer MDMPPass::makeUnknownTrackedBuffer(Value *Ptr, bool IsNetworkReadOnly) {
+  return { MemoryLocation(Ptr, LocationSize::beforeOrAfterPointer()),
+    IsNetworkReadOnly };
+}
+
+// Note: if your LLVM version's LocationSize::getValue() returns TypeSize,
+// replace "return S.getValue();" with:
+//   return S.getValue().getKnownMinValue();
+std::optional<uint64_t> MDMPPass::getPreciseSizeBytes(LocationSize S) {
+  if (!S.hasValue() || !S.isPrecise())
+    return std::nullopt;
+  return S.getValue();
+}
+
+bool MDMPPass::areDefinitelyDisjoint(const MemoryLocation &A,
+				     const MemoryLocation &B,
+				     const DataLayout &DL) {
+  int64_t OffA = 0, OffB = 0;
+  const Value *BaseA = GetPointerBaseWithConstantOffset(A.Ptr, OffA, DL);
+  const Value *BaseB = GetPointerBaseWithConstantOffset(B.Ptr, OffB, DL);
+
+  if (!BaseA || !BaseB)
+    return false;
+
+  const Value *UA = getUnderlyingObject(BaseA);
+  const Value *UB = getUnderlyingObject(BaseB);
+
+  // Different identified objects => cannot alias.
+  if (UA != UB && isIdentifiedObject(UA) && isIdentifiedObject(UB))
+    return true;
+
+  // Same underlying object with exact byte intervals.
+  if (UA == UB) {
+    auto SA = getPreciseSizeBytes(A.Size);
+    auto SB = getPreciseSizeBytes(B.Size);
+    if (!SA || !SB)
+      return false;
+
+    int64_t AStart = OffA;
+    int64_t AEnd   = OffA + static_cast<int64_t>(*SA);
+    int64_t BStart = OffB;
+    int64_t BEnd   = OffB + static_cast<int64_t>(*SB);
+
+    return (AEnd <= BStart) || (BEnd <= AStart);
+  }
+
+  return false;
+}
+
+bool MDMPPass::locationsMayOverlap(const MemoryLocation &A,
+				   const MemoryLocation &B,
+				   AAResults &AA,
+				   const DataLayout &DL) {
+  if (areDefinitelyDisjoint(A, B, DL))
+    return false;
+
+  return AA.alias(A, B) != AliasResult::NoAlias;
+}
+
+bool MDMPPass::isHardMotionBarrier(Instruction *I) {
+  if (isa<FenceInst>(I) || isa<AtomicCmpXchgInst>(I) || isa<AtomicRMWInst>(I))
+    return true;
+
+  if (auto *LI = dyn_cast<LoadInst>(I))
+    if (!LI->isSimple()) return true;
+
+  if (auto *SI = dyn_cast<StoreInst>(I))
+    if (!SI->isSimple()) return true;
+
+  if (auto *CB = dyn_cast<CallBase>(I)) {
+    if (CB->isInlineAsm())
+      return true;
+
+    if (CB->mayThrow())
+      return true;
+
+    if (Function *Callee = CB->getCalledFunction()) {
+      StringRef N = Callee->getName();
+      if (N == "mdmp_commregion_begin" ||
+          N.starts_with("mdmp_") ||
+          N.starts_with("MPI_") ||
+          N.starts_with("__mdmp_marker_")) {
+        return true;
+      }
+    }
+
+    // Pure/readnone/readonly calls can still be moved across if operands dominate
+    // and there is no memory conflict with tracked buffers.
+    if (CB->mayHaveSideEffects() &&
+        !CB->doesNotAccessMemory() &&
+        !CB->onlyReadsMemory()) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+bool MDMPPass::operandsAvailableBefore(CallInst *CI,
+				       Instruction *InsertBefore,
+				       DominatorTree &DT) {
+  for (Use &U : CI->args()) {
+    if (auto *OpI = dyn_cast<Instruction>(U.get())) {
+      if (OpI == InsertBefore)
+        return false;
+      if (!DT.dominates(OpI, InsertBefore))
+        return false;
+    }
+  }
+  return true;
+}
+
+bool MDMPPass::instructionConflictsWithTrackedBuffer(Instruction *I,
+						     const TrackedBuffer &Buf,
+						     AAResults &AA,
+						     const DataLayout &DL) {
+  if (auto *LI = dyn_cast<LoadInst>(I)) {
+    // Local reads are okay while a send is in flight.
+    if (Buf.isNetworkReadOnly)
+      return false;
+    return locationsMayOverlap(MemoryLocation::get(LI), Buf.Loc, AA, DL);
+  }
+
+  if (auto *SI = dyn_cast<StoreInst>(I)) {
+    // Local writes are never okay if they overlap the network buffer.
+    return locationsMayOverlap(MemoryLocation::get(SI), Buf.Loc, AA, DL);
+  }
+
+  auto MR = AA.getModRefInfo(I, Buf.Loc);
+  if (Buf.isNetworkReadOnly)
+    return isModSet(MR);
+  return isModOrRefSet(MR);
+}
+
+bool MDMPPass::instructionConflictsWithAnyTrackedBuffer(Instruction *I,
+							ArrayRef<TrackedBuffer> Buffers,
+							AAResults &AA,
+							const DataLayout &DL) {
+  for (const TrackedBuffer &Buf : Buffers) {
+    if (instructionConflictsWithTrackedBuffer(I, Buf, AA, DL))
+      return true;
+  }
+  return false;
+}
+
+BasicBlock *MDMPPass::getLinearPredecessor(BasicBlock *BB) {
+  BasicBlock *Pred = BB->getSinglePredecessor();
+  if (!Pred) return nullptr;
+  if (Pred->getSingleSuccessor() != BB) return nullptr;
+  return Pred;
+}
+
+std::vector<MDMPPass::TrackedBuffer> MDMPPass::buildSendRecvBuffers(Value *Buf, Value *Count,
+								    Value *Type, Value *Bytes,
+								    bool IsSend) {
+  return { makePreciseTrackedBuffer(Buf, Count, Type, Bytes, IsSend) };
+}
+
+std::vector<MDMPPass::TrackedBuffer> MDMPPass::buildReduceBuffers(Value *SendBuf, Value *RecvBuf,
+								  Value *Count, Value *Type,
+								  Value *Bytes) {
+  return {
+    makePreciseTrackedBuffer(RecvBuf, Count, Type, Bytes, false),
+    makePreciseTrackedBuffer(SendBuf, Count, Type, Bytes, true)
+  };
+}
+
+std::vector<MDMPPass::TrackedBuffer> MDMPPass::buildGatherBuffers(Value *SendBuf, Value *SendCount,
+								  Value *RecvBuf, Value *Type,
+								  Value *Bytes) {
+  // Send side is exact. Receive side depends on root/global_size, so keep
+  // conservative unless your frontend can pass total recv-buffer bytes.
+  return {
+    makeUnknownTrackedBuffer(RecvBuf, false),
+    makePreciseTrackedBuffer(SendBuf, SendCount, Type, Bytes, true)
+  };
+}
+
+std::vector<MDMPPass::TrackedBuffer> MDMPPass::buildAllreduceBuffers(Value *SendBuf, Value *RecvBuf,
+								     Value *Count, Value *Type,
+								     Value *Bytes) {
+  return {
+    makePreciseTrackedBuffer(RecvBuf, Count, Type, Bytes, false),
+    makePreciseTrackedBuffer(SendBuf, Count, Type, Bytes, true)
+  };
+}
+
+std::vector<MDMPPass::TrackedBuffer> MDMPPass::buildAllgatherBuffers(Value *SendBuf, Value *Count,
+								     Value *RecvBuf, Value *Type,
+								     Value *Bytes) {
+  return {
+    makeUnknownTrackedBuffer(RecvBuf, false),
+    makePreciseTrackedBuffer(SendBuf, Count, Type, Bytes, true)
+  };
+}
+
+std::vector<MDMPPass::TrackedBuffer> MDMPPass::buildBcastBuffers(Value *Buf, Value *Count,
+								 Value *Type, Value *Bytes) {
+  // Conservatively treat as recv-like because non-root ranks get writes.
+  return {
+    makePreciseTrackedBuffer(Buf, Count, Type, Bytes, false)
+  };
+}
+
+
 PreservedAnalyses MDMPPass::run(Module &M, ModuleAnalysisManager &MAM) {
   bool changed = false;
   auto &FAM = MAM.getResult<FunctionAnalysisManagerModuleProxy>(M).getManager();
@@ -19,16 +463,23 @@ PreservedAnalyses MDMPPass::run(Module &M, ModuleAnalysisManager &MAM) {
 
 bool MDMPPass::runOnFunction(Function &F, AAResults &AA, DominatorTree &DT, LoopInfo &LI) {
   PendingRequests.clear();
-    
+
   transformFunctionsToCalls(F, AA, DT, LI);
 
   if (!PendingRequests.empty()) {
     LLVMContext &Ctx = F.getContext();
     Module *M = F.getParent();
-    //injectThrottledProgress(F, DT, LI, M);
+
+    auto SavedRequests = PendingRequests;
+
     injectWaitsForRegion(nullptr, AA, LI, Ctx, M, DT);
+
+    PendingRequests = std::move(SavedRequests);
+    injectThrottledProgress(F, AA, DT, LI, M);
+ 
+    PendingRequests.clear();
   }
-    
+
   return true;
 }
 
@@ -48,73 +499,73 @@ void MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
   FunctionCallee runtime_abort = M->getOrInsertFunction("mdmp_abort", Type::getVoidTy(Ctx), Type::getInt32Ty(Ctx));
 
   FunctionCallee runtime_send = M->getOrInsertFunction("mdmp_send", 
-                                       Type::getInt32Ty(Ctx), PointerType::getUnqual(Ctx), Type::getInt64Ty(Ctx), 
-                                       Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx));
+						       Type::getInt32Ty(Ctx), PointerType::getUnqual(Ctx), Type::getInt64Ty(Ctx), 
+						       Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx));
   if (Function *FSend = dyn_cast<Function>(runtime_send.getCallee())) { FSend->addFnAttr(Attribute::NoUnwind); }
  
   FunctionCallee runtime_recv = M->getOrInsertFunction("mdmp_recv", 
-                                       Type::getInt32Ty(Ctx), PointerType::getUnqual(Ctx), Type::getInt64Ty(Ctx), 
-                                       Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx));
+						       Type::getInt32Ty(Ctx), PointerType::getUnqual(Ctx), Type::getInt64Ty(Ctx), 
+						       Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx));
   if (Function *FRecv = dyn_cast<Function>(runtime_recv.getCallee())) { FRecv->addFnAttr(Attribute::NoUnwind); }
 
   FunctionCallee runtime_reduce = M->getOrInsertFunction("mdmp_reduce", 
-                             Type::getInt32Ty(Ctx), PointerType::getUnqual(Ctx), PointerType::getUnqual(Ctx), 
-                             Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx)); 
+							 Type::getInt32Ty(Ctx), PointerType::getUnqual(Ctx), PointerType::getUnqual(Ctx), 
+							 Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx)); 
   if (Function *FReduce = dyn_cast<Function>(runtime_reduce.getCallee())) { FReduce->addFnAttr(Attribute::NoUnwind); }
 
   FunctionCallee runtime_gather = M->getOrInsertFunction("mdmp_gather", 
-                             Type::getInt32Ty(Ctx), PointerType::getUnqual(Ctx), Type::getInt64Ty(Ctx), 
-                             PointerType::getUnqual(Ctx), Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx)); 
+							 Type::getInt32Ty(Ctx), PointerType::getUnqual(Ctx), Type::getInt64Ty(Ctx), 
+							 PointerType::getUnqual(Ctx), Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx)); 
   if (Function *FGather = dyn_cast<Function>(runtime_gather.getCallee())) { FGather->addFnAttr(Attribute::NoUnwind); }
 
   FunctionCallee runtime_allreduce = M->getOrInsertFunction("mdmp_allreduce", 
-                                    Type::getInt32Ty(Ctx), PointerType::getUnqual(Ctx), PointerType::getUnqual(Ctx), 
-                                    Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx)); 
+							    Type::getInt32Ty(Ctx), PointerType::getUnqual(Ctx), PointerType::getUnqual(Ctx), 
+							    Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx)); 
   if (Function *FAllreduce = dyn_cast<Function>(runtime_allreduce.getCallee())) { FAllreduce->addFnAttr(Attribute::NoUnwind); }
     
   FunctionCallee runtime_allgather = M->getOrInsertFunction("mdmp_allgather",
-                                    Type::getInt32Ty(Ctx), PointerType::getUnqual(Ctx), Type::getInt64Ty(Ctx), 
-                                    PointerType::getUnqual(Ctx), Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx));
+							    Type::getInt32Ty(Ctx), PointerType::getUnqual(Ctx), Type::getInt64Ty(Ctx), 
+							    PointerType::getUnqual(Ctx), Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx));
   if (Function *FAllgather = dyn_cast<Function>(runtime_allgather.getCallee())) { FAllgather->addFnAttr(Attribute::NoUnwind); }
 
   FunctionCallee runtime_bcast = M->getOrInsertFunction("mdmp_bcast", 
-                            Type::getInt32Ty(Ctx), PointerType::getUnqual(Ctx), Type::getInt64Ty(Ctx), 
-                            Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx)); 
+							Type::getInt32Ty(Ctx), PointerType::getUnqual(Ctx), Type::getInt64Ty(Ctx), 
+							Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx)); 
   if (Function *FBcast = dyn_cast<Function>(runtime_bcast.getCallee())) { FBcast->addFnAttr(Attribute::NoUnwind); }
 
   FunctionCallee runtime_register_send = M->getOrInsertFunction("mdmp_register_send", 
-                                Type::getInt32Ty(Ctx), PointerType::getUnqual(Ctx), Type::getInt64Ty(Ctx), 
-                                Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx));
+								Type::getInt32Ty(Ctx), PointerType::getUnqual(Ctx), Type::getInt64Ty(Ctx), 
+								Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx));
   if (Function *FRegSend = dyn_cast<Function>(runtime_register_send.getCallee())) { FRegSend->addFnAttr(Attribute::NoUnwind); }
         
   FunctionCallee runtime_register_recv = M->getOrInsertFunction("mdmp_register_recv", 
-                                Type::getInt32Ty(Ctx), PointerType::getUnqual(Ctx), Type::getInt64Ty(Ctx), 
-                                Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx));
+								Type::getInt32Ty(Ctx), PointerType::getUnqual(Ctx), Type::getInt64Ty(Ctx), 
+								Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx));
   if (Function *FRegRecv = dyn_cast<Function>(runtime_register_recv.getCallee())) { FRegRecv->addFnAttr(Attribute::NoUnwind); }
 
   FunctionCallee runtime_register_reduce = M->getOrInsertFunction("mdmp_register_reduce", 
-                                  Type::getInt32Ty(Ctx), PointerType::getUnqual(Ctx), PointerType::getUnqual(Ctx), 
-                                  Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx)); 
+								  Type::getInt32Ty(Ctx), PointerType::getUnqual(Ctx), PointerType::getUnqual(Ctx), 
+								  Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt32Ty(Ctx)); 
   if (Function *FRegReduce = dyn_cast<Function>(runtime_register_reduce.getCallee())) { FRegReduce->addFnAttr(Attribute::NoUnwind); }
         
   FunctionCallee runtime_register_gather = M->getOrInsertFunction("mdmp_register_gather", 
-                                  Type::getInt32Ty(Ctx), PointerType::getUnqual(Ctx), Type::getInt64Ty(Ctx), 
-                                  PointerType::getUnqual(Ctx), Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx));
+								  Type::getInt32Ty(Ctx), PointerType::getUnqual(Ctx), Type::getInt64Ty(Ctx), 
+								  PointerType::getUnqual(Ctx), Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx));
   if (Function *FRegGather = dyn_cast<Function>(runtime_register_gather.getCallee())) { FRegGather->addFnAttr(Attribute::NoUnwind); }
 
   FunctionCallee runtime_register_allreduce = M->getOrInsertFunction("mdmp_register_allreduce",
-                                     Type::getInt32Ty(Ctx), PointerType::getUnqual(Ctx), PointerType::getUnqual(Ctx), 
-                                     Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx)); 
+								     Type::getInt32Ty(Ctx), PointerType::getUnqual(Ctx), PointerType::getUnqual(Ctx), 
+								     Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx)); 
   if (Function *FRegAllreduce = dyn_cast<Function>(runtime_register_allreduce.getCallee())) { FRegAllreduce->addFnAttr(Attribute::NoUnwind); }
 
   FunctionCallee runtime_register_allgather = M->getOrInsertFunction("mdmp_register_allgather",
-                                     Type::getInt32Ty(Ctx), PointerType::getUnqual(Ctx), Type::getInt64Ty(Ctx), 
-                                     PointerType::getUnqual(Ctx), Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx)); 
+								     Type::getInt32Ty(Ctx), PointerType::getUnqual(Ctx), Type::getInt64Ty(Ctx), 
+								     PointerType::getUnqual(Ctx), Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx)); 
   if (Function *FRegAllgather = dyn_cast<Function>(runtime_register_allgather.getCallee())) { FRegAllgather->addFnAttr(Attribute::NoUnwind); }
     
   FunctionCallee runtime_register_bcast = M->getOrInsertFunction("mdmp_register_bcast", 
-                                 Type::getInt32Ty(Ctx), PointerType::getUnqual(Ctx), Type::getInt64Ty(Ctx), 
-                                 Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx)); 
+								 Type::getInt32Ty(Ctx), PointerType::getUnqual(Ctx), Type::getInt64Ty(Ctx), 
+								 Type::getInt32Ty(Ctx), Type::getInt64Ty(Ctx), Type::getInt32Ty(Ctx)); 
   if (Function *FRegBcast = dyn_cast<Function>(runtime_register_bcast.getCallee())) { FRegBcast->addFnAttr(Attribute::NoUnwind); }
   
   FunctionCallee runtime_commit = M->getOrInsertFunction("mdmp_commit", Type::getInt32Ty(Ctx));
@@ -154,14 +605,12 @@ void MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
         Value *PeerRank  = CI->getArgOperand(5);
         Value *TagVal    = CI->getArgOperand(6); 
 
-        LocationSize LocSize = LocationSize::beforeOrAfterPointer();
-        if (auto *ConstBytes = dyn_cast<ConstantInt>(ByteSize)) { LocSize = LocationSize::precise(ConstBytes->getZExtValue()); }
         bool isSend = (Name == "__mdmp_marker_send");
-        std::vector<TrackedBuffer> TrackedLocs = { {MemoryLocation(BufferPtr, LocSize), isSend} };
+        std::vector<TrackedBuffer> TrackedLocs = buildSendRecvBuffers(BufferPtr, CountVal, TypeVal, ByteSize, isSend);
                 
         AllocaInst *ReqAlloc = CreateSafeAlloc();
         CallInst *NewCall = Builder.CreateCall(isSend ? runtime_send : runtime_recv, 
-                                       {BufferPtr, CountVal, TypeVal, ByteSize, ActorRank, PeerRank, TagVal});
+					       {BufferPtr, CountVal, TypeVal, ByteSize, ActorRank, PeerRank, TagVal});
         Builder.CreateStore(NewCall, ReqAlloc);
                 
         CI->replaceAllUsesWith(NewCall);
@@ -183,14 +632,12 @@ void MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
         Value *PeerRank  = CI->getArgOperand(5);
         Value *TagVal    = CI->getArgOperand(6); 
 
-        LocationSize LocSize = LocationSize::beforeOrAfterPointer();
-        if (auto *ConstBytes = dyn_cast<ConstantInt>(ByteSize)) { LocSize = LocationSize::precise(ConstBytes->getZExtValue()); }
         bool isSend = (Name == "__mdmp_marker_register_send");
-        std::vector<TrackedBuffer> TrackedLocs = { {MemoryLocation(BufferPtr, LocSize), isSend} };
+        std::vector<TrackedBuffer> TrackedLocs = buildSendRecvBuffers(BufferPtr, CountVal, TypeVal, ByteSize, isSend);
                 
         AllocaInst *ReqAlloc = CreateSafeAlloc();
         CallInst *NewCall = Builder.CreateCall(isSend ? runtime_register_send : runtime_register_recv, 
-                                       {BufferPtr, CountVal, TypeVal, ByteSize, ActorRank, PeerRank, TagVal});
+					       {BufferPtr, CountVal, TypeVal, ByteSize, ActorRank, PeerRank, TagVal});
         Builder.CreateStore(NewCall, ReqAlloc);
                 
         CI->replaceAllUsesWith(NewCall);
@@ -201,16 +648,14 @@ void MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
         Value *InBuf = CI->getArgOperand(0); Value *OutBuf = CI->getArgOperand(1);
         Value *ByteSize = CI->getArgOperand(4); 
 
-        LocationSize LocSize = LocationSize::beforeOrAfterPointer();
-        if (auto *ConstBytes = dyn_cast<ConstantInt>(ByteSize)) { LocSize = LocationSize::precise(ConstBytes->getZExtValue()); }
-                
-        std::vector<TrackedBuffer> TrackedLocs = {
-          {MemoryLocation(InBuf, LocSize), true}, {MemoryLocation(OutBuf, LocSize), false}
-        };
-
+	std::vector<TrackedBuffer> TrackedLocs = buildReduceBuffers(InBuf, OutBuf,
+								    CI->getArgOperand(2),  // count
+								    CI->getArgOperand(3),  // type
+								    CI->getArgOperand(4)); // bytes
+      
         AllocaInst *ReqAlloc = CreateSafeAlloc();
         CallInst *NewCall = Builder.CreateCall(runtime_register_reduce, 
-                                       {InBuf, OutBuf, CI->getArgOperand(2), CI->getArgOperand(3), CI->getArgOperand(4), CI->getArgOperand(5), CI->getArgOperand(6)});
+					       {InBuf, OutBuf, CI->getArgOperand(2), CI->getArgOperand(3), CI->getArgOperand(4), CI->getArgOperand(5), CI->getArgOperand(6)});
         Builder.CreateStore(NewCall, ReqAlloc);
 
         CI->replaceAllUsesWith(NewCall);
@@ -221,16 +666,15 @@ void MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
         Value *SendBuf = CI->getArgOperand(0); Value *RecvBuf = CI->getArgOperand(2);
         Value *ByteSize = CI->getArgOperand(4); 
 
-        LocationSize LocSize = LocationSize::beforeOrAfterPointer();
-        if (auto *ConstBytes = dyn_cast<ConstantInt>(ByteSize)) { LocSize = LocationSize::precise(ConstBytes->getZExtValue()); }
-                
-        std::vector<TrackedBuffer> TrackedLocs = {
-          {MemoryLocation(SendBuf, LocSize), true}, {MemoryLocation(RecvBuf, LocSize), false}
-        };
+        std::vector<TrackedBuffer> TrackedLocs = buildGatherBuffers(SendBuf,
+                                                                    CI->getArgOperand(1),  // sendcount
+                                                                    RecvBuf,
+                                                                    CI->getArgOperand(3),  // type
+                                                                    CI->getArgOperand(4)); // bytes
         
         AllocaInst *ReqAlloc = CreateSafeAlloc();
         CallInst *NewCall = Builder.CreateCall(runtime_register_gather, 
-                                       {SendBuf, CI->getArgOperand(1), RecvBuf, CI->getArgOperand(3), CI->getArgOperand(4), CI->getArgOperand(5)});
+					       {SendBuf, CI->getArgOperand(1), RecvBuf, CI->getArgOperand(3), CI->getArgOperand(4), CI->getArgOperand(5)});
         Builder.CreateStore(NewCall, ReqAlloc);
 
         CI->replaceAllUsesWith(NewCall);
@@ -255,12 +699,15 @@ void MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
       }
       else if (Name == "__mdmp_marker_reduce") {
         CallInst *NewCall = Builder.CreateCall(runtime_reduce, 
-                                       {CI->getArgOperand(0), CI->getArgOperand(1), CI->getArgOperand(2), CI->getArgOperand(3), CI->getArgOperand(4), CI->getArgOperand(5), CI->getArgOperand(6)});
-        
-        std::vector<TrackedBuffer> Locs = {
-          {MemoryLocation(CI->getArgOperand(1), LocationSize::beforeOrAfterPointer()), false}, 
-          {MemoryLocation(CI->getArgOperand(0), LocationSize::beforeOrAfterPointer()), true}   
-        };
+					       {CI->getArgOperand(0), CI->getArgOperand(1), CI->getArgOperand(2), CI->getArgOperand(3), CI->getArgOperand(4), CI->getArgOperand(5), CI->getArgOperand(6)});
+       
+        std::vector<TrackedBuffer> Locs =
+	  buildReduceBuffers(CI->getArgOperand(0),  // sendbuf
+			     CI->getArgOperand(1),  // recvbuf
+			     CI->getArgOperand(2),  // count
+			     CI->getArgOperand(3),  // type
+			     CI->getArgOperand(4)); // bytes 
+
         hoistInitiation(NewCall, Locs, AA, DT, LI, false);
         
         AllocaInst *ReqAlloc = CreateSafeAlloc();
@@ -276,12 +723,14 @@ void MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
       }
       else if (Name == "__mdmp_marker_gather") {
         CallInst *NewCall = Builder.CreateCall(runtime_gather, 
-                                       {CI->getArgOperand(0), CI->getArgOperand(1), CI->getArgOperand(2), CI->getArgOperand(3), CI->getArgOperand(4), CI->getArgOperand(5)});
+					       {CI->getArgOperand(0), CI->getArgOperand(1), CI->getArgOperand(2), CI->getArgOperand(3), CI->getArgOperand(4), CI->getArgOperand(5)});
         
-        std::vector<TrackedBuffer> Locs = {
-          {MemoryLocation(CI->getArgOperand(2), LocationSize::beforeOrAfterPointer()), false}, 
-          {MemoryLocation(CI->getArgOperand(0), LocationSize::beforeOrAfterPointer()), true}   
-        };
+        std::vector<TrackedBuffer> Locs =
+	  buildGatherBuffers(CI->getArgOperand(0),  // sendbuf
+			     CI->getArgOperand(1),  // sendcount
+			     CI->getArgOperand(2),  // recvbuf
+			     CI->getArgOperand(3),  // type
+			     CI->getArgOperand(4)); // bytes
         hoistInitiation(NewCall, Locs, AA, DT, LI, false);
         
         AllocaInst *ReqAlloc = CreateSafeAlloc();
@@ -298,12 +747,14 @@ void MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
       else if (Name == "__mdmp_marker_allreduce" || Name == "__mdmp_marker_register_allreduce") {
         FunctionCallee target_func = (Name == "__mdmp_marker_allreduce") ? runtime_allreduce : runtime_register_allreduce;
         CallInst *NewCall = Builder.CreateCall(target_func, 
-                                       {CI->getArgOperand(0), CI->getArgOperand(1), CI->getArgOperand(2), CI->getArgOperand(3), CI->getArgOperand(4), CI->getArgOperand(5)});
+					       {CI->getArgOperand(0), CI->getArgOperand(1), CI->getArgOperand(2), CI->getArgOperand(3), CI->getArgOperand(4), CI->getArgOperand(5)});
                 
-        std::vector<TrackedBuffer> Locs = {
-          {MemoryLocation(CI->getArgOperand(1), LocationSize::beforeOrAfterPointer()), false}, 
-          {MemoryLocation(CI->getArgOperand(0), LocationSize::beforeOrAfterPointer()), true}   
-        };
+        std::vector<TrackedBuffer> Locs =
+	  buildAllreduceBuffers(CI->getArgOperand(0),  // sendbuf
+				CI->getArgOperand(1),  // recvbuf
+				CI->getArgOperand(2),  // count
+				CI->getArgOperand(3),  // type
+				CI->getArgOperand(4)); // bytes
         
         AllocaInst *ReqAlloc = CreateSafeAlloc();
         Builder.CreateStore(NewCall, ReqAlloc);
@@ -324,12 +775,14 @@ void MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
       else if (Name == "__mdmp_marker_allgather" || Name == "__mdmp_marker_register_allgather") {
         FunctionCallee target_func = (Name == "__mdmp_marker_allgather") ? runtime_allgather : runtime_register_allgather;
         CallInst *NewCall = Builder.CreateCall(target_func, 
-                                       {CI->getArgOperand(0), CI->getArgOperand(1), CI->getArgOperand(2), CI->getArgOperand(3), CI->getArgOperand(4)});
+					       {CI->getArgOperand(0), CI->getArgOperand(1), CI->getArgOperand(2), CI->getArgOperand(3), CI->getArgOperand(4)});
                 
-        std::vector<TrackedBuffer> Locs = {
-          {MemoryLocation(CI->getArgOperand(2), LocationSize::beforeOrAfterPointer()), false}, 
-          {MemoryLocation(CI->getArgOperand(0), LocationSize::beforeOrAfterPointer()), true}  
-        };
+        std::vector<TrackedBuffer> Locs =
+	  buildAllgatherBuffers(CI->getArgOperand(0),  // sendbuf
+				CI->getArgOperand(1),  // count
+				CI->getArgOperand(2),  // recvbuf
+				CI->getArgOperand(3),  // type
+				CI->getArgOperand(4)); // bytes
 
         AllocaInst *ReqAlloc = CreateSafeAlloc();
         Builder.CreateStore(NewCall, ReqAlloc);
@@ -350,15 +803,17 @@ void MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
       else if (Name == "__mdmp_marker_bcast" || Name == "__mdmp_marker_register_bcast") {
         FunctionCallee target_func = (Name == "__mdmp_marker_bcast") ? runtime_bcast : runtime_register_bcast;
         CallInst *NewCall = Builder.CreateCall(target_func, 
-                                       {CI->getArgOperand(0), CI->getArgOperand(1), CI->getArgOperand(2), CI->getArgOperand(3), CI->getArgOperand(4)});
+					       {CI->getArgOperand(0), CI->getArgOperand(1), CI->getArgOperand(2), CI->getArgOperand(3), CI->getArgOperand(4)});
         
         Value *ByteSize = CI->getArgOperand(3);
         LocationSize LocSize = LocationSize::beforeOrAfterPointer();
         if (auto *ConstBytes = dyn_cast<ConstantInt>(ByteSize)) { LocSize = LocationSize::precise(ConstBytes->getZExtValue()); }
         
-        std::vector<TrackedBuffer> Locs = {
-          {MemoryLocation(CI->getArgOperand(0), LocSize), false} 
-        };
+        std::vector<TrackedBuffer> Locs =
+	  buildBcastBuffers(CI->getArgOperand(0),  // buffer
+			    CI->getArgOperand(1),  // count
+			    CI->getArgOperand(2),  // type
+			    CI->getArgOperand(3)); // bytes
         
         AllocaInst *ReqAlloc = CreateSafeAlloc();
         Builder.CreateStore(NewCall, ReqAlloc);
@@ -405,202 +860,92 @@ void MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
 }
 
 void MDMPPass::hoistInitiation(CallInst *CI, std::vector<TrackedBuffer> &Buffers, AAResults &AA, DominatorTree &DT, LoopInfo &LI, bool isSend) {
-  Instruction *InsertPoint = CI;
-  Instruction *Prev = CI->getPrevNode();
-    
-  while (Prev) {
-    if (isa<PHINode>(Prev)) break;
-        
-    bool usesPrev = false;
-    for (Value *Op : CI->operands()) { if (Op == Prev) { usesPrev = true; break; } }
-    if (usesPrev) break;
-        
-    if (auto *Call = dyn_cast<CallInst>(Prev)) {
-      if (Call->getCalledFunction() && Call->getCalledFunction()->getName() == "mdmp_commregion_begin") break; 
-    }
-        
-    bool memoryCollision = false;
-        
-    if (Prev->mayWriteToMemory() || (!isSend && Prev->mayReadFromMemory())) {
-      for (auto &Buf : Buffers) {
-        if (auto *SI = dyn_cast<StoreInst>(Prev)) {
-          AliasResult AR = AA.alias(MemoryLocation::get(SI), Buf.Loc);
-          bool underlyingMatch = (getUnderlyingObject(SI->getPointerOperand()) == getUnderlyingObject(Buf.Loc.Ptr));
-          if (AR == AliasResult::MustAlias || AR == AliasResult::MayAlias || underlyingMatch) { 
-              memoryCollision = true; break; 
-          }
-        } 
-        else if (auto *LInst = dyn_cast<LoadInst>(Prev)) {
-          if (!Buf.isNetworkReadOnly) { 
-            AliasResult AR = AA.alias(MemoryLocation::get(LInst), Buf.Loc);
-            bool underlyingMatch = (getUnderlyingObject(LInst->getPointerOperand()) == getUnderlyingObject(Buf.Loc.Ptr));
-            if (AR == AliasResult::MustAlias || AR == AliasResult::MayAlias || underlyingMatch) { 
-                memoryCollision = true; break; 
-            }
-          }
-        } 
-        else {
-          auto MR = AA.getModRefInfo(Prev, Buf.Loc);
-          if (Buf.isNetworkReadOnly && isModSet(MR)) { memoryCollision = true; break; }
-          else if (!Buf.isNetworkReadOnly && isModOrRefSet(MR)) { memoryCollision = true; break; }
-        }
+  (void)LI;
+  (void)isSend;
+
+  const DataLayout &DL = CI->getModule()->getDataLayout();
+
+  Instruction *InsertBefore = CI;
+  BasicBlock *CurBB = CI->getParent();
+
+  while (true) {
+    bool ReachedBlockFront = true;
+
+    while (Instruction *Prev = InsertBefore->getPrevNode()) {
+      if (isa<PHINode>(Prev))
+        break;
+
+      if (!operandsAvailableBefore(CI, Prev, DT)) {
+        ReachedBlockFront = false;
+        break;
       }
+
+      if (isHardMotionBarrier(Prev)) {
+        ReachedBlockFront = false;
+        break;
+      }
+
+      if (Prev->mayReadOrWriteMemory() &&
+          instructionConflictsWithAnyTrackedBuffer(Prev, Buffers, AA, DL)) {
+        ReachedBlockFront = false;
+        break;
+      }
+
+      InsertBefore = Prev;
     }
-        
-    if (memoryCollision) break; 
-        
-    InsertPoint = Prev;
-    Prev = Prev->getPrevNode();
+
+    if (!ReachedBlockFront)
+      break;
+
+    BasicBlock *Pred = getLinearPredecessor(CurBB);
+    if (!Pred)
+      break;
+
+    Instruction *PredTerm = Pred->getTerminator();
+    if (!operandsAvailableBefore(CI, PredTerm, DT))
+      break;
+
+    // Move into the predecessor and continue scanning there.
+    InsertBefore = PredTerm;
+    CurBB = Pred;
   }
-  if (InsertPoint != CI) { CI->moveBefore(InsertPoint->getIterator()); }
+
+  if (InsertBefore != CI)
+    CI->moveBefore(InsertBefore->getIterator());
 }
 
-void MDMPPass::injectWaitsForRegion(Instruction *RegionEnd, AAResults &AA, LoopInfo &LI, LLVMContext &Ctx, Module *M, DominatorTree &DT) {
-  FunctionCallee runtime_wait = M->getOrInsertFunction("mdmp_wait", Type::getVoidTy(Ctx), Type::getInt32Ty(Ctx));
+void MDMPPass::injectWaitsForRegion(Instruction *RegionEnd,
+                                    AAResults &AA,
+                                    LoopInfo &LI,
+                                    LLVMContext &Ctx,
+                                    Module *M,
+                                    DominatorTree &DT) {
+  IntegerType *I32Ty = Type::getInt32Ty(Ctx);
 
-  struct TraversalState { BasicBlock *BB; BasicBlock::iterator StartIt; };
+  FunctionCallee runtime_wait =
+    M->getOrInsertFunction("mdmp_wait", Type::getVoidTy(Ctx), I32Ty);
 
-  SmallVector<Instruction*, 16> WaitInsertionPoints;
-  SmallPtrSet<BasicBlock*, 16> Visited;
-  SmallVector<TraversalState, 16> Worklist;
+  FunctionCallee runtime_wait_many =
+    M->getOrInsertFunction("mdmp_wait_many",
+			   Type::getVoidTy(Ctx),
+			   PointerType::getUnqual(Ctx),
+			   I32Ty);
 
-  for (auto &Req : PendingRequests) {
-    WaitInsertionPoints.clear();
-    Visited.clear();
-    Worklist.clear();
-        
-    BasicBlock::iterator StartIt = Req.StartPoint->getIterator();
-    StartIt++;
-    Worklist.push_back({Req.StartPoint->getParent(), StartIt});
-        
-    while (!Worklist.empty()) {
-      auto State = Worklist.pop_back_val();
-      BasicBlock *BB = State.BB;
-            
-      if (!Visited.insert(BB).second && State.StartIt == BB->begin()) continue;
-            
-      bool foundWaitPoint = false;
-      for (auto It = State.StartIt; It != BB->end(); ++It) {
-        Instruction *Inst = &*It;
-                
-        if (Inst == RegionEnd) {
-          WaitInsertionPoints.push_back(Inst); foundWaitPoint = true; break;
-        }
-                
-        if (Inst->mayReadOrWriteMemory()) {
-          bool isAsyncCall = false;
-          if (auto *Call = dyn_cast<CallInst>(Inst)) {
-            if (Function *CalledFn = Call->getCalledFunction()) {
-              StringRef FnName = CalledFn->getName();
-              if (FnName == "mdmp_send" || FnName == "mdmp_recv" || FnName == "mdmp_reduce" || 
-                  FnName == "mdmp_allreduce" || FnName == "mdmp_allgather" || 
-                  FnName == "mdmp_gather" || FnName == "mdmp_bcast" ||
-                  FnName == "mdmp_commit" || 
-                  FnName == "mdmp_wait" || FnName == "mdmp_wtime" || 
-                  FnName == "mdmp_register_send" || FnName == "mdmp_register_recv" ||
-                  FnName == "mdmp_register_reduce" || FnName == "mdmp_register_gather" ||
-                  FnName == "mdmp_register_allreduce" || FnName == "mdmp_register_allgather" ||
-                  FnName == "mdmp_register_bcast" ||
-                  FnName.starts_with("__mdmp_marker_")) {
-                isAsyncCall = true;
-              }
-            }
-          }
-                    
-          bool memoryCollision = false;
+  auto Windows = analyzeRequestWindows(PendingRequests, RegionEnd, AA, LI, M);
 
-          if (auto *Call = dyn_cast<CallInst>(Inst)) {
-            if (Function *CalledFn = Call->getCalledFunction()) {
-              StringRef Name = CalledFn->getName();
-              bool isMDMPBarrier = (Name == "mdmp_final" || Name == "__mdmp_marker_final" || 
-                                    Name == "mdmp_abort" || Name == "__mdmp_marker_abort" ||
-                                    Name == "mdmp_sync"  || Name == "__mdmp_marker_sync");
-                                        
-              bool isMPIBarrier = Name.starts_with("MPI_Wait") || Name == "MPI_Barrier" ||
-                Name == "MPI_Bcast" || Name == "MPI_Allreduce" || Name == "MPI_Reduce" || 
-                Name == "MPI_Gather" || Name == "MPI_Scatter" || Name == "MPI_Alltoall" || 
-                Name == "MPI_Allgather" || Name == "MPI_Finalize";
-                                  
-              bool isMPIP2P = (Name == "MPI_Send" || Name == "MPI_Recv" || Name == "MPI_Sendrecv");
-              bool isMPITopology = Name.contains("MPI_Comm_") || Name == "MPI_Cart_create";
-              
-              if (Name == "MPI_Comm_rank" || Name == "MPI_Comm_size") isMPITopology = false;
+  MapVector<Instruction *, SmallVector<const AsyncRequest *, 8>> GroupedWaits;
 
-              if (isMDMPBarrier || isMPIBarrier || isMPIP2P || isMPITopology) memoryCollision = true;
-            }
-          }
+  for (const RequestWindowInfo &Info : Windows) {
+    SmallPtrSet<Instruction *, 4> UniqueWaitPoints;
 
-          if (!memoryCollision && !isAsyncCall) {
-            for (auto &Buf : Req.Buffers) {
-              if (auto *LInst = dyn_cast<LoadInst>(Inst)) {
-                if (!Buf.isNetworkReadOnly) { 
-                  AliasResult AR = AA.alias(MemoryLocation::get(LInst), Buf.Loc);
-                  bool underlyingMatch = (getUnderlyingObject(LInst->getPointerOperand()) == getUnderlyingObject(Buf.Loc.Ptr));
-                  if (AR == AliasResult::MustAlias || AR == AliasResult::MayAlias || underlyingMatch) { memoryCollision = true; break; }
-                }
-              } 
-              else if (auto *SInst = dyn_cast<StoreInst>(Inst)) {
-                AliasResult AR = AA.alias(MemoryLocation::get(SInst), Buf.Loc);
-                bool underlyingMatch = (getUnderlyingObject(SInst->getPointerOperand()) == getUnderlyingObject(Buf.Loc.Ptr));
-                if (AR == AliasResult::MustAlias || AR == AliasResult::MayAlias || underlyingMatch) { memoryCollision = true; break; }
-              } 
-              else if (Inst->mayReadOrWriteMemory()) {
-                auto MR = AA.getModRefInfo(Inst, Buf.Loc);
-                if (Buf.isNetworkReadOnly && isModSet(MR)) { memoryCollision = true; break; }
-                else if (!Buf.isNetworkReadOnly && isModOrRefSet(MR)) { memoryCollision = true; break; }
-              }
-            }
-          }
-          
-          if (memoryCollision) {
-            WaitInsertionPoints.push_back(Inst);
-            foundWaitPoint = true;
-            break; 
-          }
-        }
-      }
-      if (!foundWaitPoint) {
-        bool hasSuccessors = false;
-        Loop *ReqLoop = LI.getLoopFor(Req.StartPoint->getParent());
-
-        for (BasicBlock *Succ : successors(BB)) {
-          hasSuccessors = true;
-                    
-          bool isBackedge = false;
-          Loop *EdgeLoop = LI.getLoopFor(BB);
-          while (EdgeLoop) {
-            if (EdgeLoop->getHeader() == Succ) {
-              isBackedge = true;
-              break;
-            }
-            EdgeLoop = EdgeLoop->getParentLoop();
-          }
-
-          if (isBackedge && EdgeLoop) {
-            if (!ReqLoop || EdgeLoop == ReqLoop || EdgeLoop->contains(ReqLoop)) {
-              WaitInsertionPoints.push_back(BB->getTerminator());
-              continue; 
-            }
-          }
-          Worklist.push_back({Succ, Succ->begin()});
-        }
-                
-        if (!hasSuccessors) {
-          WaitInsertionPoints.push_back(BB->getTerminator());
-        }
-      } 
-    }
-        
-    SmallPtrSet<Instruction*, 4> UniqueWaitPoints;
-    for (Instruction *InsertPt : WaitInsertionPoints) {
-            
-      if (!DT.dominates(Req.StartPoint, InsertPt)) {
-        InsertPt = Req.StartPoint->getParent()->getTerminator();
+    for (Instruction *InsertPt : Info.WaitPoints) {
+      if (!DT.dominates(Info.Req->StartPoint, InsertPt)) {
+        InsertPt = Info.Req->StartPoint->getParent()->getTerminator();
       }
 
       Instruction *HoistPt = InsertPt;
       Loop *L = LI.getLoopFor(HoistPt->getParent());
-      Loop *ReqLoop = LI.getLoopFor(Req.StartPoint->getParent());
+      Loop *ReqLoop = LI.getLoopFor(Info.Req->StartPoint->getParent());
 
       while (L && L != ReqLoop) {
         BasicBlock *Latch = L->getLoopLatch();
@@ -608,67 +953,124 @@ void MDMPPass::injectWaitsForRegion(Instruction *RegionEnd, AAResults &AA, LoopI
           BasicBlock *Preheader = L->getLoopPreheader();
           if (Preheader) {
             Instruction *PotentialHoistPt = Preheader->getTerminator();
-            if (DT.dominates(Req.StartPoint, PotentialHoistPt)) {
+            if (DT.dominates(Info.Req->StartPoint, PotentialHoistPt)) {
               HoistPt = PotentialHoistPt;
               L = LI.getLoopFor(HoistPt->getParent());
               continue;
             }
           }
         }
-        break; 
+        break;
       }
+
       UniqueWaitPoints.insert(HoistPt);
     }
 
-    for (Instruction *InsertPt : UniqueWaitPoints) {
-      IRBuilder<> Builder(InsertPt);
-      // Safely load the ID from the stack variable before passing it to mdmp_wait
-      LoadInst *LoadedID = Builder.CreateLoad(Type::getInt32Ty(Ctx), Req.WaitTokenAlloc);
-      Builder.CreateCall(runtime_wait, {LoadedID}); 
+    for (Instruction *Pt : UniqueWaitPoints) {
+      GroupedWaits[Pt].push_back(Info.Req);
     }
   }
+
+  for (auto &KV : GroupedWaits) {
+    Instruction *InsertPt = KV.first;
+    SmallVector<const AsyncRequest *, 8> &Reqs = KV.second;
+
+    IRBuilder<> Builder(InsertPt);
+
+    if (Reqs.size() == 1) {
+      Value *LoadedID = Builder.CreateLoad(I32Ty, Reqs[0]->WaitTokenAlloc);
+      Builder.CreateCall(runtime_wait, {LoadedID});
+      continue;
+    }
+
+    ArrayType *ArrTy = ArrayType::get(I32Ty, Reqs.size());
+    AllocaInst *Arr = Builder.CreateAlloca(ArrTy, nullptr, "mdmp_wait_ids");
+
+    Value *Zero = ConstantInt::get(I32Ty, 0);
+
+    for (unsigned i = 0; i < Reqs.size(); ++i) {
+      Value *Idx = ConstantInt::get(I32Ty, i);
+      Value *Slot = Builder.CreateInBoundsGEP(ArrTy, Arr, {Zero, Idx});
+      Value *LoadedID = Builder.CreateLoad(I32Ty, Reqs[i]->WaitTokenAlloc);
+      Builder.CreateStore(LoadedID, Slot);
+    }
+
+    Value *BasePtr = Builder.CreateInBoundsGEP(ArrTy, Arr, {Zero, Zero});
+    Builder.CreateCall(runtime_wait_many,
+                       {BasePtr, ConstantInt::get(I32Ty, Reqs.size())});
+  }
+
   PendingRequests.clear();
 }
 
-void MDMPPass::injectThrottledProgress(Function &F, DominatorTree &DT, LoopInfo &LI, Module *M) {
+void MDMPPass::injectThrottledProgress(Function &F, AAResults &AA, DominatorTree &DT, LoopInfo &LI, Module *M) {
+
+  if (PendingRequests.empty())
+    return;
+
   LLVMContext &Ctx = M->getContext();
-  FunctionCallee runtime_progress = M->getOrInsertFunction("mdmp_progress", Type::getVoidTy(Ctx));
+  IntegerType *I32Ty = Type::getInt32Ty(Ctx);
+
+  FunctionCallee runtime_maybe_progress =
+    M->getOrInsertFunction("mdmp_maybe_progress", Type::getVoidTy(Ctx));
+
+  auto Windows = analyzeRequestWindows(PendingRequests, nullptr, AA, LI, M);
+  if (Windows.empty())
+    return;
+
+  SmallVector<Loop *, 16> LeafLoops;
+  collectLeafLoops(LI, LeafLoops);
+  if (LeafLoops.empty())
+    return;
+
+  static constexpr uint32_t ThrottleEvery = 64;
+  static_assert((ThrottleEvery & (ThrottleEvery - 1)) == 0,
+                "ThrottleEvery must be a power of two");
+
+  ConstantInt *Zero = ConstantInt::get(I32Ty, 0);
+  ConstantInt *One  = ConstantInt::get(I32Ty, 1);
+  ConstantInt *Mask = ConstantInt::get(I32Ty, ThrottleEvery - 1);
 
   BasicBlock &EntryBB = F.getEntryBlock();
-  IRBuilder<> EntryBuilder(&EntryBB, EntryBB.begin());
-  
-  AllocaInst *CounterAlloc = EntryBuilder.CreateAlloca(Type::getInt32Ty(Ctx), nullptr, "tickle_counter");
-  EntryBuilder.CreateStore(ConstantInt::get(Type::getInt32Ty(Ctx), 0), CounterAlloc);
+  Instruction *EntryIP = &*EntryBB.getFirstInsertionPt();
+  IRBuilder<> EntryBuilder(EntryIP);
 
-  for (Loop *L : LI) {
-    if (!L->getSubLoops().empty()) continue; 
+  AllocaInst *CounterAlloc =
+    EntryBuilder.CreateAlloca(I32Ty, nullptr, "mdmp_progress_counter");
+  EntryBuilder.CreateStore(Zero, CounterAlloc);
 
+  SmallPtrSet<BasicBlock *, 16> InstrumentedHeaders;
+
+  for (Loop *L : LeafLoops) {
     BasicBlock *Header = L->getHeader();
 
-    bool isInFlight = false;
-    for (auto &Req : PendingRequests) {
-      if (DT.dominates(Req.StartPoint->getParent(), Header)) {
-        isInFlight = true;
+    if (!InstrumentedHeaders.insert(Header).second)
+      continue;
+
+    bool ShouldInstrument = false;
+    for (const RequestWindowInfo &Info : Windows) {
+      if (requestWindowCoversLoopHeader(Info, L, DT)) {
+        ShouldInstrument = true;
         break;
       }
     }
 
-    if (!isInFlight) continue;
+    if (!ShouldInstrument)
+      continue;
 
     Instruction *InsertPt = &*Header->getFirstInsertionPt();
     IRBuilder<> LoopBuilder(InsertPt);
 
-    LoadInst *CurrentCount = LoopBuilder.CreateLoad(Type::getInt32Ty(Ctx), CounterAlloc);
-    Value *NextCount = LoopBuilder.CreateAdd(CurrentCount, ConstantInt::get(Type::getInt32Ty(Ctx), 1));
-    LoopBuilder.CreateStore(NextCount, CounterAlloc);
+    Value *Cur = LoopBuilder.CreateLoad(I32Ty, CounterAlloc, "mdmp_prog_cur");
+    Value *Next = LoopBuilder.CreateAdd(Cur, One, "mdmp_prog_next");
+    LoopBuilder.CreateStore(Next, CounterAlloc);
 
-    Value *ModResult = LoopBuilder.CreateURem(NextCount, ConstantInt::get(Type::getInt32Ty(Ctx), 64));
-    Value *IsZero = LoopBuilder.CreateICmpEQ(ModResult, ConstantInt::get(Type::getInt32Ty(Ctx), 0));
+    Value *Masked = LoopBuilder.CreateAnd(Next, Mask, "mdmp_prog_masked");
+    Value *DoTick = LoopBuilder.CreateICmpEQ(Masked, Zero, "mdmp_prog_tick");
 
-    Instruction *SplitTerminator = SplitBlockAndInsertIfThen(IsZero, InsertPt, false);
-    
-    IRBuilder<> ThenBuilder(SplitTerminator);
-    ThenBuilder.CreateCall(runtime_progress);
+    Instruction *ThenTerm = SplitBlockAndInsertIfThen(DoTick, InsertPt, false);
+    IRBuilder<> ThenBuilder(ThenTerm);
+    ThenBuilder.CreateCall(runtime_maybe_progress);
   }
 }
 
@@ -677,13 +1079,13 @@ extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo llvmGetPassPluginIn
     LLVM_PLUGIN_API_VERSION, "MDMP", "v0.2",
     [](PassBuilder &PB) {
       PB.registerPipelineParsingCallback([](StringRef Name, ModulePassManager &MPM, ArrayRef<PassBuilder::PipelineElement>) {
-           if (Name == "mdmp") { MPM.addPass(MDMPPass()); return true; } return false;
+	if (Name == "mdmp") { MPM.addPass(MDMPPass()); return true; } return false;
       });
       PB.registerOptimizerLastEPCallback([](ModulePassManager &MPM, OptimizationLevel Level, ThinOrFullLTOPhase Phase) { 
-           MPM.addPass(MDMPPass()); 
+	MPM.addPass(MDMPPass()); 
       });
       PB.registerFullLinkTimeOptimizationLastEPCallback([](ModulePassManager &MPM, OptimizationLevel Level) { 
-           MPM.addPass(MDMPPass()); 
+	MPM.addPass(MDMPPass()); 
       });
     }
   };

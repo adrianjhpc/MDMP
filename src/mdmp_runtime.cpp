@@ -80,6 +80,42 @@ void mdmp_progress() {
       MPI_Test(&mdmp_request_pool[i], &flag, MPI_STATUS_IGNORE);
     }
   }
+  for (int i = 0; i < mdmp_declarative_req_count; ++i) {
+    if (mdmp_declarative_requests[i] != MPI_REQUEST_NULL) {
+      MPI_Test(&mdmp_declarative_requests[i], &flag, MPI_STATUS_IGNORE);
+    }
+  }
+}
+
+bool mdmp_has_active_requests() {
+  for (int i = 0; i < MDMP_MAX_REQUESTS; ++i) {
+    if (mdmp_request_pool[i] != MPI_REQUEST_NULL)
+      return true;
+  }
+
+  for (int i = 0; i < mdmp_declarative_req_count; ++i) {
+    if (mdmp_declarative_requests[i] != MPI_REQUEST_NULL)
+      return true;
+  }
+
+  return false;
+}
+
+void mdmp_maybe_progress() {
+  // If a background progress thread is active, manual progress is unnecessary.
+  if (mdmp_runtime_active)
+    return;
+
+  if (!mdmp_has_active_requests())
+    return;
+
+  mdmp_progress();
+}
+
+void mdmp_wait_many(const int *ids, int n) {
+  for (int i = 0; i < n; ++i) {
+    mdmp_wait(ids[i]);
+  }
 }
 
 void mdmp_init() {
@@ -131,10 +167,7 @@ void mdmp_final() {
     if (mdmp_progress_thread.joinable()) mdmp_progress_thread.join();
   }
 
-  for (int i = 0; i < mdmp_declarative_type_count; ++i) {
-    MPI_Type_free(&mdmp_declarative_types_to_free[i]);
-  }
-  mdmp_declarative_type_count = 0;
+  mdmp_finish_declarative_batch();
 
   MPI_Comm_free(&mdmp_comm);
   if (mdmp_owns_mpi) MPI_Finalize();
@@ -149,11 +182,7 @@ void mdmp_commregion_begin() {}
 
 // --- NEW: The Bulletproof Safety Net ---
 void mdmp_commregion_end() {
-  if (mdmp_declarative_req_count > 0) {
-    // If JIT waits missed anything inside deep control flow, catch it here cleanly
-    MPI_Waitall(mdmp_declarative_req_count, mdmp_declarative_requests, MPI_STATUSES_IGNORE);
-    for (int i = 0; i < mdmp_declarative_req_count; i++) mdmp_declarative_requests[i] = MPI_REQUEST_NULL;
-  }
+  mdmp_finish_declarative_batch();
 }
 
 void mdmp_abort(int error_code) {
@@ -180,6 +209,14 @@ void mdmp_wait(int req_id) {
         MPI_Wait(&mdmp_declarative_requests[mpi_idx], MPI_STATUS_IGNORE);
         mdmp_declarative_requests[mpi_idx] = MPI_REQUEST_NULL;
       }
+    } else {
+
+      if (mdmp_debug_enabled) {
+        fprintf(stderr, "[MDMP Warning] Unknown declarative request id %d on rank %d\n",
+                req_id, global_my_rank);
+         mdmp_abort(1);
+      }
+
     }
   } 
   // 2. Imperative Ring Buffer Wait 
@@ -190,13 +227,7 @@ void mdmp_wait(int req_id) {
   }
   // 3. Monolithic Waitall (Legacy support)
   else if (req_id == MDMP_DECLARATIVE_WAIT) {
-    if (mdmp_declarative_req_count > 0) {
-      MPI_Waitall(mdmp_declarative_req_count, mdmp_declarative_requests, MPI_STATUSES_IGNORE);
-      for(int i = 0; i < mdmp_declarative_req_count; i++) mdmp_declarative_requests[i] = MPI_REQUEST_NULL;
-    }
-    for (int i = 0; i < mdmp_declarative_type_count; ++i) MPI_Type_free(&mdmp_declarative_types_to_free[i]);
-    mdmp_declarative_type_count = 0;
-    mdmp_declarative_req_count = 0;
+    mdmp_finish_declarative_batch();
   }
   else {
     fprintf(stderr, "[MDMP Runtime Error] Invalid Request ID: %d\n", req_id);
@@ -341,16 +372,28 @@ int mdmp_register_bcast(void* buffer, size_t count, int type, size_t bytes, int 
   bcast_queue.push_back({buffer, count, type, bytes, root_rank, (int)id});
   return (int)id + MDMP_MAX_REQUESTS;
 }
-  
-int mdmp_commit() {
-  for (int i = 0; i < mdmp_declarative_type_count; ++i) {
-    MPI_Type_free(&mdmp_declarative_types_to_free[i]);
+
+void mdmp_finish_declarative_batch() {
+  std::unique_lock<std::mutex> lock(mdmp_mpi_mutex, std::defer_lock);
+  if (mdmp_runtime_active) lock.lock();
+
+  if (mdmp_declarative_req_count > 0) {
+    MPI_Waitall(mdmp_declarative_req_count, mdmp_declarative_requests, MPI_STATUSES_IGNORE);
+    for (int i = 0; i < mdmp_declarative_req_count; ++i)
+      mdmp_declarative_requests[i] = MPI_REQUEST_NULL;
   }
-  mdmp_declarative_type_count = 0;
+
+  for (int i = 0; i < mdmp_declarative_type_count; ++i)
+    MPI_Type_free(&mdmp_declarative_types_to_free[i]);
+
   mdmp_declarative_req_count = 0;
-  
-  // Safe to wipe tracking map for the new declarative batch
+  mdmp_declarative_type_count = 0;
   decl_to_mpi_req.clear();
+}
+ 
+int mdmp_commit() {
+  
+  mdmp_finish_declarative_batch();
 
   static std::vector<int> blens_buffer;
   static std::vector<MPI_Aint> disps_buffer;

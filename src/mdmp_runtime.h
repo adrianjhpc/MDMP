@@ -33,8 +33,13 @@ extern "C" {
   void mdmp_commregion_begin();
   void mdmp_commregion_end();
 
+  void mdmp_maybe_progress();
   void mdmp_progress();
-
+  void mdmp_finish_declarative_batch();
+  
+  bool mdmp_has_active_requests(); 
+  void mdmp_wait_many(const int *ids, int n);
+ 
   void mdmp_abort(int error_code);
 
   // Accepts a specific request ID (Imperative) or -1 for a bulk Waitall (Declarative)

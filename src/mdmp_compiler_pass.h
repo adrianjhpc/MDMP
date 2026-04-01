@@ -18,6 +18,9 @@
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Analysis/ValueTracking.h" 
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
+#include "llvm/ADT/MapVector.h"
+#include "llvm/ADT/SmallPtrSet.h"
+#include "llvm/ADT/SmallVector.h"
 
 #if LLVM_VERSION_GE(23, 0)
 #include "llvm/Plugins/PassPlugin.h"
@@ -25,6 +28,7 @@
 #include "llvm/Passes/PassPlugin.h"
 #endif
 #include <vector>
+#include <optional>
 
 namespace llvm {
 
@@ -32,8 +36,6 @@ namespace llvm {
   public:
     // Main entry point for the Pass Manager
     PreservedAnalyses run(Module &M, ModuleAnalysisManager &MAM);
-
-  private:
 
     struct TrackedBuffer {
       MemoryLocation Loc;
@@ -46,10 +48,100 @@ namespace llvm {
       std::vector<TrackedBuffer> Buffers;
     };
 
+    struct TraversalState {
+      BasicBlock *BB;
+      BasicBlock::iterator StartIt;
+    };
+    
+    struct RequestWindowInfo {
+      const AsyncRequest *Req = nullptr;
+      SmallVector<Instruction *, 4> WaitPoints;
+      SmallPtrSet<BasicBlock *, 32> LiveBlocks;
+    };
+    
+    
+  private:
+
+    bool isAsyncMDMPOpName(StringRef FnName);
+
+    bool isHardBarrierCallName(StringRef Name);
+
+    void collectLeafLoops(Loop *L, SmallVectorImpl<Loop *> &Out);
+
+    void collectLeafLoops(LoopInfo &LI, SmallVectorImpl<Loop *> &Out);
+
+    bool requestWindowCoversLoopHeader(const RequestWindowInfo &Info, Loop *L, DominatorTree &DT);
+
+    SmallVector<RequestWindowInfo, 8> analyzeRequestWindows(ArrayRef<AsyncRequest> Requests, Instruction *RegionEnd, AAResults &AA, LoopInfo &LI, Module *M);
+    
     // Global tracker for the current function being processed
     std::vector<AsyncRequest> PendingRequests;
   
-  
+    std::optional<uint64_t> getConstU64(Value *V);
+
+    std::optional<uint64_t> getStaticMPITypeBytes(Value *TypeCodeV);
+
+    std::optional<uint64_t> checkedMulU64(uint64_t A, uint64_t B);
+
+    LocationSize derivePreciseSpan(Value *CountV, Value *TypeCodeV, Value *BytesV);
+
+    TrackedBuffer makePreciseTrackedBuffer(Value *Ptr, Value *CountV, Value *TypeCodeV,
+					   Value *BytesV, bool IsNetworkReadOnly);
+
+    TrackedBuffer makeUnknownTrackedBuffer(Value *Ptr, bool IsNetworkReadOnly);
+
+    std::optional<uint64_t> getPreciseSizeBytes(LocationSize S);
+    
+    bool areDefinitelyDisjoint(const MemoryLocation &A,
+			       const MemoryLocation &B,
+			       const DataLayout &DL);
+
+    bool locationsMayOverlap(const MemoryLocation &A,
+			     const MemoryLocation &B,
+			     AAResults &AA,
+			     const DataLayout &DL);
+
+    bool isHardMotionBarrier(Instruction *I);
+    
+    bool operandsAvailableBefore(CallInst *CI,
+				 Instruction *InsertBefore,
+				 DominatorTree &DT);
+
+    bool instructionConflictsWithTrackedBuffer(Instruction *I,
+					       const TrackedBuffer &Buf,
+					       AAResults &AA,
+					       const DataLayout &DL);
+
+    bool instructionConflictsWithAnyTrackedBuffer(Instruction *I,
+						  ArrayRef<TrackedBuffer> Buffers,
+						  AAResults &AA,
+						  const DataLayout &DL);
+    
+    BasicBlock *getLinearPredecessor(BasicBlock *BB);
+
+    std::vector<TrackedBuffer> buildSendRecvBuffers(Value *Buf, Value *Count,
+						    Value *Type, Value *Bytes,
+						    bool IsSend);
+
+    std::vector<TrackedBuffer> buildReduceBuffers(Value *SendBuf, Value *RecvBuf,
+						  Value *Count, Value *Type,
+						  Value *Bytes);
+
+    std::vector<TrackedBuffer> buildGatherBuffers(Value *SendBuf, Value *SendCount,
+						  Value *RecvBuf, Value *Type,
+						  Value *Bytes);
+
+     std::vector<TrackedBuffer> buildAllreduceBuffers(Value *SendBuf, Value *RecvBuf,
+						      Value *Count, Value *Type,
+						      Value *Bytes);
+
+    std::vector<TrackedBuffer> buildAllgatherBuffers(Value *SendBuf, Value *Count,
+						     Value *RecvBuf, Value *Type,
+						     Value *Bytes);
+
+    std::vector<TrackedBuffer> buildBcastBuffers(Value *Buf, Value *Count,
+						 Value *Type, Value *Bytes);
+    
     // Core function processor requiring Alias, Dominator, and Loop analyses
     bool runOnFunction(Function &F, AAResults &AA, DominatorTree &DT, LoopInfo &LI);
     
@@ -66,7 +158,7 @@ namespace llvm {
     void injectWaitsForRegion(Instruction *RegionEnd, AAResults &AA, LoopInfo &LI, 
                               LLVMContext &Ctx, Module *M, DominatorTree &DT);
 
-    void injectThrottledProgress(Function &F, DominatorTree &DT, LoopInfo &LI, Module *M);
+    void injectThrottledProgress(Function &F, AAResults &AA, DominatorTree &DT, LoopInfo &LI, Module *M);
   };
 
 } // namespace llvm
