@@ -92,6 +92,15 @@ void mdmp_progress_loop() {
   }
 }
 
+void mdmp_progress() {
+    int flag;
+    for (int i = 0; i < MDMP_MAX_REQUESTS; i++) {
+        if (mdmp_request_pool[i] != MPI_REQUEST_NULL) {
+            MPI_Test(&mdmp_request_pool[i], &flag, MPI_STATUS_IGNORE);
+        }
+    }
+}
+
 void mdmp_init() {
   int provided;
   int is_initialised;
@@ -100,7 +109,7 @@ void mdmp_init() {
 
   if (!is_initialised) {
     // MPI is not running. We take control and demand multithreading.
-    //        MPI_Init_thread(NULL, NULL, MPI_THREAD_MULTIPLE, &provided);
+    //MPI_Init_thread(NULL, NULL, MPI_THREAD_MULTIPLE, &provided);
     MPI_Init(NULL, NULL);
     provided = MPI_THREAD_SINGLE;
     mdmp_owns_mpi = true;

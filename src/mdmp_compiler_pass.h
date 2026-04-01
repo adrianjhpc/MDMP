@@ -16,6 +16,9 @@
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/ValueTracking.h"
 #include "llvm/Passes/PassBuilder.h"
+#include "llvm/Analysis/ValueTracking.h" 
+#include "llvm/Transforms/Utils/BasicBlockUtils.h"
+
 #if LLVM_VERSION_GE(23, 0)
 #include "llvm/Plugins/PassPlugin.h"
 #else
@@ -61,6 +64,8 @@ namespace llvm {
     // by ensuring waits are safely dropped at the loop preheader/terminator boundaries.
     void injectWaitsForRegion(Instruction *RegionEnd, AAResults &AA, LoopInfo &LI, 
                               LLVMContext &Ctx, Module *M, DominatorTree &DT);
+
+    void injectThrottledProgress(Function &F, DominatorTree &DT, LoopInfo &LI, Module *M);
   };
 
 } // namespace llvm
