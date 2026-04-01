@@ -39,12 +39,13 @@ namespace llvm {
       MemoryLocation Loc;
       bool isNetworkReadOnly; // True = Send buffer (CPU reads ok), False = Recv buffer (CPU reads/writes collide)
     };
-  
+
     struct AsyncRequest {
+    llvm::AllocaInst *WaitTokenAlloc; // Safely stores the ID across control flow boundaries
+      llvm::CallInst *StartPoint;       // Where the request goes in flight
       std::vector<TrackedBuffer> Buffers;
-      CallInst *RuntimeCall;
     };
-  
+
     // Global tracker for the current function being processed
     std::vector<AsyncRequest> PendingRequests;
   

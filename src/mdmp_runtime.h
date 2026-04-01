@@ -12,6 +12,7 @@
 #include <atomic>
 #include <mutex>
 #include <thread>
+#include <unordered_map>
 
 #ifdef __cplusplus
 extern "C" {
@@ -56,16 +57,16 @@ extern "C" {
   // ========================================================================
   // Declarative API (Inspector-Executor, returns -1 Batch ID)
   // ========================================================================
-  void mdmp_register_send(void* buffer, size_t count, int type, size_t bytes, int sender_rank, int dest_rank, int tag);
-  void mdmp_register_recv(void* buffer, size_t count, int type, size_t bytes, int receiver_rank, int src_rank, int tag);
+  int mdmp_register_send(void* buffer, size_t count, int type, size_t bytes, int sender_rank, int dest_rank, int tag);
+  int mdmp_register_recv(void* buffer, size_t count, int type, size_t bytes, int receiver_rank, int src_rank, int tag);
 
-  void mdmp_register_reduce(void* sendbuf, void* recvbuf, size_t count, int type, size_t bytes, int root_rank, int op);
-  void mdmp_register_gather(void* sendbuf, size_t sendcount, void* recvbuf, int type, size_t bytes, int root_rank);
+  int mdmp_register_reduce(void* sendbuf, void* recvbuf, size_t count, int type, size_t bytes, int root_rank, int op);
+  int mdmp_register_gather(void* sendbuf, size_t sendcount, void* recvbuf, int type, size_t bytes, int root_rank);
 
-  void mdmp_register_allreduce(void* sendbuf, void* recvbuf, size_t count, int type,  size_t bytes, int op);
-  void mdmp_register_allgather(void* sendbuf, size_t count, void* recvbuf, int type, size_t bytes);
+  int mdmp_register_allreduce(void* sendbuf, void* recvbuf, size_t count, int type,  size_t bytes, int op);
+  int mdmp_register_allgather(void* sendbuf, size_t count, void* recvbuf, int type, size_t bytes);
 
-  void mdmp_register_bcast(void* buffer, size_t count, int type, size_t bytes, int root);  
+  int mdmp_register_bcast(void* buffer, size_t count, int type, size_t bytes, int root_rank);
 
   int  mdmp_commit();
 
