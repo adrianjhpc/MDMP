@@ -22,13 +22,13 @@ int main(int argc, char** argv) {
     std::vector<Particle> send_list(num_migrating);
     std::vector<Particle> recv_list(num_migrating);
 
-    // SEED INITIAL STATE: Set x to the current rank ID
+    // SEED INITIAL STATE: Set z to the current rank ID
     for (int i = 0; i < num_migrating; ++i) {
-        send_list[i].x = (double)rank;
+        send_list[i].z = (double)rank;
     }
 
-    int right_neighbor = (rank + 1) % size;
-    int left_neighbor = (rank - 1 + size) % size;
+    int right_neighbour = (rank + 1) % size;
+    int left_neighbour = (rank - 1 + size) % size;
 
     MDMP_COMM_SYNC();
     double start_time = MDMP_WTIME();
@@ -37,8 +37,8 @@ int main(int argc, char** argv) {
         
         MDMP_COMMREGION_BEGIN();
         for (int i = 0; i < num_migrating; ++i) {
-            MDMP_REGISTER_SEND(&send_list[i], 1, rank, right_neighbor, 0);
-            MDMP_REGISTER_RECV(&recv_list[i], 1, rank, left_neighbor, 0);
+            MDMP_REGISTER_SEND(&send_list[i], 1, rank, right_neighbour, 0);
+            MDMP_REGISTER_RECV(&recv_list[i], 1, rank, left_neighbour, 0);
         }
         MDMP_COMMIT();
 
@@ -50,7 +50,7 @@ int main(int argc, char** argv) {
         MDMP_COMMREGION_END();
 
         for (int i = 0; i < num_migrating; ++i) {
-            send_list[i].x = recv_list[i].x + dummy_work; 
+            send_list[i].z = recv_list[i].z + dummy_work; 
         }
     }
 
@@ -62,7 +62,7 @@ int main(int argc, char** argv) {
     
     // Calculate which rank's data we should be holding after 'iterations' shifts
     int expected_origin_rank = (rank - (iterations % size) + size) % size;
-    
+
     // Calculate the exact expected floating-point accumulation
     double expected_dummy_total = 0.0;
     for (int iter = 0; iter < iterations; ++iter) {
@@ -70,20 +70,21 @@ int main(int argc, char** argv) {
         for (int i = 0; i < 100000; ++i) { dummy_work += 0.0001; }
         expected_dummy_total += dummy_work;
     }
-    
-    double expected_x = (double)expected_origin_rank + expected_dummy_total;
-    
+
+    double expected_z = (double)expected_origin_rank + expected_dummy_total;
+   
+ 
     bool correct = true;
     for (int i = 0; i < num_migrating; ++i) {
         // Use an epsilon to account for standard IEEE 754 floating-point jitter
-        if (std::abs(send_list[i].x - expected_x) > 1e-5) {
+        if (std::abs(send_list[i].z - expected_z) > 1e-5) {
             correct = false;
             break;
         }
     }
 
     if (!correct) {
-        printf("[MDMP] Rank %d Validation FAILED! Expected x = %f, but got %f\n", rank, expected_x, send_list[0].x);
+        printf("[MDMP] Rank %d Validation FAILED! Expected z = %f, but got %f\n", rank, expected_z, send_list[0].x);
     } else {
         if (rank == 0) {
             printf("[MDMP] Rank %d Validation PASSED!\n", rank);

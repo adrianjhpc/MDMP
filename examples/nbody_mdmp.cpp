@@ -22,8 +22,12 @@ int main(int argc, char** argv) {
     std::vector<Particle> send_list(num_migrating);
     std::vector<Particle> recv_list(num_migrating);
 
-    int right_neighbor = (rank + 1) % size;
-    int left_neighbor = (rank - 1 + size) % size;
+    int right_neighbour = (rank + 1) % size;
+    int left_neighbour = (rank - 1 + size) % size;
+
+    for (int i = 0; i < num_migrating; ++i) {
+        send_list[i].z = (double)rank;
+    }
 
     MDMP_COMM_SYNC();
     double start_time = MDMP_WTIME();
@@ -32,8 +36,8 @@ int main(int argc, char** argv) {
         
         for (int i = 0; i < num_migrating; ++i) {
             // Count is 1 element! MDMP calculates the 56 bytes automatically.
-            MDMP_SEND(&send_list[i], 1, rank, right_neighbor, 0);
-            MDMP_RECV(&recv_list[i], 1, rank, left_neighbor, 0);
+            MDMP_SEND(&send_list[i], 1, rank, right_neighbour, 0);
+            MDMP_RECV(&recv_list[i], 1, rank, left_neighbour, 0);
         }    
 
         double dummy_work = 0.0;
@@ -42,7 +46,7 @@ int main(int argc, char** argv) {
         }
 
         for (int i = 0; i < num_migrating; ++i) {
-            send_list[i].x = recv_list[i].x + dummy_work; // Fake update
+            send_list[i].z = recv_list[i].z + dummy_work; // Fake update
         }
     }
 
@@ -63,19 +67,19 @@ int main(int argc, char** argv) {
         expected_dummy_total += dummy_work;
     }
 
-    double expected_x = (double)expected_origin_rank + expected_dummy_total;
+    double expected_z = (double)expected_origin_rank + expected_dummy_total;
 
     bool correct = true;
     for (int i = 0; i < num_migrating; ++i) {
         // Use an epsilon to account for standard IEEE 754 floating-point jitter
-        if (std::abs(send_list[i].x - expected_x) > 1e-5) {
+        if (std::abs(send_list[i].z - expected_z) > 1e-5) {
             correct = false;
             break;
         }
     }
 
     if (!correct) {
-        printf("[MDMP] Rank %d Validation FAILED! Expected x = %f, but got %f\n", rank, expected_x, send_list[0].x);
+        printf("[MDMP] Rank %d Validation FAILED! Expected z = %f, but got %f\n", rank, expected_z, send_list[0].x);
     } else {
         if (rank == 0) {
             printf("[MDMP] Rank %d Validation PASSED!\n", rank);

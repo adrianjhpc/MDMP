@@ -26,6 +26,10 @@ int main(int argc, char** argv) {
     int right_neighbor = (rank + 1) % size;
     int left_neighbor = (rank - 1 + size) % size;
 
+    for (int i = 0; i < num_migrating; ++i) {
+        send_list[i].z = (double)rank;
+    }
+
     MPI_Barrier(MPI_COMM_WORLD);
     double start_time = MPI_Wtime();
 
@@ -47,7 +51,7 @@ int main(int argc, char** argv) {
         MPI_Waitall(reqs.size(), reqs.data(), MPI_STATUSES_IGNORE);
 
         for (int i = 0; i < num_migrating; ++i) {
-            send_list[i].x = recv_list[i].x + dummy_work; 
+            send_list[i].z = recv_list[i].z + dummy_work; 
         }
     }
 
@@ -68,19 +72,20 @@ int main(int argc, char** argv) {
         expected_dummy_total += dummy_work;
     }
 
-    double expected_x = (double)expected_origin_rank + expected_dummy_total;
+    double expected_z = (double)expected_origin_rank + expected_dummy_total;
 
     bool correct = true;
     for (int i = 0; i < num_migrating; ++i) {
         // Use an epsilon to account for standard IEEE 754 floating-point jitter
-        if (std::abs(send_list[i].x - expected_x) > 1e-5) {
+        if (std::abs(send_list[i].z - expected_z) > 1e-5) {
             correct = false;
             break;
         }
     }
 
+
     if (!correct) {
-        printf("[MDMP] Rank %d Validation FAILED! Expected x = %f, but got %f\n", rank, expected_x, send_list[0].x);
+        printf("[MDMP] Rank %d Validation FAILED! Expected z = %f, but got %f\n", rank, expected_z, send_list[0].x);
     } else {
         if (rank == 0) {
             printf("[MDMP] Rank %d Validation PASSED!\n", rank);
