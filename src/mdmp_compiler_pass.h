@@ -169,6 +169,7 @@ namespace llvm {
                               LLVMContext &Ctx, Module *M, DominatorTree &DT);
 
     void injectThrottledProgress(Function &F, AAResults &AA, DominatorTree &DT, LoopInfo &LI, Module *M);
+
   };
 
 } // namespace llvm

@@ -1147,19 +1147,58 @@ void MDMPPass::injectThrottledProgress(Function &F, AAResults &AA, DominatorTree
   }
 }
 
+static void addMDMPWithCleanupPipeline(ModulePassManager &MPM) {
+  MPM.addPass(MDMPPass());
+
+  FunctionPassManager FPM;
+#if LLVM_VERSION_GE(22, 0)
+  FPM.addPass(SROAPass(SROAOptions::ModifyCFG));
+#else
+  FPM.addPass(SROAPass());
+#endif
+  FPM.addPass(EarlyCSEPass());
+  FPM.addPass(InstCombinePass());
+  FPM.addPass(SimplifyCFGPass());
+  FPM.addPass(InstCombinePass());
+  FPM.addPass(DCEPass());
+
+  MPM.addPass(createModuleToFunctionPassAdaptor(std::move(FPM)));
+  MPM.addPass(GlobalDCEPass());
+}
+
 extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo llvmGetPassPluginInfo() {
   return {
-    LLVM_PLUGIN_API_VERSION, "MDMP", "v0.2",
+    LLVM_PLUGIN_API_VERSION, "MDMP", "v0.3",
     [](PassBuilder &PB) {
-      PB.registerPipelineParsingCallback([](StringRef Name, ModulePassManager &MPM, ArrayRef<PassBuilder::PipelineElement>) {
-	if (Name == "mdmp") { MPM.addPass(MDMPPass()); return true; } return false;
-      });
-      PB.registerOptimizerLastEPCallback([](ModulePassManager &MPM, OptimizationLevel Level, ThinOrFullLTOPhase Phase) { 
-	MPM.addPass(MDMPPass()); 
-      });
-      PB.registerFullLinkTimeOptimizationLastEPCallback([](ModulePassManager &MPM, OptimizationLevel Level) { 
-	MPM.addPass(MDMPPass()); 
-      });
+      PB.registerPipelineParsingCallback(
+          [](StringRef Name,
+             ModulePassManager &MPM,
+             ArrayRef<PassBuilder::PipelineElement>) {
+            if (Name == "mdmp") {
+	      addMDMPWithCleanupPipeline(MPM);
+              return true;
+            }
+            if (Name == "mdmp-raw") {
+              MPM.addPass(MDMPPass());
+              return true;
+            }
+            return false;
+          });
+
+      PB.registerOptimizerLastEPCallback(
+          [](ModulePassManager &MPM,
+             OptimizationLevel Level,
+             ThinOrFullLTOPhase Phase) {
+	    addMDMPWithCleanupPipeline(MPM);
+          });
+
+      PB.registerFullLinkTimeOptimizationLastEPCallback(
+          [](ModulePassManager &MPM,
+             OptimizationLevel Level) {
+	    addMDMPWithCleanupPipeline(MPM);
+          });
     }
   };
 }
+
+
