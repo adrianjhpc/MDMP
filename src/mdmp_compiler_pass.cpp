@@ -2,6 +2,33 @@
 
 using namespace llvm;
 
+bool MDMPPass::waitTokenValueDominates(Value *V, Instruction *InsertPt, DominatorTree &DT) {
+                                    
+  if (!V) return false;
+
+  if (isa<Constant>(V) || isa<Argument>(V) || isa<GlobalValue>(V))
+    return true;
+
+  if (auto *I = dyn_cast<Instruction>(V))
+    return DT.dominates(I, InsertPt);
+
+  return true;
+}
+
+Value *MDMPPass::materialiseWaitTokenForUse(AsyncRequest &Req, Instruction *InsertPt, IntegerType *I32Ty, IRBuilder<> &Builder, DominatorTree &DT) {
+
+  if (Req.WaitTokenValue &&
+      waitTokenValueDominates(Req.WaitTokenValue, InsertPt, DT)) {
+    return Req.WaitTokenValue;
+  }
+
+  assert(Req.WaitTokenAlloc &&
+         "MDMP request has no available wait token at insertion point");
+
+  return Builder.CreateLoad(I32Ty, Req.WaitTokenAlloc, "mdmp_wait_id");
+}
+
+
 bool MDMPPass::isAsyncMDMPOpName(StringRef FnName) {
   return FnName == "mdmp_send" ||
     FnName == "mdmp_recv" ||
@@ -85,13 +112,13 @@ bool MDMPPass::requestWindowCoversLoopHeader(const RequestWindowInfo &Info, Loop
   return DT.dominates(Info.Req->StartPoint, HeaderIP);
 }
 
-SmallVector<MDMPPass::RequestWindowInfo, 8> MDMPPass::analyzeRequestWindows(ArrayRef<AsyncRequest> Requests, Instruction *RegionEnd, AAResults &AA, LoopInfo &LI, Module *M) {
+SmallVector<MDMPPass::RequestWindowInfo, 8> MDMPPass::analyseRequestWindows(std::vector<AsyncRequest> &Requests, Instruction *RegionEnd, AAResults &AA, LoopInfo &LI, Module *M) {                      
 
   const DataLayout &DL = M->getDataLayout();
   SmallVector<RequestWindowInfo, 8> Infos;
   Infos.reserve(Requests.size());
 
-  for (const AsyncRequest &Req : Requests) {
+  for (AsyncRequest &Req : Requests) {
     RequestWindowInfo Info;
     Info.Req = &Req;
 
@@ -580,8 +607,15 @@ void MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
   };
 
   std::vector<Instruction*> toDelete;
-  std::vector<std::pair<AllocaInst*, std::vector<TrackedBuffer>>> ActiveDeclarativeLocs;
-
+  struct DeclarativePendingOp {
+    Value *WaitTokenValue;
+    AllocaInst *WaitTokenAlloc;
+    std::vector<TrackedBuffer> Buffers;
+  };
+  
+  std::vector<DeclarativePendingOp> ActiveDeclarativeLocs;
+ 
+  
   for (auto &BB : F) {
     for (auto &I : BB) {
       auto *CI = dyn_cast<CallInst>(&I);
@@ -607,20 +641,17 @@ void MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
 
         bool isSend = (Name == "__mdmp_marker_send");
         std::vector<TrackedBuffer> TrackedLocs = buildSendRecvBuffers(BufferPtr, CountVal, TypeVal, ByteSize, isSend);
-                
-        AllocaInst *ReqAlloc = CreateSafeAlloc();
-        CallInst *NewCall = Builder.CreateCall(isSend ? runtime_send : runtime_recv, 
+	CallInst *NewCall = Builder.CreateCall(isSend ? runtime_send : runtime_recv,
 					       {BufferPtr, CountVal, TypeVal, ByteSize, ActorRank, PeerRank, TagVal});
-        Builder.CreateStore(NewCall, ReqAlloc);
-                
-        CI->replaceAllUsesWith(NewCall);
-        hoistInitiation(NewCall, TrackedLocs, AA, DT, LI, isSend);
-        
-        AsyncRequest Req;
-        Req.WaitTokenAlloc = ReqAlloc;
-        Req.StartPoint = NewCall;
-        Req.Buffers = TrackedLocs;
-        PendingRequests.push_back(Req);
+
+	CI->replaceAllUsesWith(NewCall);
+	hoistInitiation(NewCall, TrackedLocs, AA, DT, LI, isSend);
+	
+	AsyncRequest Req;
+	Req.WaitTokenValue = NewCall;
+	Req.StartPoint = NewCall;
+	Req.Buffers = TrackedLocs;
+	PendingRequests.push_back(std::move(Req));
         toDelete.push_back(CI);
       } 
       else if (Name == "__mdmp_marker_register_send" || Name == "__mdmp_marker_register_recv") {
@@ -634,14 +665,14 @@ void MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
 
         bool isSend = (Name == "__mdmp_marker_register_send");
         std::vector<TrackedBuffer> TrackedLocs = buildSendRecvBuffers(BufferPtr, CountVal, TypeVal, ByteSize, isSend);
-                
-        AllocaInst *ReqAlloc = CreateSafeAlloc();
-        CallInst *NewCall = Builder.CreateCall(isSend ? runtime_register_send : runtime_register_recv, 
+
+	AllocaInst *ReqAlloc = CreateSafeAlloc();
+	CallInst *NewCall = Builder.CreateCall(isSend ? runtime_register_send : runtime_register_recv,
 					       {BufferPtr, CountVal, TypeVal, ByteSize, ActorRank, PeerRank, TagVal});
-        Builder.CreateStore(NewCall, ReqAlloc);
-                
-        CI->replaceAllUsesWith(NewCall);
-        ActiveDeclarativeLocs.push_back({ReqAlloc, TrackedLocs});
+	Builder.CreateStore(NewCall, ReqAlloc);
+
+	CI->replaceAllUsesWith(NewCall);
+	ActiveDeclarativeLocs.push_back({NewCall, ReqAlloc, TrackedLocs});
         toDelete.push_back(CI);
       }
       else if (Name == "__mdmp_marker_register_reduce") {
@@ -652,14 +683,14 @@ void MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
 								    CI->getArgOperand(2),  // count
 								    CI->getArgOperand(3),  // type
 								    CI->getArgOperand(4)); // bytes
-      
-        AllocaInst *ReqAlloc = CreateSafeAlloc();
-        CallInst *NewCall = Builder.CreateCall(runtime_register_reduce, 
-					       {InBuf, OutBuf, CI->getArgOperand(2), CI->getArgOperand(3), CI->getArgOperand(4), CI->getArgOperand(5), CI->getArgOperand(6)});
-        Builder.CreateStore(NewCall, ReqAlloc);
 
-        CI->replaceAllUsesWith(NewCall);
-        ActiveDeclarativeLocs.push_back({ReqAlloc, TrackedLocs});
+	AllocaInst *ReqAlloc = CreateSafeAlloc();
+	CallInst *NewCall = Builder.CreateCall(runtime_register_reduce,
+					       {InBuf, OutBuf, CI->getArgOperand(2), CI->getArgOperand(3), CI->getArgOperand(4), CI->getArgOperand(5), CI->getArgOperand(6)});
+	Builder.CreateStore(NewCall, ReqAlloc);
+	
+	CI->replaceAllUsesWith(NewCall);
+	ActiveDeclarativeLocs.push_back({NewCall, ReqAlloc, TrackedLocs});
         toDelete.push_back(CI);
       }
       else if (Name == "__mdmp_marker_register_gather") {
@@ -673,26 +704,28 @@ void MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
                                                                     CI->getArgOperand(4)); // bytes
         
         AllocaInst *ReqAlloc = CreateSafeAlloc();
-        CallInst *NewCall = Builder.CreateCall(runtime_register_gather, 
+	CallInst *NewCall = Builder.CreateCall(runtime_register_gather,
 					       {SendBuf, CI->getArgOperand(1), RecvBuf, CI->getArgOperand(3), CI->getArgOperand(4), CI->getArgOperand(5)});
-        Builder.CreateStore(NewCall, ReqAlloc);
-
-        CI->replaceAllUsesWith(NewCall);
-        ActiveDeclarativeLocs.push_back({ReqAlloc, TrackedLocs});
-        toDelete.push_back(CI);
+	Builder.CreateStore(NewCall, ReqAlloc);
+	
+	CI->replaceAllUsesWith(NewCall);
+	ActiveDeclarativeLocs.push_back({NewCall, ReqAlloc, TrackedLocs});
+	toDelete.push_back(CI);
       } 
       else if (Name == "__mdmp_marker_commit") {
         CallInst *NewCommit = Builder.CreateCall(runtime_commit);
         CI->replaceAllUsesWith(NewCommit);
                 
         // Safely map the stack variables to the JIT Tracking array
-        for (auto &Pair : ActiveDeclarativeLocs) {
-          AsyncRequest Req;
-          Req.WaitTokenAlloc = Pair.first;    
-          Req.StartPoint = NewCommit;    
-          Req.Buffers = Pair.second;
-          PendingRequests.push_back(Req);
-        }
+	for (auto &Op : ActiveDeclarativeLocs) {
+	  AsyncRequest Req;
+	  Req.WaitTokenValue = Op.WaitTokenValue;
+	  Req.WaitTokenAlloc = Op.WaitTokenAlloc;
+	  Req.StartPoint = NewCommit;
+	  Req.Buffers = Op.Buffers;
+	  PendingRequests.push_back(std::move(Req));
+	}
+
                 
         ActiveDeclarativeLocs.clear(); 
         toDelete.push_back(CI);
@@ -708,17 +741,15 @@ void MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
 			     CI->getArgOperand(3),  // type
 			     CI->getArgOperand(4)); // bytes 
 
-        hoistInitiation(NewCall, Locs, AA, DT, LI, false);
-        
-        AllocaInst *ReqAlloc = CreateSafeAlloc();
-        Builder.CreateStore(NewCall, ReqAlloc);
+	hoistInitiation(NewCall, Locs, AA, DT, LI, false);
 
-        CI->replaceAllUsesWith(NewCall);
-        AsyncRequest Req;
-        Req.WaitTokenAlloc = ReqAlloc;
-        Req.StartPoint = NewCall;
-        Req.Buffers = Locs;
-        PendingRequests.push_back(Req);
+	CI->replaceAllUsesWith(NewCall);
+	AsyncRequest Req;
+	Req.WaitTokenValue = NewCall;
+	Req.StartPoint = NewCall;
+	Req.Buffers = Locs;
+	PendingRequests.push_back(std::move(Req));
+
         toDelete.push_back(CI);
       }
       else if (Name == "__mdmp_marker_gather") {
@@ -731,17 +762,15 @@ void MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
 			     CI->getArgOperand(2),  // recvbuf
 			     CI->getArgOperand(3),  // type
 			     CI->getArgOperand(4)); // bytes
-        hoistInitiation(NewCall, Locs, AA, DT, LI, false);
-        
-        AllocaInst *ReqAlloc = CreateSafeAlloc();
-        Builder.CreateStore(NewCall, ReqAlloc);
+	hoistInitiation(NewCall, Locs, AA, DT, LI, false);
 
-        CI->replaceAllUsesWith(NewCall);
-        AsyncRequest Req;
-        Req.WaitTokenAlloc = ReqAlloc;
-        Req.StartPoint = NewCall;
-        Req.Buffers = Locs;
-        PendingRequests.push_back(Req);
+	CI->replaceAllUsesWith(NewCall);
+	AsyncRequest Req;
+	Req.WaitTokenValue = NewCall;
+	Req.StartPoint = NewCall;
+	Req.Buffers = Locs;
+	PendingRequests.push_back(std::move(Req));
+
         toDelete.push_back(CI);
       }
       else if (Name == "__mdmp_marker_allreduce" || Name == "__mdmp_marker_register_allreduce") {
@@ -758,19 +787,23 @@ void MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
         
         AllocaInst *ReqAlloc = CreateSafeAlloc();
         Builder.CreateStore(NewCall, ReqAlloc);
-        CI->replaceAllUsesWith(NewCall);
 
-        if (Name == "__mdmp_marker_allreduce") {
-          hoistInitiation(NewCall, Locs, AA, DT, LI, false); 
-          AsyncRequest Req;
-          Req.WaitTokenAlloc = ReqAlloc;
-          Req.StartPoint = NewCall;
-          Req.Buffers = Locs;
-          PendingRequests.push_back(Req);
-        } else {
-          ActiveDeclarativeLocs.push_back({ReqAlloc, Locs});
-        }
-        toDelete.push_back(CI);
+	CI->replaceAllUsesWith(NewCall);
+
+	if (Name == "__mdmp_marker_allreduce") {
+	  hoistInitiation(NewCall, Locs, AA, DT, LI, false);
+	  AsyncRequest Req;
+	  Req.WaitTokenValue = NewCall;
+	  Req.StartPoint = NewCall;
+	  Req.Buffers = Locs;
+	  PendingRequests.push_back(std::move(Req));
+	} else {
+	  AllocaInst *ReqAlloc = CreateSafeAlloc();
+	  Builder.CreateStore(NewCall, ReqAlloc);
+	  ActiveDeclarativeLocs.push_back({NewCall, ReqAlloc, Locs});
+	}
+	toDelete.push_back(CI);
+
       }
       else if (Name == "__mdmp_marker_allgather" || Name == "__mdmp_marker_register_allgather") {
         FunctionCallee target_func = (Name == "__mdmp_marker_allgather") ? runtime_allgather : runtime_register_allgather;
@@ -786,19 +819,22 @@ void MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
 
         AllocaInst *ReqAlloc = CreateSafeAlloc();
         Builder.CreateStore(NewCall, ReqAlloc);
-        CI->replaceAllUsesWith(NewCall);
+	CI->replaceAllUsesWith(NewCall);
 
-        if (Name == "__mdmp_marker_allgather") {
-          hoistInitiation(NewCall, Locs, AA, DT, LI, false);
-          AsyncRequest Req;
-          Req.WaitTokenAlloc = ReqAlloc;
-          Req.StartPoint = NewCall;
-          Req.Buffers = Locs;
-          PendingRequests.push_back(Req);
-        } else {
-          ActiveDeclarativeLocs.push_back({ReqAlloc, Locs});
-        }
-        toDelete.push_back(CI);
+	if (Name == "__mdmp_marker_allgather") {
+	  hoistInitiation(NewCall, Locs, AA, DT, LI, false);
+	  AsyncRequest Req;
+	  Req.WaitTokenValue = NewCall;
+	  Req.StartPoint = NewCall;
+	  Req.Buffers = Locs;
+	  PendingRequests.push_back(std::move(Req));
+	} else {
+	  AllocaInst *ReqAlloc = CreateSafeAlloc();
+	  Builder.CreateStore(NewCall, ReqAlloc);
+	  ActiveDeclarativeLocs.push_back({NewCall, ReqAlloc, Locs});
+	}
+	toDelete.push_back(CI);
+
       }
       else if (Name == "__mdmp_marker_bcast" || Name == "__mdmp_marker_register_bcast") {
         FunctionCallee target_func = (Name == "__mdmp_marker_bcast") ? runtime_bcast : runtime_register_bcast;
@@ -817,19 +853,23 @@ void MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
         
         AllocaInst *ReqAlloc = CreateSafeAlloc();
         Builder.CreateStore(NewCall, ReqAlloc);
-        CI->replaceAllUsesWith(NewCall);
 
-        if (Name == "__mdmp_marker_bcast") {
-          hoistInitiation(NewCall, Locs, AA, DT, LI, false); 
-          AsyncRequest Req;
-          Req.WaitTokenAlloc = ReqAlloc;
-          Req.StartPoint = NewCall;
-          Req.Buffers = Locs;
-          PendingRequests.push_back(Req);
-        } else {
-          ActiveDeclarativeLocs.push_back({ReqAlloc, Locs});
-        }
-        toDelete.push_back(CI);
+	CI->replaceAllUsesWith(NewCall);
+
+	if (Name == "__mdmp_marker_bcast") {
+	  hoistInitiation(NewCall, Locs, AA, DT, LI, false);
+	  AsyncRequest Req;
+	  Req.WaitTokenValue = NewCall;
+	  Req.StartPoint = NewCall;
+	  Req.Buffers = Locs;
+	  PendingRequests.push_back(std::move(Req));
+	} else {
+	  AllocaInst *ReqAlloc = CreateSafeAlloc();
+	  Builder.CreateStore(NewCall, ReqAlloc);
+	  ActiveDeclarativeLocs.push_back({NewCall, ReqAlloc, Locs});
+	}
+	toDelete.push_back(CI);
+	
       }      
       else if (Name == "__mdmp_marker_commregion_end") {
         CallInst *NewEnd = Builder.CreateCall(runtime_end);
@@ -931,11 +971,11 @@ void MDMPPass::injectWaitsForRegion(Instruction *RegionEnd,
 			   PointerType::getUnqual(Ctx),
 			   I32Ty);
 
-  auto Windows = analyzeRequestWindows(PendingRequests, RegionEnd, AA, LI, M);
+  auto Windows = analyseRequestWindows(PendingRequests, RegionEnd, AA, LI, M);
 
-  MapVector<Instruction *, SmallVector<const AsyncRequest *, 8>> GroupedWaits;
+  MapVector<Instruction *, SmallVector<AsyncRequest *, 8>> GroupedWaits;
 
-  for (const RequestWindowInfo &Info : Windows) {
+  for (RequestWindowInfo &Info : Windows) {
     SmallPtrSet<Instruction *, 4> UniqueWaitPoints;
 
     for (Instruction *InsertPt : Info.WaitPoints) {
@@ -971,37 +1011,70 @@ void MDMPPass::injectWaitsForRegion(Instruction *RegionEnd,
     }
   }
 
+  unsigned MaxBatchSize = 0;
+  for (auto &KV : GroupedWaits) {
+    MaxBatchSize = std::max<unsigned>(MaxBatchSize, KV.second.size());
+  }
+
+  AllocaInst *WaitIDsScratch = nullptr;
+  ArrayType *WaitIDsScratchTy = nullptr;
+
+  if (MaxBatchSize > 1) {
+    Function *F = PendingRequests.front().StartPoint->getFunction();
+    BasicBlock &EntryBB = F->getEntryBlock();
+    IRBuilder<> EntryBuilder(&*EntryBB.getFirstInsertionPt());
+
+    WaitIDsScratchTy = ArrayType::get(I32Ty, MaxBatchSize);
+    WaitIDsScratch =
+      EntryBuilder.CreateAlloca(WaitIDsScratchTy, nullptr, "mdmp_wait_ids_scratch");
+  }
+
   for (auto &KV : GroupedWaits) {
     Instruction *InsertPt = KV.first;
-    SmallVector<const AsyncRequest *, 8> &Reqs = KV.second;
+
+    // Optional dedup by token source.
+    SmallVector<AsyncRequest *, 8> UniqueReqs;
+    SmallPtrSet<Value *, 8> SeenTokenSources;
+
+    for (AsyncRequest *Req : KV.second) {
+      Value *Key = Req->WaitTokenValue ? Req->WaitTokenValue
+	: static_cast<Value *>(Req->WaitTokenAlloc);
+      if (SeenTokenSources.insert(Key).second)
+        UniqueReqs.push_back(Req);
+    }
 
     IRBuilder<> Builder(InsertPt);
 
-    if (Reqs.size() == 1) {
-      Value *LoadedID = Builder.CreateLoad(I32Ty, Reqs[0]->WaitTokenAlloc);
-      Builder.CreateCall(runtime_wait, {LoadedID});
+    if (UniqueReqs.size() == 1) {
+      Value *WaitID =
+	materialiseWaitTokenForUse(*UniqueReqs[0], InsertPt, I32Ty, Builder, DT);
+      Builder.CreateCall(runtime_wait, {WaitID});
       continue;
     }
 
-    ArrayType *ArrTy = ArrayType::get(I32Ty, Reqs.size());
-    AllocaInst *Arr = Builder.CreateAlloca(ArrTy, nullptr, "mdmp_wait_ids");
-
     Value *Zero = ConstantInt::get(I32Ty, 0);
 
-    for (unsigned i = 0; i < Reqs.size(); ++i) {
+    for (unsigned i = 0; i < UniqueReqs.size(); ++i) {
       Value *Idx = ConstantInt::get(I32Ty, i);
-      Value *Slot = Builder.CreateInBoundsGEP(ArrTy, Arr, {Zero, Idx});
-      Value *LoadedID = Builder.CreateLoad(I32Ty, Reqs[i]->WaitTokenAlloc);
-      Builder.CreateStore(LoadedID, Slot);
+      Value *Slot =
+	Builder.CreateInBoundsGEP(WaitIDsScratchTy, WaitIDsScratch, {Zero, Idx});
+
+      Value *WaitID =
+	materialiseWaitTokenForUse(*UniqueReqs[i], InsertPt, I32Ty, Builder, DT);
+
+      Builder.CreateStore(WaitID, Slot);
     }
 
-    Value *BasePtr = Builder.CreateInBoundsGEP(ArrTy, Arr, {Zero, Zero});
+    Value *BasePtr =
+      Builder.CreateInBoundsGEP(WaitIDsScratchTy, WaitIDsScratch, {Zero, Zero});
+
     Builder.CreateCall(runtime_wait_many,
-                       {BasePtr, ConstantInt::get(I32Ty, Reqs.size())});
+                       {BasePtr, ConstantInt::get(I32Ty, UniqueReqs.size())});
   }
 
   PendingRequests.clear();
 }
+
 
 void MDMPPass::injectThrottledProgress(Function &F, AAResults &AA, DominatorTree &DT, LoopInfo &LI, Module *M) {
 
@@ -1014,7 +1087,7 @@ void MDMPPass::injectThrottledProgress(Function &F, AAResults &AA, DominatorTree
   FunctionCallee runtime_maybe_progress =
     M->getOrInsertFunction("mdmp_maybe_progress", Type::getVoidTy(Ctx));
 
-  auto Windows = analyzeRequestWindows(PendingRequests, nullptr, AA, LI, M);
+  auto Windows = analyseRequestWindows(PendingRequests, nullptr, AA, LI, M);
   if (Windows.empty())
     return;
 

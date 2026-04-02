@@ -10,17 +10,22 @@
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/Dominators.h"
 #include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/Analysis/MemoryLocation.h"
-#include "llvm/IR/Dominators.h"
 #include "llvm/Analysis/LoopInfo.h"
-#include "llvm/Analysis/ValueTracking.h"
-#include "llvm/Passes/PassBuilder.h"
 #include "llvm/Analysis/ValueTracking.h" 
-#include "llvm/Transforms/Utils/BasicBlockUtils.h"
+#include "llvm/Passes/PassBuilder.h"
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/Transforms/Utils/BasicBlockUtils.h"
+#include "llvm/Transforms/InstCombine/InstCombine.h"
+#include "llvm/Transforms/Scalar/SROA.h"
+#include "llvm/Transforms/Scalar/EarlyCSE.h"
+#include "llvm/Transforms/Scalar/SimplifyCFG.h"
+#include "llvm/Transforms/Scalar/DCE.h"
+#include "llvm/Transforms/IPO/GlobalDCE.h"
 
 #if LLVM_VERSION_GE(23, 0)
 #include "llvm/Plugins/PassPlugin.h"
@@ -29,6 +34,7 @@
 #endif
 #include <vector>
 #include <optional>
+#include <cassert>
 
 namespace llvm {
 
@@ -43,25 +49,29 @@ namespace llvm {
     };
 
     struct AsyncRequest {
-    llvm::AllocaInst *WaitTokenAlloc; // Safely stores the ID across control flow boundaries
-      llvm::CallInst *StartPoint;       // Where the request goes in flight
+      llvm::Value *WaitTokenValue = nullptr;      // Direct SSA token when usable
+      llvm::AllocaInst *WaitTokenAlloc = nullptr; // Spill-slot fallback
+      llvm::CallInst *StartPoint = nullptr;       // Where the request goes in flight
       std::vector<TrackedBuffer> Buffers;
     };
-
+    
     struct TraversalState {
       BasicBlock *BB;
       BasicBlock::iterator StartIt;
     };
-    
+
     struct RequestWindowInfo {
-      const AsyncRequest *Req = nullptr;
+      AsyncRequest *Req = nullptr;
       SmallVector<Instruction *, 4> WaitPoints;
       SmallPtrSet<BasicBlock *, 32> LiveBlocks;
-    };
-    
+    };        
     
   private:
 
+    bool waitTokenValueDominates(Value *V, Instruction *InsertPt, DominatorTree &DT);
+    
+    Value *materialiseWaitTokenForUse(AsyncRequest &Req, Instruction *InsertPt, IntegerType *I32Ty, IRBuilder<> &Builder, DominatorTree &DT);
+    
     bool isAsyncMDMPOpName(StringRef FnName);
 
     bool isHardBarrierCallName(StringRef Name);
@@ -72,7 +82,7 @@ namespace llvm {
 
     bool requestWindowCoversLoopHeader(const RequestWindowInfo &Info, Loop *L, DominatorTree &DT);
 
-    SmallVector<RequestWindowInfo, 8> analyzeRequestWindows(ArrayRef<AsyncRequest> Requests, Instruction *RegionEnd, AAResults &AA, LoopInfo &LI, Module *M);
+    SmallVector<RequestWindowInfo, 8> analyseRequestWindows(std::vector<AsyncRequest> &Requests, Instruction *RegionEnd, AAResults &AA, LoopInfo &LI, Module *M);
     
     // Global tracker for the current function being processed
     std::vector<AsyncRequest> PendingRequests;
