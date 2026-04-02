@@ -2,6 +2,172 @@
 
 using namespace llvm;
 
+bool MDMPPass::isHardBarrierInstForWaitPlacement(Instruction *Inst) {
+  if (auto *CB = dyn_cast<CallBase>(Inst)) {
+    if (Function *CalledFn = CB->getCalledFunction()) {
+      return isHardBarrierCallName(CalledFn->getName());
+    }
+  }
+  return false;
+}
+
+bool MDMPPass::isAsyncMDMPInstForWaitPlacement(Instruction *Inst) {
+  if (auto *CB = dyn_cast<CallBase>(Inst)) {
+    if (Function *CalledFn = CB->getCalledFunction()) {
+      return isAsyncMDMPOpName(CalledFn->getName());
+    }
+  }
+  return false;
+}
+
+bool MDMPPass::instructionIsTrueConsumerOrClobber(Instruction *I, const TrackedBuffer &Buf, AAResults &AA, MemorySSA &MSSA, const DataLayout &DL) {
+
+  if (isIgnorableIntrinsicForMDMP(I))
+    return false;
+
+  if (auto *LI = dyn_cast<LoadInst>(I)) {
+    // For send-like buffers, local CPU reads are okay.
+    if (Buf.isNetworkReadOnly)
+      return false;
+
+    return locationsMayOverlap(MemoryLocation::get(LI), Buf.Loc, AA, DL);
+  }
+
+  if (auto *SI = dyn_cast<StoreInst>(I)) {
+    // Stores always clash if overlapping.
+    return locationsMayOverlap(MemoryLocation::get(SI), Buf.Loc, AA, DL);
+  }
+
+  ModRefInfo MR = AA.getModRefInfo(I, Buf.Loc);
+  if (!isModOrRefSet(MR))
+    return false;
+
+  MemoryAccess *MA = MSSA.getMemoryAccess(I);
+
+  // Send-like network access:
+  // only local writes/clobbers matter.
+  if (Buf.isNetworkReadOnly) {
+    if (!isModSet(MR))
+      return false;
+
+    // A pure MemoryUse is read-only wrt memory state, so safe for send-like buffers.
+    if (MA && isa<MemoryUse>(MA))
+      return false;
+
+    return true;
+  }
+
+  // Recv-like network access:
+  // both local reads and writes matter.
+  if (isRefSet(MR))
+    return true;
+  if (isModSet(MR))
+    return true;
+
+  return false;
+}
+
+bool MDMPPass::instructionTouchesAnyTrackedBufferPhase2(Instruction *I, ArrayRef<TrackedBuffer> Buffers, AAResults &AA, MemorySSA &MSSA, const DataLayout &DL) {
+                                                     
+  for (const TrackedBuffer &Buf : Buffers) {
+    if (instructionIsTrueConsumerOrClobber(I, Buf, AA, MSSA, DL))
+      return true;
+  }
+  return false;
+}
+
+Instruction *MDMPPass::findFirstTrueConflictInBlock(BasicBlock *BB, BasicBlock::iterator StartIt, Instruction *RegionEnd, ArrayRef<TrackedBuffer> Buffers, AAResults &AA, MemorySSA &MSSA, const DataLayout &DL) {
+                                                 
+  for (auto It = StartIt; It != BB->end(); ++It) {
+    Instruction *Inst = &*It;
+
+    if (RegionEnd && Inst == RegionEnd)
+      return Inst;
+
+    if (!Inst->mayReadOrWriteMemory())
+      continue;
+
+    if (isHardBarrierInstForWaitPlacement(Inst))
+      return Inst;
+
+    if (isAsyncMDMPInstForWaitPlacement(Inst))
+      continue;
+
+    if (instructionTouchesAnyTrackedBufferPhase2(Inst, Buffers, AA, MSSA, DL))
+      return Inst;
+  }
+
+  return nullptr;
+}
+
+
+bool MDMPPass::isIgnorableIntrinsicForMDMP(Instruction *I) {
+  auto *II = dyn_cast<IntrinsicInst>(I);
+  if (!II) return false;
+
+  switch (II->getIntrinsicID()) {
+  case Intrinsic::lifetime_start:
+  case Intrinsic::lifetime_end:
+  case Intrinsic::dbg_assign:
+  case Intrinsic::dbg_declare:
+  case Intrinsic::dbg_label:
+  case Intrinsic::dbg_value:
+    return true;
+  default:
+    return false;
+  }
+}
+
+bool MDMPPass::instructionConflictsWithTrackedBufferMSSA(Instruction *I, const TrackedBuffer &Buf, AAResults &AA, MemorySSA &MSSA, const DataLayout &DL) {
+                                                      
+  if (isIgnorableIntrinsicForMDMP(I))
+    return false;
+
+  if (auto *LI = dyn_cast<LoadInst>(I)) {
+    // Local reads are okay while a send/read-only network op is in flight.
+    if (Buf.isNetworkReadOnly)
+      return false;
+
+    return locationsMayOverlap(MemoryLocation::get(LI), Buf.Loc, AA, DL);
+  }
+
+  if (auto *SI = dyn_cast<StoreInst>(I)) {
+    return locationsMayOverlap(MemoryLocation::get(SI), Buf.Loc, AA, DL);
+  }
+
+  // For non-load/store memory ops, use MemorySSA to distinguish
+  // read-only accesses from true defs/writes.
+  ModRefInfo MR = AA.getModRefInfo(I, Buf.Loc);
+
+  if (Buf.isNetworkReadOnly) {
+    // Send-like buffer: only local writes/clobbers matter.
+    if (!isModSet(MR))
+      return false;
+
+    if (MemoryAccess *MA = MSSA.getMemoryAccess(I)) {
+      if (isa<MemoryUse>(MA))
+        return false; // read-only op, safe for in-flight send
+    }
+
+    return true;
+  }
+
+  // Recv-like buffer: local reads and writes both matter.
+  if (!isModOrRefSet(MR))
+    return false;
+
+  return true;
+}
+
+bool MDMPPass::instructionConflictsWithAnyTrackedBufferMSSA(Instruction *I, ArrayRef<TrackedBuffer> Buffers, AAResults &AA, MemorySSA &MSSA, const DataLayout &DL) {
+    
+  for (const TrackedBuffer &Buf : Buffers) {
+    if (instructionConflictsWithTrackedBufferMSSA(I, Buf, AA, MSSA, DL))
+      return true;
+  }
+  return false;
+}
+
 bool MDMPPass::waitTokenValueDominates(Value *V, Instruction *InsertPt, DominatorTree &DT) {
                                     
   if (!V) return false;
@@ -15,7 +181,7 @@ bool MDMPPass::waitTokenValueDominates(Value *V, Instruction *InsertPt, Dominato
   return true;
 }
 
-Value *MDMPPass::materialiseWaitTokenForUse(AsyncRequest &Req, Instruction *InsertPt, IntegerType *I32Ty, IRBuilder<> &Builder, DominatorTree &DT) {
+Value *MDMPPass::materialiseWaitTokenForUse(const AsyncRequest &Req, Instruction *InsertPt, IntegerType *I32Ty, IRBuilder<> &Builder, DominatorTree &DT) {
 
   if (Req.WaitTokenValue &&
       waitTokenValueDominates(Req.WaitTokenValue, InsertPt, DT)) {
@@ -112,13 +278,13 @@ bool MDMPPass::requestWindowCoversLoopHeader(const RequestWindowInfo &Info, Loop
   return DT.dominates(Info.Req->StartPoint, HeaderIP);
 }
 
-SmallVector<MDMPPass::RequestWindowInfo, 8> MDMPPass::analyseRequestWindows(std::vector<AsyncRequest> &Requests, Instruction *RegionEnd, AAResults &AA, LoopInfo &LI, Module *M) {                      
+SmallVector<MDMPPass::RequestWindowInfo, 8> MDMPPass::analyseRequestWindows(ArrayRef<AsyncRequest> &Requests, Instruction *RegionEnd, AAResults &AA, LoopInfo &LI, MemorySSA &MSSA, Module *M) {                      
 
   const DataLayout &DL = M->getDataLayout();
   SmallVector<RequestWindowInfo, 8> Infos;
   Infos.reserve(Requests.size());
 
-  for (AsyncRequest &Req : Requests) {
+  for (const AsyncRequest &Req : Requests) {
     RequestWindowInfo Info;
     Info.Req = &Req;
 
@@ -145,42 +311,13 @@ SmallVector<MDMPPass::RequestWindowInfo, 8> MDMPPass::analyseRequestWindows(std:
 
       Info.LiveBlocks.insert(BB);
 
+
       bool FoundStop = false;
-      for (auto It = State.StartIt; It != BB->end(); ++It) {
-        Instruction *Inst = &*It;
-
-        if (RegionEnd && Inst == RegionEnd) {
-          Info.WaitPoints.push_back(Inst);
-          FoundStop = true;
-          break;
-        }
-
-        if (!Inst->mayReadOrWriteMemory())
-          continue;
-
-        bool StopHere = false;
-        bool IsAsyncCall = false;
-
-        if (auto *CB = dyn_cast<CallBase>(Inst)) {
-          if (Function *CalledFn = CB->getCalledFunction()) {
-            StringRef Name = CalledFn->getName();
-            IsAsyncCall = isAsyncMDMPOpName(Name);
-
-            if (isHardBarrierCallName(Name))
-              StopHere = true;
-          }
-        }
-
-        if (!StopHere && !IsAsyncCall) {
-          StopHere =
-	    instructionConflictsWithAnyTrackedBuffer(Inst, Req.Buffers, AA, DL);
-        }
-
-        if (StopHere) {
-          Info.WaitPoints.push_back(Inst);
-          FoundStop = true;
-          break;
-        }
+      if (Instruction *Conflict =
+              findFirstTrueConflictInBlock(BB, State.StartIt, RegionEnd,
+                                           Req.Buffers, AA, MSSA, DL)) {
+        Info.WaitPoints.push_back(Conflict);
+        FoundStop = true;
       }
 
       if (FoundStop)
@@ -482,31 +619,57 @@ PreservedAnalyses MDMPPass::run(Module &M, ModuleAnalysisManager &MAM) {
       AAResults &AA = FAM.getResult<AAManager>(F);
       DominatorTree &DT = FAM.getResult<DominatorTreeAnalysis>(F);
       LoopInfo &LI = FAM.getResult<LoopAnalysis>(F);
+      
       changed |= runOnFunction(F, AA, DT, LI);
     }
   }
+  
+  
   return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }
 
 bool MDMPPass::runOnFunction(Function &F, AAResults &AA, DominatorTree &DT, LoopInfo &LI) {
+                             
   PendingRequests.clear();
+  CompletedRegions.clear();
 
   transformFunctionsToCalls(F, AA, DT, LI);
 
-  if (!PendingRequests.empty()) {
-    LLVMContext &Ctx = F.getContext();
-    Module *M = F.getParent();
+  if (PendingRequests.empty() && CompletedRegions.empty())
+    return true;
 
-    auto SavedRequests = PendingRequests;
+  LLVMContext &Ctx = F.getContext();
+  Module *M = F.getParent();
 
-    injectWaitsForRegion(nullptr, AA, LI, Ctx, M, DT);
+  // Keep a copy for throttled progress injection.
+  std::vector<AsyncRequest> AllRequestsForProgress;
+  for (auto &R : CompletedRegions) {
+    AllRequestsForProgress.insert(AllRequestsForProgress.end(),
+                                  R.Requests.begin(), R.Requests.end());
+  }
+  AllRequestsForProgress.insert(AllRequestsForProgress.end(),
+                                PendingRequests.begin(), PendingRequests.end());
 
-    PendingRequests = std::move(SavedRequests);
-    injectThrottledProgress(F, AA, DT, LI, M);
- 
-    PendingRequests.clear();
+  // Build a fresh MemorySSA on the transformed function.
+  MemorySSA FreshMSSA(F, &AA, &DT);
+
+  for (auto &R : CompletedRegions) {
+    injectWaitsForRegion(R.Requests, R.RegionEnd, AA, LI, Ctx, M, DT, FreshMSSA);
   }
 
+  if (!PendingRequests.empty()) {
+    injectWaitsForRegion(PendingRequests, nullptr, AA, LI, Ctx, M, DT, FreshMSSA);
+  }
+
+
+  
+  // Restore requests only for progress instrumentation.
+  if (!AllRequestsForProgress.empty()) {
+    injectThrottledProgress(AllRequestsForProgress, F, AA, DT, LI, FreshMSSA, M);
+  }
+
+  CompletedRegions.clear();
+  PendingRequests.clear();
   return true;
 }
 
@@ -645,7 +808,7 @@ void MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
 					       {BufferPtr, CountVal, TypeVal, ByteSize, ActorRank, PeerRank, TagVal});
 
 	CI->replaceAllUsesWith(NewCall);
-	hoistInitiation(NewCall, TrackedLocs, AA, DT, LI, isSend);
+	hoistInitiation(NewCall, TrackedLocs, AA, DT);
 	
 	AsyncRequest Req;
 	Req.WaitTokenValue = NewCall;
@@ -741,7 +904,7 @@ void MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
 			     CI->getArgOperand(3),  // type
 			     CI->getArgOperand(4)); // bytes 
 
-	hoistInitiation(NewCall, Locs, AA, DT, LI, false);
+	hoistInitiation(NewCall, Locs, AA, DT);
 
 	CI->replaceAllUsesWith(NewCall);
 	AsyncRequest Req;
@@ -762,7 +925,7 @@ void MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
 			     CI->getArgOperand(2),  // recvbuf
 			     CI->getArgOperand(3),  // type
 			     CI->getArgOperand(4)); // bytes
-	hoistInitiation(NewCall, Locs, AA, DT, LI, false);
+	hoistInitiation(NewCall, Locs, AA, DT);
 
 	CI->replaceAllUsesWith(NewCall);
 	AsyncRequest Req;
@@ -791,7 +954,7 @@ void MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
 	CI->replaceAllUsesWith(NewCall);
 
 	if (Name == "__mdmp_marker_allreduce") {
-	  hoistInitiation(NewCall, Locs, AA, DT, LI, false);
+	  hoistInitiation(NewCall, Locs, AA, DT);
 	  AsyncRequest Req;
 	  Req.WaitTokenValue = NewCall;
 	  Req.StartPoint = NewCall;
@@ -822,7 +985,7 @@ void MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
 	CI->replaceAllUsesWith(NewCall);
 
 	if (Name == "__mdmp_marker_allgather") {
-	  hoistInitiation(NewCall, Locs, AA, DT, LI, false);
+	  hoistInitiation(NewCall, Locs, AA, DT);
 	  AsyncRequest Req;
 	  Req.WaitTokenValue = NewCall;
 	  Req.StartPoint = NewCall;
@@ -857,7 +1020,7 @@ void MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
 	CI->replaceAllUsesWith(NewCall);
 
 	if (Name == "__mdmp_marker_bcast") {
-	  hoistInitiation(NewCall, Locs, AA, DT, LI, false);
+	  hoistInitiation(NewCall, Locs, AA, DT);
 	  AsyncRequest Req;
 	  Req.WaitTokenValue = NewCall;
 	  Req.StartPoint = NewCall;
@@ -870,12 +1033,20 @@ void MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
 	}
 	toDelete.push_back(CI);
 	
-      }      
-      else if (Name == "__mdmp_marker_commregion_end") {
-        CallInst *NewEnd = Builder.CreateCall(runtime_end);
-        injectWaitsForRegion(NewEnd, AA, LI, Ctx, M, DT);
-        toDelete.push_back(CI);
       }
+      else if (Name == "__mdmp_marker_commregion_end") {
+	CallInst *NewEnd = Builder.CreateCall(runtime_end);
+	
+	if (!PendingRequests.empty()) {
+	  CompletedRegion R;
+	  R.RegionEnd = NewEnd;
+	  R.Requests = PendingRequests;
+	  CompletedRegions.push_back(std::move(R));
+	  PendingRequests.clear();
+	}
+	
+	toDelete.push_back(CI);
+      }      
       else if (Name == "__mdmp_marker_get_rank") { CallInst *NewCall = Builder.CreateCall(runtime_get_rank); CI->replaceAllUsesWith(NewCall); toDelete.push_back(CI); }
       else if (Name == "__mdmp_marker_get_size") { CallInst *NewCall = Builder.CreateCall(runtime_get_size); CI->replaceAllUsesWith(NewCall); toDelete.push_back(CI); }
       else if (Name == "__mdmp_marker_init") { Builder.CreateCall(runtime_init); toDelete.push_back(CI); }
@@ -899,10 +1070,7 @@ void MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
   for (Instruction *I : toDelete) I->eraseFromParent();
 }
 
-void MDMPPass::hoistInitiation(CallInst *CI, std::vector<TrackedBuffer> &Buffers, AAResults &AA, DominatorTree &DT, LoopInfo &LI, bool isSend) {
-  (void)LI;
-  (void)isSend;
-
+void MDMPPass::hoistInitiation(CallInst *CI, std::vector<TrackedBuffer> &Buffers, AAResults &AA, DominatorTree &DT) {
   const DataLayout &DL = CI->getModule()->getDataLayout();
 
   Instruction *InsertBefore = CI;
@@ -945,7 +1113,9 @@ void MDMPPass::hoistInitiation(CallInst *CI, std::vector<TrackedBuffer> &Buffers
     if (!operandsAvailableBefore(CI, PredTerm, DT))
       break;
 
-    // Move into the predecessor and continue scanning there.
+    if (isHardMotionBarrier(PredTerm))
+      break;
+
     InsertBefore = PredTerm;
     CurBB = Pred;
   }
@@ -954,12 +1124,8 @@ void MDMPPass::hoistInitiation(CallInst *CI, std::vector<TrackedBuffer> &Buffers
     CI->moveBefore(InsertBefore->getIterator());
 }
 
-void MDMPPass::injectWaitsForRegion(Instruction *RegionEnd,
-                                    AAResults &AA,
-                                    LoopInfo &LI,
-                                    LLVMContext &Ctx,
-                                    Module *M,
-                                    DominatorTree &DT) {
+void MDMPPass::injectWaitsForRegion(ArrayRef<AsyncRequest> Requests, Instruction *RegionEnd, AAResults &AA, LoopInfo &LI, LLVMContext &Ctx, Module *M, DominatorTree &DT, MemorySSA &MSSA) {
+                                    
   IntegerType *I32Ty = Type::getInt32Ty(Ctx);
 
   FunctionCallee runtime_wait =
@@ -971,9 +1137,9 @@ void MDMPPass::injectWaitsForRegion(Instruction *RegionEnd,
 			   PointerType::getUnqual(Ctx),
 			   I32Ty);
 
-  auto Windows = analyseRequestWindows(PendingRequests, RegionEnd, AA, LI, M);
+  auto Windows = analyseRequestWindows(Requests, RegionEnd, AA, LI, MSSA, M);
 
-  MapVector<Instruction *, SmallVector<AsyncRequest *, 8>> GroupedWaits;
+  MapVector<Instruction *, SmallVector<const AsyncRequest *, 8>> GroupedWaits;
 
   for (RequestWindowInfo &Info : Windows) {
     SmallPtrSet<Instruction *, 4> UniqueWaitPoints;
@@ -1020,7 +1186,7 @@ void MDMPPass::injectWaitsForRegion(Instruction *RegionEnd,
   ArrayType *WaitIDsScratchTy = nullptr;
 
   if (MaxBatchSize > 1) {
-    Function *F = PendingRequests.front().StartPoint->getFunction();
+    Function *F = Requests.front().StartPoint->getFunction();
     BasicBlock &EntryBB = F->getEntryBlock();
     IRBuilder<> EntryBuilder(&*EntryBB.getFirstInsertionPt());
 
@@ -1033,10 +1199,10 @@ void MDMPPass::injectWaitsForRegion(Instruction *RegionEnd,
     Instruction *InsertPt = KV.first;
 
     // Optional dedup by token source.
-    SmallVector<AsyncRequest *, 8> UniqueReqs;
+    SmallVector<const AsyncRequest *, 8> UniqueReqs;
     SmallPtrSet<Value *, 8> SeenTokenSources;
 
-    for (AsyncRequest *Req : KV.second) {
+    for (const AsyncRequest *Req : KV.second) {
       Value *Key = Req->WaitTokenValue ? Req->WaitTokenValue
 	: static_cast<Value *>(Req->WaitTokenAlloc);
       if (SeenTokenSources.insert(Key).second)
@@ -1072,13 +1238,12 @@ void MDMPPass::injectWaitsForRegion(Instruction *RegionEnd,
                        {BasePtr, ConstantInt::get(I32Ty, UniqueReqs.size())});
   }
 
-  PendingRequests.clear();
 }
 
 
-void MDMPPass::injectThrottledProgress(Function &F, AAResults &AA, DominatorTree &DT, LoopInfo &LI, Module *M) {
+void MDMPPass::injectThrottledProgress(ArrayRef<AsyncRequest> Requests, Function &F, AAResults &AA, DominatorTree &DT, LoopInfo &LI, MemorySSA &MSSA, Module *M) {
 
-  if (PendingRequests.empty())
+  if (Requests.empty())
     return;
 
   LLVMContext &Ctx = M->getContext();
@@ -1087,7 +1252,7 @@ void MDMPPass::injectThrottledProgress(Function &F, AAResults &AA, DominatorTree
   FunctionCallee runtime_maybe_progress =
     M->getOrInsertFunction("mdmp_maybe_progress", Type::getVoidTy(Ctx));
 
-  auto Windows = analyseRequestWindows(PendingRequests, nullptr, AA, LI, M);
+  auto Windows = analyseRequestWindows(Requests, nullptr, AA, LI, MSSA, M);
   if (Windows.empty())
     return;
 
@@ -1171,32 +1336,32 @@ extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo llvmGetPassPluginIn
     LLVM_PLUGIN_API_VERSION, "MDMP", "v0.3",
     [](PassBuilder &PB) {
       PB.registerPipelineParsingCallback(
-          [](StringRef Name,
-             ModulePassManager &MPM,
-             ArrayRef<PassBuilder::PipelineElement>) {
-            if (Name == "mdmp") {
-	      addMDMPWithCleanupPipeline(MPM);
-              return true;
-            }
-            if (Name == "mdmp-raw") {
-              MPM.addPass(MDMPPass());
-              return true;
-            }
-            return false;
-          });
+					 [](StringRef Name,
+					    ModulePassManager &MPM,
+					    ArrayRef<PassBuilder::PipelineElement>) {
+					   if (Name == "mdmp") {
+					     addMDMPWithCleanupPipeline(MPM);
+					     return true;
+					   }
+					   if (Name == "mdmp-raw") {
+					     MPM.addPass(MDMPPass());
+					     return true;
+					   }
+					   return false;
+					 });
 
       PB.registerOptimizerLastEPCallback(
-          [](ModulePassManager &MPM,
-             OptimizationLevel Level,
-             ThinOrFullLTOPhase Phase) {
-	    addMDMPWithCleanupPipeline(MPM);
-          });
+					 [](ModulePassManager &MPM,
+					    OptimizationLevel Level,
+					    ThinOrFullLTOPhase Phase) {
+					   addMDMPWithCleanupPipeline(MPM);
+					 });
 
       PB.registerFullLinkTimeOptimizationLastEPCallback(
-          [](ModulePassManager &MPM,
-             OptimizationLevel Level) {
-	    addMDMPWithCleanupPipeline(MPM);
-          });
+							[](ModulePassManager &MPM,
+							   OptimizationLevel Level) {
+							  addMDMPWithCleanupPipeline(MPM);
+							});
     }
   };
 }

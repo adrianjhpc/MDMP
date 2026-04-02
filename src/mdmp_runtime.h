@@ -13,6 +13,7 @@
 #include <mutex>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 
 #ifdef __cplusplus
 extern "C" {
@@ -22,6 +23,10 @@ extern "C" {
 #define MDMP_MAX_DECLARATIVE_REQS 1024
 #define MDMP_DECLARATIVE_WAIT -1
 #define MDMP_PROCESS_NOT_INVOLVED -2
+
+constexpr int MDMP_WAIT_MANY_TINY_CUTOFF   = 8;
+constexpr int MDMP_WAIT_MANY_STACK_CUTOFF  = 32;
+constexpr int MDMP_WAIT_MANY_MPI_BATCH_MIN = 16;
   
   void mdmp_init();
   void mdmp_final();
@@ -33,17 +38,28 @@ extern "C" {
   void mdmp_commregion_begin();
   void mdmp_commregion_end();
 
+  void mdmp_check_mpi(int rc, const char *where);
+
+  int mdmp_dedup_ids_linear(const int *ids, int n, int *uniq, int cap);
+  void mdmp_wait_many_sequential_unlocked(const int *uniq, int count);
+  void mdmp_wait_many_imperative_batch_stack_unlocked(const int *uniq, int count);
+  void mdmp_wait_unlocked(int req_id);
+  
+  bool mdmp_any_declarative_requests_active();
+  void mdmp_free_declarative_types_if_all_complete();
+  
   void mdmp_maybe_progress();
   void mdmp_progress();
   void mdmp_finish_declarative_batch();
   
   bool mdmp_has_active_requests(); 
+
+  void mdmp_wait_unlocked(int req_id);
+  void mdmp_wait(int req_id);
   void mdmp_wait_many(const int *ids, int n);
  
   void mdmp_abort(int error_code);
 
-  // Accepts a specific request ID (Imperative) or -1 for a bulk Waitall (Declarative)
-  void mdmp_wait(int req_id);
 
   // ========================================================================
   // Imperative API (Fine-grained, returns individual Request IDs)
@@ -78,6 +94,10 @@ extern "C" {
 #ifdef __cplusplus
 }
 #endif
+
+std::vector<int> blens_buffer;
+std::vector<MPI_Aint> disps_buffer;
+
 
 // Dynamic logging macro
 #define mdmp_log(...) do {			\

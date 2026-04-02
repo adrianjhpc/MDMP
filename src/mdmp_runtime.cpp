@@ -62,6 +62,38 @@ static inline MPI_Op get_mpi_op(int op_code) {
   }
 }
 
+void mdmp_check_mpi(int rc, const char *where) {
+  if (rc == MPI_SUCCESS) return;
+
+  char errstr[MPI_MAX_ERROR_STRING];
+  int len = 0;
+  MPI_Error_string(rc, errstr, &len);
+
+  fprintf(stderr,
+          "[MDMP FATAL] Rank %d: %s failed with MPI error: %.*s\n",
+          global_my_rank, where, len, errstr);
+  mdmp_abort(rc);
+}
+
+bool mdmp_any_declarative_requests_active() {
+  for (int i = 0; i < mdmp_declarative_req_count; ++i) {
+    if (mdmp_declarative_requests[i] != MPI_REQUEST_NULL)
+      return true;
+  }
+  return false;
+}
+
+void mdmp_free_declarative_types_if_all_complete() {
+  if (mdmp_any_declarative_requests_active())
+    return;
+
+  for (int i = 0; i < mdmp_declarative_type_count; ++i) {
+    MPI_Type_free(&mdmp_declarative_types_to_free[i]);
+  }
+  mdmp_declarative_type_count = 0;
+}
+
+
 void mdmp_progress_loop() {
   int flag;
   while (mdmp_runtime_active) {
@@ -112,9 +144,303 @@ void mdmp_maybe_progress() {
   mdmp_progress();
 }
 
-void mdmp_wait_many(const int *ids, int n) {
+
+// Deduplicate IDs while preserving first-seen order.
+// Skips MDMP_PROCESS_NOT_INVOLVED.
+int mdmp_dedup_ids_linear(const int *ids, int n, int *uniq, int cap) {
+  int u = 0;
+
   for (int i = 0; i < n; ++i) {
-    mdmp_wait(ids[i]);
+    int id = ids[i];
+    if (id == MDMP_PROCESS_NOT_INVOLVED)
+      continue;
+
+    bool seen = false;
+    for (int j = 0; j < u; ++j) {
+      if (uniq[j] == id) {
+        seen = true;
+        break;
+      }
+    }
+
+    if (!seen) {
+      if (u >= cap) {
+        fprintf(stderr,
+                "[MDMP FATAL] mdmp_dedup_ids_linear capacity exceeded "
+                "(cap=%d, n=%d)\n",
+                cap, n);
+        mdmp_abort(1);
+      }
+      uniq[u++] = id;
+    }
+  }
+
+  return u;
+}
+
+void mdmp_wait_many_sequential_unlocked(const int *uniq, int count) {
+  for (int i = 0; i < count; ++i) {
+    mdmp_wait_unlocked(uniq[i]);
+  }
+}
+
+// Stack-only imperative batch path for moderate-size imperative-only groups.
+void mdmp_wait_many_imperative_batch_stack_unlocked(const int *uniq, int count) {
+
+  MPI_Request batch[MDMP_WAIT_MANY_STACK_CUTOFF];
+  int slots[MDMP_WAIT_MANY_STACK_CUTOFF];
+  int active = 0;
+
+  for (int i = 0; i < count; ++i) {
+    int id = uniq[i];
+
+    if (id < 0 || id >= MDMP_MAX_REQUESTS) {
+      fprintf(stderr,
+              "[MDMP Runtime Error] Invalid imperative request ID in "
+              "mdmp_wait_many stack batch: %d\n",
+              id);
+      mdmp_abort(1);
+    }
+
+    if (mdmp_request_pool[id] != MPI_REQUEST_NULL) {
+      slots[active] = id;
+      batch[active] = mdmp_request_pool[id];
+      ++active;
+    }
+  }
+
+  if (active == 0)
+    return;
+
+  if (active == 1) {
+    mdmp_wait_unlocked(slots[0]);
+    return;
+  }
+
+  mdmp_check_mpi(
+      MPI_Waitall(active, batch, MPI_STATUSES_IGNORE),
+      "MPI_Waitall(imperative stack batch)");
+
+  for (int i = 0; i < active; ++i) {
+    mdmp_request_pool[slots[i]] = MPI_REQUEST_NULL;
+  }
+}
+
+void mdmp_wait_unlocked(int req_id) {
+  if (req_id == MDMP_PROCESS_NOT_INVOLVED)
+    return;
+
+  // 1. Specific declarative request
+  if (req_id >= MDMP_MAX_REQUESTS && req_id != MDMP_DECLARATIVE_WAIT) {
+    int decl_idx = req_id - MDMP_MAX_REQUESTS;
+
+    auto it = decl_to_mpi_req.find(decl_idx);
+    if (it != decl_to_mpi_req.end()) {
+      int mpi_idx = it->second;
+
+      if (mpi_idx >= 0 &&
+          mpi_idx < MDMP_MAX_DECLARATIVE_REQS &&
+          mdmp_declarative_requests[mpi_idx] != MPI_REQUEST_NULL) {
+        mdmp_check_mpi(
+		       MPI_Wait(&mdmp_declarative_requests[mpi_idx], MPI_STATUS_IGNORE),
+		       "MPI_Wait(declarative)");
+        mdmp_declarative_requests[mpi_idx] = MPI_REQUEST_NULL;
+        mdmp_free_declarative_types_if_all_complete();
+      }
+    } else if (mdmp_debug_enabled) {
+      fprintf(stderr,
+              "[MDMP Warning] Rank %d: unknown declarative request ID %d\n",
+              global_my_rank, req_id);
+    }
+    return;
+  }
+
+  // 2. Imperative request
+  if (req_id >= 0 && req_id < MDMP_MAX_REQUESTS) {
+    if (mdmp_request_pool[req_id] != MPI_REQUEST_NULL) {
+      mdmp_check_mpi(
+		     MPI_Wait(&mdmp_request_pool[req_id], MPI_STATUS_IGNORE),
+		     "MPI_Wait(imperative)");
+      mdmp_request_pool[req_id] = MPI_REQUEST_NULL;
+    }
+    return;
+  }
+
+  // 3. Full declarative waitall
+  if (req_id == MDMP_DECLARATIVE_WAIT) {
+    if (mdmp_declarative_req_count > 0) {
+      mdmp_check_mpi(
+		     MPI_Waitall(mdmp_declarative_req_count,
+				 mdmp_declarative_requests,
+				 MPI_STATUSES_IGNORE),
+		     "MPI_Waitall(declarative)");
+
+      for (int i = 0; i < mdmp_declarative_req_count; ++i) {
+        mdmp_declarative_requests[i] = MPI_REQUEST_NULL;
+      }
+    }
+
+    for (int i = 0; i < mdmp_declarative_type_count; ++i) {
+      MPI_Type_free(&mdmp_declarative_types_to_free[i]);
+    }
+    mdmp_declarative_type_count = 0;
+    return;
+  }
+
+  fprintf(stderr, "[MDMP Runtime Error] Invalid Request ID: %d\n", req_id);
+  mdmp_abort(1);
+}
+
+void mdmp_wait(int req_id) {
+  std::unique_lock<std::mutex> lock(mdmp_mpi_mutex, std::defer_lock);
+  if (mdmp_runtime_active)
+    lock.lock();
+
+  mdmp_wait_unlocked(req_id);
+}
+
+void mdmp_wait_many(const int *ids, int n) {
+  if (ids == nullptr || n <= 0)
+    return;
+
+  std::unique_lock<std::mutex> lock(mdmp_mpi_mutex, std::defer_lock);
+  if (mdmp_runtime_active)
+    lock.lock();
+
+  // ------------------------------------------------------------
+  // 1. Tiny hot-path: fixed-array dedup + sequential waits
+  // ------------------------------------------------------------
+  if (n <= MDMP_WAIT_MANY_TINY_CUTOFF) {
+    int uniq[MDMP_WAIT_MANY_TINY_CUTOFF];
+    int u = mdmp_dedup_ids_linear(ids, n, uniq, MDMP_WAIT_MANY_TINY_CUTOFF);
+    mdmp_wait_many_sequential_unlocked(uniq, u);
+    return;
+  }
+
+  // ------------------------------------------------------------
+  // 2. Check whether this is an imperative-only batch
+  //    (ignoring PROCESS_NOT_INVOLVED).
+  // ------------------------------------------------------------
+  bool imperative_only = true;
+
+  for (int i = 0; i < n; ++i) {
+    int id = ids[i];
+    if (id == MDMP_PROCESS_NOT_INVOLVED)
+      continue;
+
+    if (id < 0 || id >= MDMP_MAX_REQUESTS) {
+      imperative_only = false;
+      break;
+    }
+  }
+
+  // ------------------------------------------------------------
+  // 3. Mixed or declarative-containing batch:
+  //    keep it simple and cheap, preserving current semantics.
+  // ------------------------------------------------------------
+  if (!imperative_only) {
+    if (n <= MDMP_WAIT_MANY_STACK_CUTOFF) {
+      int uniq[MDMP_WAIT_MANY_STACK_CUTOFF];
+      int u = mdmp_dedup_ids_linear(ids, n, uniq, MDMP_WAIT_MANY_STACK_CUTOFF);
+      mdmp_wait_many_sequential_unlocked(uniq, u);
+      return;
+    }
+
+    // Rare fallback path for large mixed/declarative batches.
+    // Preserve order, keep logic simple; this is not the hot path.
+    std::vector<int> uniq;
+    uniq.reserve(n);
+
+    for (int i = 0; i < n; ++i) {
+      int id = ids[i];
+      if (id == MDMP_PROCESS_NOT_INVOLVED)
+        continue;
+
+      bool seen = false;
+      for (int x : uniq) {
+        if (x == id) {
+          seen = true;
+          break;
+        }
+      }
+
+      if (!seen)
+        uniq.push_back(id);
+    }
+
+    for (int id : uniq)
+      mdmp_wait_unlocked(id);
+
+    return;
+  }
+
+  // ------------------------------------------------------------
+  // 4. Imperative-only batch
+  // ------------------------------------------------------------
+
+  // 4a. Medium-size imperative-only batch: stack dedup.
+  if (n <= MDMP_WAIT_MANY_STACK_CUTOFF) {
+    int uniq[MDMP_WAIT_MANY_STACK_CUTOFF];
+    int u = mdmp_dedup_ids_linear(ids, n, uniq, MDMP_WAIT_MANY_STACK_CUTOFF);
+
+    // For small unique counts, sequential is cheaper than setting up Waitall.
+    if (u < MDMP_WAIT_MANY_MPI_BATCH_MIN) {
+      mdmp_wait_many_sequential_unlocked(uniq, u);
+      return;
+    }
+
+    mdmp_wait_many_imperative_batch_stack_unlocked(uniq, u);
+    return;
+  }
+
+  // 4b. Large imperative-only batch: dedup via bitmap, then MPI_Waitall.
+  std::vector<unsigned char> seen(MDMP_MAX_REQUESTS, 0);
+  std::vector<int> uniq;
+  uniq.reserve((n < MDMP_MAX_REQUESTS) ? n : MDMP_MAX_REQUESTS);
+
+  for (int i = 0; i < n; ++i) {
+    int id = ids[i];
+    if (id == MDMP_PROCESS_NOT_INVOLVED)
+      continue;
+
+    if (!seen[id]) {
+      seen[id] = 1;
+      uniq.push_back(id);
+    }
+  }
+
+  if ((int)uniq.size() < MDMP_WAIT_MANY_MPI_BATCH_MIN) {
+    for (int id : uniq)
+      mdmp_wait_unlocked(id);
+    return;
+  }
+
+  std::vector<MPI_Request> batch;
+  std::vector<int> activeSlots;
+  batch.reserve(uniq.size());
+  activeSlots.reserve(uniq.size());
+
+  for (int id : uniq) {
+    if (mdmp_request_pool[id] != MPI_REQUEST_NULL) {
+      activeSlots.push_back(id);
+      batch.push_back(mdmp_request_pool[id]);
+    }
+  }
+
+  if (batch.empty())
+    return;
+
+  if (batch.size() == 1) {
+    mdmp_wait_unlocked(activeSlots[0]);
+    return;
+  }
+
+  mdmp_check_mpi(
+      MPI_Waitall((int)batch.size(), batch.data(), MPI_STATUSES_IGNORE),
+      "MPI_Waitall(imperative heap batch)");
+
+  for (int id : activeSlots) {
+    mdmp_request_pool[id] = MPI_REQUEST_NULL;
   }
 }
 
@@ -190,49 +516,6 @@ void mdmp_abort(int error_code) {
   fprintf(stderr, "[MDMP FATAL] Rank %d called ABORT with error code %d. Terminating...\n", global_my_rank, error_code);
   fflush(stderr);
   MPI_Abort(mdmp_comm, error_code);
-}
-
-// ==============================================================================
-// Updated Wait Router 
-// ==============================================================================
-void mdmp_wait(int req_id) {
-  if (req_id == MDMP_PROCESS_NOT_INVOLVED) return;
-
-  // 1. Specific Declarative Requests (Unbounded ID lookup)
-  if (req_id >= MDMP_MAX_REQUESTS && req_id != MDMP_DECLARATIVE_WAIT) {
-    int decl_idx = req_id - MDMP_MAX_REQUESTS;
-    
-    auto it = decl_to_mpi_req.find(decl_idx);
-    if (it != decl_to_mpi_req.end()) {
-      int mpi_idx = it->second;
-      if (mpi_idx >= 0 && mdmp_declarative_requests[mpi_idx] != MPI_REQUEST_NULL) {
-        MPI_Wait(&mdmp_declarative_requests[mpi_idx], MPI_STATUS_IGNORE);
-        mdmp_declarative_requests[mpi_idx] = MPI_REQUEST_NULL;
-      }
-    } else {
-
-      if (mdmp_debug_enabled) {
-        fprintf(stderr, "[MDMP Warning] Unknown declarative request id %d on rank %d\n",
-                req_id, global_my_rank);
-         mdmp_abort(1);
-      }
-
-    }
-  } 
-  // 2. Imperative Ring Buffer Wait 
-  else if (req_id >= 0 && req_id < MDMP_MAX_REQUESTS) {
-    if (mdmp_request_pool[req_id] != MPI_REQUEST_NULL) {
-      MPI_Wait(&mdmp_request_pool[req_id], MPI_STATUS_IGNORE);
-    }
-  }
-  // 3. Monolithic Waitall (Legacy support)
-  else if (req_id == MDMP_DECLARATIVE_WAIT) {
-    mdmp_finish_declarative_batch();
-  }
-  else {
-    fprintf(stderr, "[MDMP Runtime Error] Invalid Request ID: %d\n", req_id);
-    mdmp_abort(1);
-  }
 }
 
 // ==============================================================================
@@ -394,9 +677,6 @@ void mdmp_finish_declarative_batch() {
 int mdmp_commit() {
   
   mdmp_finish_declarative_batch();
-
-  static std::vector<int> blens_buffer;
-  static std::vector<MPI_Aint> disps_buffer;
     
   auto ProcessQueue = [&](std::vector<RegisteredMsg>& queue, bool isSend) {     
     if (queue.empty()) return;

@@ -14,7 +14,8 @@
 #include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/Analysis/MemoryLocation.h"
 #include "llvm/Analysis/LoopInfo.h"
-#include "llvm/Analysis/ValueTracking.h" 
+#include "llvm/Analysis/ValueTracking.h"
+#include "llvm/Analysis/MemorySSA.h"
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
@@ -54,6 +55,11 @@ namespace llvm {
       llvm::CallInst *StartPoint = nullptr;       // Where the request goes in flight
       std::vector<TrackedBuffer> Buffers;
     };
+
+    struct CompletedRegion {
+      llvm::Instruction *RegionEnd = nullptr;
+      std::vector<AsyncRequest> Requests;
+    };
     
     struct TraversalState {
       BasicBlock *BB;
@@ -61,16 +67,34 @@ namespace llvm {
     };
 
     struct RequestWindowInfo {
-      AsyncRequest *Req = nullptr;
+      const AsyncRequest *Req = nullptr;
       SmallVector<Instruction *, 4> WaitPoints;
       SmallPtrSet<BasicBlock *, 32> LiveBlocks;
     };        
     
   private:
 
+    std::vector<CompletedRegion> CompletedRegions;    
+
+    bool isHardBarrierInstForWaitPlacement(Instruction *Inst);
+
+    bool isAsyncMDMPInstForWaitPlacement(Instruction *Inst);
+
+    bool instructionIsTrueConsumerOrClobber(Instruction *I, const TrackedBuffer &Buf, AAResults &AA, MemorySSA &MSSA, const DataLayout &DL);
+
+    bool instructionTouchesAnyTrackedBufferPhase2(Instruction *I, ArrayRef<TrackedBuffer> Buffers, AAResults &AA, MemorySSA &MSSA, const DataLayout &DL);
+
+    Instruction *findFirstTrueConflictInBlock(BasicBlock *BB, BasicBlock::iterator StartIt, Instruction *RegionEnd, ArrayRef<TrackedBuffer> Buffers, AAResults &AA, MemorySSA &MSSA, const DataLayout &DL);
+    
+    bool isIgnorableIntrinsicForMDMP(Instruction *I);
+
+    bool instructionConflictsWithTrackedBufferMSSA(Instruction *I, const TrackedBuffer &Buf, AAResults &AA, MemorySSA &MSSA, const DataLayout &DL);
+
+    bool instructionConflictsWithAnyTrackedBufferMSSA(Instruction *I, ArrayRef<TrackedBuffer> Buffers, AAResults &AA, MemorySSA &MSSA, const DataLayout &DL);
+    
     bool waitTokenValueDominates(Value *V, Instruction *InsertPt, DominatorTree &DT);
     
-    Value *materialiseWaitTokenForUse(AsyncRequest &Req, Instruction *InsertPt, IntegerType *I32Ty, IRBuilder<> &Builder, DominatorTree &DT);
+    Value *materialiseWaitTokenForUse(const AsyncRequest &Req, Instruction *InsertPt, IntegerType *I32Ty, IRBuilder<> &Builder, DominatorTree &DT);
     
     bool isAsyncMDMPOpName(StringRef FnName);
 
@@ -82,7 +106,7 @@ namespace llvm {
 
     bool requestWindowCoversLoopHeader(const RequestWindowInfo &Info, Loop *L, DominatorTree &DT);
 
-    SmallVector<RequestWindowInfo, 8> analyseRequestWindows(std::vector<AsyncRequest> &Requests, Instruction *RegionEnd, AAResults &AA, LoopInfo &LI, Module *M);
+    SmallVector<RequestWindowInfo, 8> analyseRequestWindows(ArrayRef<AsyncRequest> &Requests, Instruction *RegionEnd, AAResults &AA, LoopInfo &LI, MemorySSA &MSSA, Module *M);
     
     // Global tracker for the current function being processed
     std::vector<AsyncRequest> PendingRequests;
@@ -151,24 +175,24 @@ namespace llvm {
 
     std::vector<TrackedBuffer> buildBcastBuffers(Value *Buf, Value *Count,
 						 Value *Type, Value *Bytes);
-    
+
     // Core function processor requiring Alias, Dominator, and Loop analyses
     bool runOnFunction(Function &F, AAResults &AA, DominatorTree &DT, LoopInfo &LI);
-    
+		       
+
     // Translates user markers to either Imperative (Send/Recv) or Declarative (Commit) calls
     void transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTree &DT, LoopInfo &LI);
-    
+				   
+
     // Accepts a vector of MemoryLocations to safely hoist 
     // collectives and declarative bulk-commits without breaking data dependencies.
-    void hoistInitiation(CallInst *CI, std::vector<TrackedBuffer> &Locs, 
-                         AAResults &AA, DominatorTree &DT, LoopInfo &LI, bool isSend);
-    
-    // FG Traversal Engine: Uses LoopInfo to prevent "Inner-Loop Poisoning" 
-    // by ensuring waits are safely dropped at the loop preheader/terminator boundaries.
-    void injectWaitsForRegion(Instruction *RegionEnd, AAResults &AA, LoopInfo &LI, 
-                              LLVMContext &Ctx, Module *M, DominatorTree &DT);
+    void hoistInitiation(CallInst *CI, std::vector<TrackedBuffer> &Locs, AAResults &AA, DominatorTree &DT);
 
-    void injectThrottledProgress(Function &F, AAResults &AA, DominatorTree &DT, LoopInfo &LI, Module *M);
+    // FG Traversal Engine: Uses LoopInfo to prevent "Inner-Loop Poisoning" 
+    // by ensuring waits are safely dropped at the loop preheader/terminator boundaries.    
+    void injectWaitsForRegion(ArrayRef<AsyncRequest> Requests, Instruction *RegionEnd, AAResults &AA, LoopInfo &LI, LLVMContext &Ctx, Module *M, DominatorTree &DT, MemorySSA &MSSA);
+    
+    void injectThrottledProgress(ArrayRef<AsyncRequest> Requests, Function &F, AAResults &AA, DominatorTree &DT, LoopInfo &LI, MemorySSA &MSSA, Module *M);
 
   };
 
