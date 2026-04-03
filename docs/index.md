@@ -174,7 +174,7 @@ In some applications, especially highly compute-heavy kernels with very small me
 
 ## Next steps
 
- - See (Getting Started)[Getting Started# for build and compile instructions
+ - See [Getting Started](getting-started.md) for build and compile instructions
  - See Imperative MDMP for point-to-point and collective usage
  - See Declarative MDMP for communication regions and batching
  - See Performance Notes for tuning advice and expected behavior
