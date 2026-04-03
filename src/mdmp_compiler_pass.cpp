@@ -54,12 +54,13 @@ bool MDMPPass::requestWindowSuggestsCallSiteProgressRelaxed(const RequestWindowI
   if (!DT.dominates(Info.Req->StartPoint, Inst))
     return false;
 
-  // If we are already in a known live block, this is an obvious candidate.
+  // If this instruction is already in a known live block, it is an obvious
+  // candidate for a progress poke.
   if (Info.LiveBlocks.contains(Inst->getParent()))
     return true;
 
-  // If there are no known wait points yet, any substantial call after the
-  // request start is a reasonable fallback place to poke progress.
+  // If we have no known wait points, any substantial call after the request
+  // start is a reasonable fallback.
   if (Info.WaitPoints.empty())
     return true;
 
@@ -70,8 +71,8 @@ bool MDMPPass::requestWindowSuggestsCallSiteProgressRelaxed(const RequestWindowI
         return true;
     }
 
-    // If this call dominates a later wait, then it lies on a path where
-    // communication is still plausibly in flight.
+    // If this call dominates a later wait, then it lies on a path where the
+    // request is still plausibly in flight.
     if (DT.dominates(Inst, WP))
       return true;
   }
@@ -112,7 +113,8 @@ bool MDMPPass::isCandidateCallForProgress(Instruction *Inst) {
       return false;
   }
 
-  // For now, treat most remaining calls as nontrivial fallback candidates.
+  // For now, treat most remaining calls as substantial enough to be useful
+  // fallback progress points.
   return true;
 }
 
@@ -1626,7 +1628,7 @@ void MDMPPass::injectThrottledProgress(ArrayRef<AsyncRequest> Requests,
   }
 
   // ------------------------------------------------------------
-  // Stage 3: call-site fallback if no loop-based site was inserted
+  // Stage 3: callsite fallback if no loop-based site was inserted
   // ------------------------------------------------------------
   if ((NumExactLeafInserted + NumRelaxedLeafInserted +
        NumExactOuterInserted + NumRelaxedOuterInserted) == 0) {
@@ -1653,7 +1655,7 @@ void MDMPPass::injectThrottledProgress(ArrayRef<AsyncRequest> Requests,
       if (!Match)
         continue;
 
-      // Avoid spamming one block with multiple fallback sites.
+      // Avoid spamming one block with multiple fallback progress sites.
       if (!CallsiteBlocksUsed.insert(CallI->getParent()).second)
         continue;
 
@@ -1675,6 +1677,7 @@ void MDMPPass::injectThrottledProgress(ArrayRef<AsyncRequest> Requests,
            << "\n";
   }
 }
+
 
 static void addMDMPWithCleanupPipeline(ModulePassManager &MPM) {
   MPM.addPass(MDMPPass());
