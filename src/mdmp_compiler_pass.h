@@ -106,7 +106,11 @@ namespace llvm {
 
     bool requestWindowCoversLoopHeader(const RequestWindowInfo &Info, Loop *L, DominatorTree &DT);
 
-    SmallVector<RequestWindowInfo, 8> analyseRequestWindows(ArrayRef<AsyncRequest> &Requests, Instruction *RegionEnd, AAResults &AA, LoopInfo &LI, MemorySSA &MSSA, Module *M);
+    bool loopMayConflictWithTrackedBuffers(Loop *L, ArrayRef<TrackedBuffer> Buffers, AAResults &AA, MemorySSA &MSSA, const DataLayout &DL);
+
+    bool shouldForceWaitAtLoopBackedge(Loop *EdgeLoop, Loop *ReqLoop, ArrayRef<TrackedBuffer> Buffers, AAResults &AA, MemorySSA &MSSA, const DataLayout &DL);
+    
+    SmallVector<RequestWindowInfo, 8> analyseRequestWindows(ArrayRef<AsyncRequest> Requests, Instruction *RegionEnd, AAResults &AA, LoopInfo &LI, MemorySSA &MSSA, Module *M);
     
     // Global tracker for the current function being processed
     std::vector<AsyncRequest> PendingRequests;
@@ -181,7 +185,7 @@ namespace llvm {
 		       
 
     // Translates user markers to either Imperative (Send/Recv) or Declarative (Commit) calls
-    void transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTree &DT, LoopInfo &LI);
+    bool transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTree &DT, LoopInfo &LI);
 				   
 
     // Accepts a vector of MemoryLocations to safely hoist 

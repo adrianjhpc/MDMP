@@ -278,7 +278,64 @@ bool MDMPPass::requestWindowCoversLoopHeader(const RequestWindowInfo &Info, Loop
   return DT.dominates(Info.Req->StartPoint, HeaderIP);
 }
 
-SmallVector<MDMPPass::RequestWindowInfo, 8> MDMPPass::analyseRequestWindows(ArrayRef<AsyncRequest> &Requests, Instruction *RegionEnd, AAResults &AA, LoopInfo &LI, MemorySSA &MSSA, Module *M) {                      
+bool MDMPPass::loopMayConflictWithTrackedBuffers(Loop *L,
+                                                 ArrayRef<TrackedBuffer> Buffers,
+                                                 AAResults &AA,
+                                                 MemorySSA &MSSA,
+                                                 const DataLayout &DL) {
+  if (!L)
+    return true;
+
+  for (BasicBlock *LoopBB : L->getBlocksVector()) {
+    for (Instruction &I : *LoopBB) {
+      Instruction *Inst = &I;
+
+      if (!Inst->mayReadOrWriteMemory())
+        continue;
+
+      if (isIgnorableIntrinsicForMDMP(Inst))
+        continue;
+
+      // Other async MDMP ops do not, by themselves, force this request to stop.
+      if (isAsyncMDMPInstForWaitPlacement(Inst))
+        continue;
+
+      // Any hard barrier inside the loop means we should not carry the request
+      // around the backedge.
+      if (isHardBarrierInstForWaitPlacement(Inst))
+        return true;
+
+      if (instructionTouchesAnyTrackedBufferPhase2(Inst, Buffers, AA, MSSA, DL))
+        return true;
+    }
+  }
+
+  return false;
+}
+
+bool MDMPPass::shouldForceWaitAtLoopBackedge(Loop *EdgeLoop,
+                                             Loop *ReqLoop,
+                                             ArrayRef<TrackedBuffer> Buffers,
+                                             AAResults &AA,
+                                             MemorySSA &MSSA,
+                                             const DataLayout &DL) {
+  if (!EdgeLoop)
+    return false;
+
+  // Never carry requests across iterations of the loop that issued them,
+  // or any enclosing parent loop around that issuing loop.
+  for (Loop *L = ReqLoop; L; L = L->getParentLoop()) {
+    if (L == EdgeLoop)
+      return true;
+  }
+
+  // Otherwise, only force a wait if the loop body can actually consume/clobber
+  // one of the tracked buffers.
+  return loopMayConflictWithTrackedBuffers(EdgeLoop, Buffers, AA, MSSA, DL);
+}
+
+
+SmallVector<MDMPPass::RequestWindowInfo, 8> MDMPPass::analyseRequestWindows(ArrayRef<AsyncRequest> Requests, Instruction *RegionEnd, AAResults &AA, LoopInfo &LI, MemorySSA &MSSA, Module *M) {                      
 
   const DataLayout &DL = M->getDataLayout();
   SmallVector<RequestWindowInfo, 8> Infos;
@@ -314,8 +371,8 @@ SmallVector<MDMPPass::RequestWindowInfo, 8> MDMPPass::analyseRequestWindows(Arra
 
       bool FoundStop = false;
       if (Instruction *Conflict =
-              findFirstTrueConflictInBlock(BB, State.StartIt, RegionEnd,
-                                           Req.Buffers, AA, MSSA, DL)) {
+	  findFirstTrueConflictInBlock(BB, State.StartIt, RegionEnd,
+				       Req.Buffers, AA, MSSA, DL)) {
         Info.WaitPoints.push_back(Conflict);
         FoundStop = true;
       }
@@ -339,8 +396,9 @@ SmallVector<MDMPPass::RequestWindowInfo, 8> MDMPPass::analyseRequestWindows(Arra
           EdgeLoop = EdgeLoop->getParentLoop();
         }
 
-        if (IsBackedge && EdgeLoop) {
-          if (!ReqLoop || EdgeLoop == ReqLoop || EdgeLoop->contains(ReqLoop)) {
+	if (IsBackedge && EdgeLoop) {
+          if (shouldForceWaitAtLoopBackedge(EdgeLoop, ReqLoop,
+                                            Req.Buffers, AA, MSSA, DL)) {
             Info.WaitPoints.push_back(BB->getTerminator());
             continue;
           }
@@ -629,14 +687,13 @@ PreservedAnalyses MDMPPass::run(Module &M, ModuleAnalysisManager &MAM) {
 }
 
 bool MDMPPass::runOnFunction(Function &F, AAResults &AA, DominatorTree &DT, LoopInfo &LI) {
-                             
   PendingRequests.clear();
   CompletedRegions.clear();
 
-  transformFunctionsToCalls(F, AA, DT, LI);
+  bool Changed = transformFunctionsToCalls(F, AA, DT, LI);
 
   if (PendingRequests.empty() && CompletedRegions.empty())
-    return true;
+    return Changed;
 
   LLVMContext &Ctx = F.getContext();
   Module *M = F.getParent();
@@ -661,19 +718,16 @@ bool MDMPPass::runOnFunction(Function &F, AAResults &AA, DominatorTree &DT, Loop
     injectWaitsForRegion(PendingRequests, nullptr, AA, LI, Ctx, M, DT, FreshMSSA);
   }
 
-
-  
-  // Restore requests only for progress instrumentation.
   if (!AllRequestsForProgress.empty()) {
     injectThrottledProgress(AllRequestsForProgress, F, AA, DT, LI, FreshMSSA, M);
   }
 
   CompletedRegions.clear();
   PendingRequests.clear();
-  return true;
+  return Changed;
 }
 
-void MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTree &DT, LoopInfo &LI) {
+bool MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTree &DT, LoopInfo &LI) {
   Module *M = F.getParent();
   LLVMContext &Ctx = M->getContext();
 
@@ -770,6 +824,7 @@ void MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
   };
 
   std::vector<Instruction*> toDelete;
+  bool Changed = false;
   struct DeclarativePendingOp {
     Value *WaitTokenValue;
     AllocaInst *WaitTokenAlloc;
@@ -788,12 +843,14 @@ void MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
       IRBuilder<> Builder(CI);
 
       if (Name == "__mdmp_marker_commregion_begin") {
+	Changed= true;
         CallInst *NewCall = Builder.CreateCall(runtime_begin);
         CI->replaceAllUsesWith(NewCall);
         ActiveDeclarativeLocs.clear(); 
         toDelete.push_back(CI);
       }
       else if (Name == "__mdmp_marker_send" || Name == "__mdmp_marker_recv") {
+	Changed= true;
         Value *BufferPtr = CI->getArgOperand(0);
         Value *CountVal  = CI->getArgOperand(1);
         Value *TypeVal   = CI->getArgOperand(2);
@@ -818,6 +875,7 @@ void MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
         toDelete.push_back(CI);
       } 
       else if (Name == "__mdmp_marker_register_send" || Name == "__mdmp_marker_register_recv") {
+	Changed= true;
         Value *BufferPtr = CI->getArgOperand(0);
         Value *CountVal  = CI->getArgOperand(1);
         Value *TypeVal   = CI->getArgOperand(2);
@@ -839,6 +897,7 @@ void MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
         toDelete.push_back(CI);
       }
       else if (Name == "__mdmp_marker_register_reduce") {
+	Changed= true;
         Value *InBuf = CI->getArgOperand(0); Value *OutBuf = CI->getArgOperand(1);
         Value *ByteSize = CI->getArgOperand(4); 
 
@@ -857,6 +916,7 @@ void MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
         toDelete.push_back(CI);
       }
       else if (Name == "__mdmp_marker_register_gather") {
+	Changed= true;
         Value *SendBuf = CI->getArgOperand(0); Value *RecvBuf = CI->getArgOperand(2);
         Value *ByteSize = CI->getArgOperand(4); 
 
@@ -874,26 +934,48 @@ void MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
 	CI->replaceAllUsesWith(NewCall);
 	ActiveDeclarativeLocs.push_back({NewCall, ReqAlloc, TrackedLocs});
 	toDelete.push_back(CI);
-      } 
+      }
       else if (Name == "__mdmp_marker_commit") {
+	Changed= true;
         CallInst *NewCommit = Builder.CreateCall(runtime_commit);
         CI->replaceAllUsesWith(NewCommit);
-                
-        // Safely map the stack variables to the JIT Tracking array
-	for (auto &Op : ActiveDeclarativeLocs) {
-	  AsyncRequest Req;
-	  Req.WaitTokenValue = Op.WaitTokenValue;
-	  Req.WaitTokenAlloc = Op.WaitTokenAlloc;
-	  Req.StartPoint = NewCommit;
-	  Req.Buffers = Op.Buffers;
-	  PendingRequests.push_back(std::move(Req));
-	}
 
-                
-        ActiveDeclarativeLocs.clear(); 
+        // Build the full mixed hazard set for this declarative batch so commit
+        // can be hoisted safely across unrelated computation, but never across:
+        //   - overlapping writes to send-like buffers
+        //   - overlapping reads/writes to recv-like buffers
+        //   - earlier mdmp_register_* calls or other hard barriers
+        std::vector<TrackedBuffer> CommitBuffers;
+        size_t TotalTracked = 0;
+        for (auto &Op : ActiveDeclarativeLocs)
+          TotalTracked += Op.Buffers.size();
+
+        CommitBuffers.reserve(TotalTracked);
+        for (auto &Op : ActiveDeclarativeLocs) {
+          CommitBuffers.insert(CommitBuffers.end(),
+                               Op.Buffers.begin(), Op.Buffers.end());
+        }
+
+        if (!CommitBuffers.empty()) {
+          hoistInitiation(NewCommit, CommitBuffers, AA, DT);
+        }
+
+        // Each registered declarative op becomes an async request that starts
+        // at the (possibly hoisted) commit point.
+        for (auto &Op : ActiveDeclarativeLocs) {
+          AsyncRequest Req;
+          Req.WaitTokenValue = Op.WaitTokenValue;
+          Req.WaitTokenAlloc = Op.WaitTokenAlloc;
+          Req.StartPoint = NewCommit;
+          Req.Buffers = Op.Buffers;
+          PendingRequests.push_back(std::move(Req));
+        }
+
+        ActiveDeclarativeLocs.clear();
         toDelete.push_back(CI);
       }
       else if (Name == "__mdmp_marker_reduce") {
+	Changed= true;
         CallInst *NewCall = Builder.CreateCall(runtime_reduce, 
 					       {CI->getArgOperand(0), CI->getArgOperand(1), CI->getArgOperand(2), CI->getArgOperand(3), CI->getArgOperand(4), CI->getArgOperand(5), CI->getArgOperand(6)});
        
@@ -937,104 +1019,97 @@ void MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
         toDelete.push_back(CI);
       }
       else if (Name == "__mdmp_marker_allreduce" || Name == "__mdmp_marker_register_allreduce") {
+	Changed= true;
         FunctionCallee target_func = (Name == "__mdmp_marker_allreduce") ? runtime_allreduce : runtime_register_allreduce;
-        CallInst *NewCall = Builder.CreateCall(target_func, 
-					       {CI->getArgOperand(0), CI->getArgOperand(1), CI->getArgOperand(2), CI->getArgOperand(3), CI->getArgOperand(4), CI->getArgOperand(5)});
-                
+        CallInst *NewCall = Builder.CreateCall(target_func,
+                                               {CI->getArgOperand(0), CI->getArgOperand(1), CI->getArgOperand(2), CI->getArgOperand(3), CI->getArgOperand(4), CI->getArgOperand(5)});
+
         std::vector<TrackedBuffer> Locs =
-	  buildAllreduceBuffers(CI->getArgOperand(0),  // sendbuf
-				CI->getArgOperand(1),  // recvbuf
-				CI->getArgOperand(2),  // count
-				CI->getArgOperand(3),  // type
-				CI->getArgOperand(4)); // bytes
-        
-        AllocaInst *ReqAlloc = CreateSafeAlloc();
-        Builder.CreateStore(NewCall, ReqAlloc);
+          buildAllreduceBuffers(CI->getArgOperand(0),  // sendbuf
+                                CI->getArgOperand(1),  // recvbuf
+                                CI->getArgOperand(2),  // count
+                                CI->getArgOperand(3),  // type
+                                CI->getArgOperand(4)); // bytes
 
-	CI->replaceAllUsesWith(NewCall);
+        CI->replaceAllUsesWith(NewCall);
 
-	if (Name == "__mdmp_marker_allreduce") {
-	  hoistInitiation(NewCall, Locs, AA, DT);
-	  AsyncRequest Req;
-	  Req.WaitTokenValue = NewCall;
-	  Req.StartPoint = NewCall;
-	  Req.Buffers = Locs;
-	  PendingRequests.push_back(std::move(Req));
-	} else {
-	  AllocaInst *ReqAlloc = CreateSafeAlloc();
-	  Builder.CreateStore(NewCall, ReqAlloc);
-	  ActiveDeclarativeLocs.push_back({NewCall, ReqAlloc, Locs});
-	}
-	toDelete.push_back(CI);
+        if (Name == "__mdmp_marker_allreduce") {
+          hoistInitiation(NewCall, Locs, AA, DT);
+          AsyncRequest Req;
+          Req.WaitTokenValue = NewCall;
+          Req.StartPoint = NewCall;
+          Req.Buffers = Locs;
+          PendingRequests.push_back(std::move(Req));
+        } else {
+          AllocaInst *ReqAlloc = CreateSafeAlloc();
+          Builder.CreateStore(NewCall, ReqAlloc);
+          ActiveDeclarativeLocs.push_back({NewCall, ReqAlloc, Locs});
+        }
 
+        toDelete.push_back(CI);
       }
       else if (Name == "__mdmp_marker_allgather" || Name == "__mdmp_marker_register_allgather") {
+	Changed= true;
         FunctionCallee target_func = (Name == "__mdmp_marker_allgather") ? runtime_allgather : runtime_register_allgather;
-        CallInst *NewCall = Builder.CreateCall(target_func, 
-					       {CI->getArgOperand(0), CI->getArgOperand(1), CI->getArgOperand(2), CI->getArgOperand(3), CI->getArgOperand(4)});
-                
+        CallInst *NewCall = Builder.CreateCall(target_func,
+                                               {CI->getArgOperand(0), CI->getArgOperand(1), CI->getArgOperand(2), CI->getArgOperand(3), CI->getArgOperand(4)});
+
         std::vector<TrackedBuffer> Locs =
-	  buildAllgatherBuffers(CI->getArgOperand(0),  // sendbuf
-				CI->getArgOperand(1),  // count
-				CI->getArgOperand(2),  // recvbuf
-				CI->getArgOperand(3),  // type
-				CI->getArgOperand(4)); // bytes
+          buildAllgatherBuffers(CI->getArgOperand(0),  // sendbuf
+                                CI->getArgOperand(1),  // count
+                                CI->getArgOperand(2),  // recvbuf
+                                CI->getArgOperand(3),  // type
+                                CI->getArgOperand(4)); // bytes
 
-        AllocaInst *ReqAlloc = CreateSafeAlloc();
-        Builder.CreateStore(NewCall, ReqAlloc);
-	CI->replaceAllUsesWith(NewCall);
+        CI->replaceAllUsesWith(NewCall);
 
-	if (Name == "__mdmp_marker_allgather") {
-	  hoistInitiation(NewCall, Locs, AA, DT);
-	  AsyncRequest Req;
-	  Req.WaitTokenValue = NewCall;
-	  Req.StartPoint = NewCall;
-	  Req.Buffers = Locs;
-	  PendingRequests.push_back(std::move(Req));
-	} else {
-	  AllocaInst *ReqAlloc = CreateSafeAlloc();
-	  Builder.CreateStore(NewCall, ReqAlloc);
-	  ActiveDeclarativeLocs.push_back({NewCall, ReqAlloc, Locs});
-	}
-	toDelete.push_back(CI);
+        if (Name == "__mdmp_marker_allgather") {
+          hoistInitiation(NewCall, Locs, AA, DT);
+          AsyncRequest Req;
+          Req.WaitTokenValue = NewCall;
+          Req.StartPoint = NewCall;
+          Req.Buffers = Locs;
+          PendingRequests.push_back(std::move(Req));
+        } else {
+          AllocaInst *ReqAlloc = CreateSafeAlloc();
+          Builder.CreateStore(NewCall, ReqAlloc);
+          ActiveDeclarativeLocs.push_back({NewCall, ReqAlloc, Locs});
+        }
 
+        toDelete.push_back(CI);
       }
+
       else if (Name == "__mdmp_marker_bcast" || Name == "__mdmp_marker_register_bcast") {
+	Changed= true;
         FunctionCallee target_func = (Name == "__mdmp_marker_bcast") ? runtime_bcast : runtime_register_bcast;
-        CallInst *NewCall = Builder.CreateCall(target_func, 
-					       {CI->getArgOperand(0), CI->getArgOperand(1), CI->getArgOperand(2), CI->getArgOperand(3), CI->getArgOperand(4)});
-        
-        Value *ByteSize = CI->getArgOperand(3);
-        LocationSize LocSize = LocationSize::beforeOrAfterPointer();
-        if (auto *ConstBytes = dyn_cast<ConstantInt>(ByteSize)) { LocSize = LocationSize::precise(ConstBytes->getZExtValue()); }
-        
+        CallInst *NewCall = Builder.CreateCall(target_func,
+                                               {CI->getArgOperand(0), CI->getArgOperand(1), CI->getArgOperand(2), CI->getArgOperand(3), CI->getArgOperand(4)});
+
         std::vector<TrackedBuffer> Locs =
-	  buildBcastBuffers(CI->getArgOperand(0),  // buffer
-			    CI->getArgOperand(1),  // count
-			    CI->getArgOperand(2),  // type
-			    CI->getArgOperand(3)); // bytes
-        
-        AllocaInst *ReqAlloc = CreateSafeAlloc();
-        Builder.CreateStore(NewCall, ReqAlloc);
+          buildBcastBuffers(CI->getArgOperand(0),  // buffer
+                            CI->getArgOperand(1),  // count
+                            CI->getArgOperand(2),  // type
+                            CI->getArgOperand(3)); // bytes
 
-	CI->replaceAllUsesWith(NewCall);
+        CI->replaceAllUsesWith(NewCall);
 
-	if (Name == "__mdmp_marker_bcast") {
-	  hoistInitiation(NewCall, Locs, AA, DT);
-	  AsyncRequest Req;
-	  Req.WaitTokenValue = NewCall;
-	  Req.StartPoint = NewCall;
-	  Req.Buffers = Locs;
-	  PendingRequests.push_back(std::move(Req));
-	} else {
-	  AllocaInst *ReqAlloc = CreateSafeAlloc();
-	  Builder.CreateStore(NewCall, ReqAlloc);
-	  ActiveDeclarativeLocs.push_back({NewCall, ReqAlloc, Locs});
-	}
-	toDelete.push_back(CI);
-	
+        if (Name == "__mdmp_marker_bcast") {
+          hoistInitiation(NewCall, Locs, AA, DT);
+          AsyncRequest Req;
+          Req.WaitTokenValue = NewCall;
+          Req.StartPoint = NewCall;
+          Req.Buffers = Locs;
+          PendingRequests.push_back(std::move(Req));
+        } else {
+          AllocaInst *ReqAlloc = CreateSafeAlloc();
+          Builder.CreateStore(NewCall, ReqAlloc);
+          ActiveDeclarativeLocs.push_back({NewCall, ReqAlloc, Locs});
+        }
+
+        toDelete.push_back(CI);
       }
       else if (Name == "__mdmp_marker_commregion_end") {
+	Changed= true;
 	CallInst *NewEnd = Builder.CreateCall(runtime_end);
 	
 	if (!PendingRequests.empty()) {
@@ -1047,19 +1122,21 @@ void MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
 	
 	toDelete.push_back(CI);
       }      
-      else if (Name == "__mdmp_marker_get_rank") { CallInst *NewCall = Builder.CreateCall(runtime_get_rank); CI->replaceAllUsesWith(NewCall); toDelete.push_back(CI); }
-      else if (Name == "__mdmp_marker_get_size") { CallInst *NewCall = Builder.CreateCall(runtime_get_size); CI->replaceAllUsesWith(NewCall); toDelete.push_back(CI); }
-      else if (Name == "__mdmp_marker_init") { Builder.CreateCall(runtime_init); toDelete.push_back(CI); }
-      else if (Name == "__mdmp_marker_final") { Builder.CreateCall(runtime_final); toDelete.push_back(CI); }
-      else if (Name == "__mdmp_marker_sync") { Builder.CreateCall(runtime_sync); toDelete.push_back(CI); }
-      else if (Name == "__mdmp_marker_wtime") { CallInst *NewCall = Builder.CreateCall(runtime_wtime); CI->replaceAllUsesWith(NewCall); toDelete.push_back(CI); }
+      else if (Name == "__mdmp_marker_get_rank") { Changed= true; CallInst *NewCall = Builder.CreateCall(runtime_get_rank); CI->replaceAllUsesWith(NewCall); toDelete.push_back(CI); }
+      else if (Name == "__mdmp_marker_get_size") { Changed= true; CallInst *NewCall = Builder.CreateCall(runtime_get_size); CI->replaceAllUsesWith(NewCall); toDelete.push_back(CI); }
+      else if (Name == "__mdmp_marker_init") { Changed= true; Builder.CreateCall(runtime_init); toDelete.push_back(CI); }
+      else if (Name == "__mdmp_marker_final") { Changed= true; Builder.CreateCall(runtime_final); toDelete.push_back(CI); }
+      else if (Name == "__mdmp_marker_sync") { Changed= true; Builder.CreateCall(runtime_sync); toDelete.push_back(CI); }
+      else if (Name == "__mdmp_marker_wtime") { Changed= true; CallInst *NewCall = Builder.CreateCall(runtime_wtime); CI->replaceAllUsesWith(NewCall); toDelete.push_back(CI); }
       else if (Name == "__mdmp_marker_set_debug") {
+	Changed= true;
         Value *EnableArg = CI->getArgOperand(0); 
         CallInst *NewCall = Builder.CreateCall(runtime_set_debug, {EnableArg});
         CI->replaceAllUsesWith(NewCall);
         toDelete.push_back(CI);
       }
       else if (Name == "__mdmp_marker_abort") {
+	Changed= true; 
         Value *EnableArg = CI->getArgOperand(0);
         CallInst *NewCall = Builder.CreateCall(runtime_abort, {EnableArg});
         CI->replaceAllUsesWith(NewCall);
@@ -1068,6 +1145,7 @@ void MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
     }
   }
   for (Instruction *I : toDelete) I->eraseFromParent();
+  return Changed;
 }
 
 void MDMPPass::hoistInitiation(CallInst *CI, std::vector<TrackedBuffer> &Buffers, AAResults &AA, DominatorTree &DT) {
