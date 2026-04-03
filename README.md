@@ -103,4 +103,4 @@ heavy_inner_cell_math();
 MDMP_COMMREGION_END(); // Safely waits for all pending declarative batches
 ```
 ## License
-Distributed under the MIT License. See LICENSE for more information.
+This project is licensed under the Apache 2.0 License - see the [LICENSE](LICENSE) file for details.
