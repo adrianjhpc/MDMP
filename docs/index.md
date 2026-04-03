@@ -68,3 +68,114 @@ int main(int argc, char** argv) {
     return 0;
 }
 ```
+
+If MPI has already been initialized by the application, MDMP will attach to the existing MPI environment. Otherwise, MDMP initializes MPI itself.
+
+A minimal imperative example
+
+```cpp
+#include <vector>
+#include "mdmp_interface.h"
+
+int main(int argc, char** argv) {
+    MDMP_COMM_INIT();
+
+    int rank = MDMP_GET_RANK();
+    int size = MDMP_GET_SIZE();
+
+    if (size < 2) {
+        MDMP_COMM_FINAL();
+        return 0;
+    }
+
+    std::vector<double> sendbuf(1024, rank);
+    std::vector<double> recvbuf(1024, 0.0);
+
+    int dest = (rank + 1) % size;
+    int src  = (rank - 1 + size) % size;
+
+    MDMP_RECV(recvbuf.data(), 1024, rank, src, 0);
+    MDMP_SEND(sendbuf.data(), 1024, rank, dest, 0);
+
+    // Useful computation can happen here while communication is in flight
+
+    MDMP_COMM_FINAL();
+    return 0;
+}
+```
+
+The LLVM pass will transform these calls into non-blocking runtime operations and place waits where required.
+
+A minimal declarative example
+
+```cpp
+#include <vector>
+#include "mdmp_interface.h"
+
+int main(int argc, char** argv) {
+    MDMP_COMM_INIT();
+
+    int rank = MDMP_GET_RANK();
+    int size = MDMP_GET_SIZE();
+
+    if (size < 2) {
+        MDMP_COMM_FINAL();
+        return 0;
+    }
+
+    std::vector<double> sendbuf(1024, rank);
+    std::vector<double> recvbuf(1024, 0.0);
+
+    int dest = (rank + 1) % size;
+    int src  = (rank - 1 + size) % size;
+
+    MDMP_COMM_REGION_BEGIN();
+
+    MDMP_REGISTER_RECV(recvbuf.data(), 1024, rank, src, 0);
+    MDMP_REGISTER_SEND(sendbuf.data(), 1024, rank, dest, 0);
+
+    MDMP_COMMIT();
+
+    MDMP_COMM_REGION_END();
+
+    MDMP_COMM_FINAL();
+    return 0;
+}
+```
+
+In this mode, MDMP treats the region as a batch and may coalesce multiple communication operations into fewer MPI requests.
+
+## When to use each model
+
+Use Imperative MDMP when:
+
+ - the communication pattern is already explicit
+ - you want minimal code changes from MPI-style logic
+ - messages are tied to specific program points
+ - you want the compiler to automatically overlap communication with nearby compute
+
+Use Declarative MDMP when:
+
+ - a region contains many small communication operations
+ - messages can be registered first and launched together
+ - batching or coalescing may reduce overhead
+ - you want communication regions to behave like a higher-level schedule
+
+## Performance philosophy
+
+MDMP does not make all MPI codes faster automatically. It performs best when:
+
+ - communication can be started significantly before data is needed
+ - there is useful work available while messages are in flight
+ - communication patterns repeat across iterations
+ - batching and coalescing reduce request overhead
+
+In some applications, especially highly compute-heavy kernels with very small messages, the performance difference versus hand-written MPI may be small. In others, particularly latency-sensitive or irregular codes, MDMP can significantly improve overlap and reduce communication overhead.
+
+## Next steps
+
+ - See (Getting Started)[Getting Started# for build and compile instructions
+ - See Imperative MDMP for point-to-point and collective usage
+ - See Declarative MDMP for communication regions and batching
+ - See Performance Notes for tuning advice and expected behavior
+
