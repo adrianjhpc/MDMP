@@ -28,6 +28,7 @@
 #include "llvm/Transforms/Scalar/DCE.h"
 #include "llvm/Transforms/IPO/GlobalDCE.h"
 
+
 #if LLVM_VERSION_GE(23, 0)
 #include "llvm/Plugins/PassPlugin.h"
 #else
@@ -36,6 +37,9 @@
 #include <vector>
 #include <optional>
 #include <cassert>
+#include <limits>
+#include <cstdlib>
+#include <cstring>
 
 namespace llvm {
 
@@ -104,7 +108,17 @@ namespace llvm {
 
     void collectLeafLoops(LoopInfo &LI, SmallVectorImpl<Loop *> &Out);
 
+    void collectNonLeafLoops(Loop *L, SmallVectorImpl<Loop *> &Out);
+
+    void collectNonLeafLoops(LoopInfo &LI, SmallVectorImpl<Loop *> &Out);
+
+    bool requestWindowSuggestsCallSiteProgressRelaxed(const RequestWindowInfo &Info, Instruction *Inst, DominatorTree &DT);
+
+    bool isCandidateCallForProgress(Instruction *Inst);
+
     bool requestWindowCoversLoopHeader(const RequestWindowInfo &Info, Loop *L, DominatorTree &DT);
+
+    bool requestWindowSuggestsLoopProgressRelaxed(const RequestWindowInfo &Info, Loop *L, DominatorTree &DT);
 
     bool loopMayConflictWithTrackedBuffers(Loop *L, ArrayRef<TrackedBuffer> Buffers, AAResults &AA, MemorySSA &MSSA, const DataLayout &DL);
 

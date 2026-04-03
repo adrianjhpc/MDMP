@@ -2,6 +2,120 @@
 
 using namespace llvm;
 
+bool mdmpEnvFlagEnabled(const char *Name, bool DefaultValue = false) {
+  const char *V = std::getenv(Name);
+  if (!V) return DefaultValue;
+
+  if (std::strcmp(V, "0") == 0) return false;
+  if (std::strcmp(V, "false") == 0) return false;
+  if (std::strcmp(V, "FALSE") == 0) return false;
+  if (std::strcmp(V, "off") == 0) return false;
+  if (std::strcmp(V, "OFF") == 0) return false;
+
+  return true;
+}
+
+unsigned mdmpEnvUnsigned(const char *Name, unsigned DefaultValue) {
+  const char *V = std::getenv(Name);
+  if (!V || *V == '\0') return DefaultValue;
+
+  char *End = nullptr;
+  unsigned long Parsed = std::strtoul(V, &End, 10);
+  if (End == V || *End != '\0')
+    return DefaultValue;
+
+  if (Parsed == 0)
+    return 1;
+
+  if (Parsed > std::numeric_limits<unsigned>::max())
+    return DefaultValue;
+
+  return static_cast<unsigned>(Parsed);
+}
+
+void MDMPPass::collectNonLeafLoops(Loop *L, SmallVectorImpl<Loop *> &Out) {
+  if (!L->getSubLoops().empty())
+    Out.push_back(L);
+
+  for (Loop *SubL : L->getSubLoops()) {
+    collectNonLeafLoops(SubL, Out);
+  }
+}
+
+void MDMPPass::collectNonLeafLoops(LoopInfo &LI, SmallVectorImpl<Loop *> &Out) {
+  for (Loop *TopL : LI) {
+    collectNonLeafLoops(TopL, Out);
+  }
+}
+
+bool MDMPPass::requestWindowSuggestsCallSiteProgressRelaxed(const RequestWindowInfo &Info,
+                                                            Instruction *Inst,
+                                                            DominatorTree &DT) {
+  if (!DT.dominates(Info.Req->StartPoint, Inst))
+    return false;
+
+  // If we are already in a known live block, this is an obvious candidate.
+  if (Info.LiveBlocks.contains(Inst->getParent()))
+    return true;
+
+  // If there are no known wait points yet, any substantial call after the
+  // request start is a reasonable fallback place to poke progress.
+  if (Info.WaitPoints.empty())
+    return true;
+
+  for (Instruction *WP : Info.WaitPoints) {
+    // Same-block ordering.
+    if (WP->getParent() == Inst->getParent()) {
+      if (Inst->comesBefore(WP))
+        return true;
+    }
+
+    // If this call dominates a later wait, then it lies on a path where
+    // communication is still plausibly in flight.
+    if (DT.dominates(Inst, WP))
+      return true;
+  }
+
+  return false;
+}
+
+bool MDMPPass::isCandidateCallForProgress(Instruction *Inst) {
+  auto *CB = dyn_cast<CallBase>(Inst);
+  if (!CB)
+    return false;
+
+  if (CB->isInlineAsm())
+    return false;
+
+  if (isIgnorableIntrinsicForMDMP(Inst))
+    return false;
+
+  if (Function *CalledFn = CB->getCalledFunction()) {
+    StringRef Name = CalledFn->getName();
+
+    if (CalledFn->isIntrinsic())
+      return false;
+
+    if (isAsyncMDMPOpName(Name))
+      return false;
+
+    if (isHardBarrierCallName(Name))
+      return false;
+
+    if (Name == "mdmp_progress" || Name == "mdmp_maybe_progress")
+      return false;
+
+    if (Name == "mdmp_get_rank" || Name == "mdmp_get_size" || Name == "mdmp_wtime")
+      return false;
+
+    if (Name == "MPI_Comm_rank" || Name == "MPI_Comm_size")
+      return false;
+  }
+
+  // For now, treat most remaining calls as nontrivial fallback candidates.
+  return true;
+}
+
 bool MDMPPass::isHardBarrierInstForWaitPlacement(Instruction *Inst) {
   if (auto *CB = dyn_cast<CallBase>(Inst)) {
     if (Function *CalledFn = CB->getCalledFunction()) {
@@ -277,6 +391,43 @@ bool MDMPPass::requestWindowCoversLoopHeader(const RequestWindowInfo &Info, Loop
   Instruction *HeaderIP = &*Header->getFirstInsertionPt();
   return DT.dominates(Info.Req->StartPoint, HeaderIP);
 }
+
+bool MDMPPass::requestWindowSuggestsLoopProgressRelaxed(const RequestWindowInfo &Info,
+                                                        Loop *L,
+                                                        DominatorTree &DT) {
+  BasicBlock *Header = L->getHeader();
+  Instruction *HeaderIP = &*Header->getFirstInsertionPt();
+
+  // The request must definitely be live before the loop header.
+  if (!DT.dominates(Info.Req->StartPoint, HeaderIP))
+    return false;
+
+  // If exact matching already says the loop header is in the live region,
+  // then this is obviously a valid place.
+  if (Info.LiveBlocks.contains(Header))
+    return true;
+
+  // If the request has no known wait points yet, any loop after the start point
+  // is a reasonable fallback progress site.
+  if (Info.WaitPoints.empty())
+    return true;
+
+  // Relaxed heuristic:
+  // if the loop dominates a future wait point, or the wait point is inside the
+  // loop body, then this loop lies on a path where the request remains in flight.
+  for (Instruction *WP : Info.WaitPoints) {
+    if (L->contains(WP->getParent()))
+      return true;
+
+    Instruction *HeaderIP = &*Header->getFirstInsertionPt();
+    if (DT.dominates(HeaderIP, WP))
+      return true;
+  }
+
+  return false;
+}
+
+
 
 bool MDMPPass::loopMayConflictWithTrackedBuffers(Loop *L,
                                                  ArrayRef<TrackedBuffer> Buffers,
@@ -1292,74 +1443,236 @@ void MDMPPass::injectWaitsForRegion(ArrayRef<AsyncRequest> Requests, Instruction
 }
 
 
-void MDMPPass::injectThrottledProgress(ArrayRef<AsyncRequest> Requests, Function &F, AAResults &AA, DominatorTree &DT, LoopInfo &LI, MemorySSA &MSSA, Module *M) {
-
+void MDMPPass::injectThrottledProgress(ArrayRef<AsyncRequest> Requests,
+                                       Function &F,
+                                       AAResults &AA,
+                                       DominatorTree &DT,
+                                       LoopInfo &LI,
+                                       MemorySSA &MSSA,
+                                       Module *M) {
   if (Requests.empty())
     return;
+
+  bool ProgressDebug = mdmpEnvFlagEnabled("MDMP_PROGRESS_DEBUG", false);
+  bool UseRelaxedProgressFallback = mdmpEnvFlagEnabled("MDMP_PROGRESS_RELAXED", true);
+  unsigned Period = mdmpEnvUnsigned("MDMP_PROGRESS_PERIOD", 64);
+  unsigned MaxCallsiteFallbacks = mdmpEnvUnsigned("MDMP_PROGRESS_MAX_CALLSITES", 8);
 
   LLVMContext &Ctx = M->getContext();
   IntegerType *I32Ty = Type::getInt32Ty(Ctx);
 
   FunctionCallee runtime_maybe_progress =
-    M->getOrInsertFunction("mdmp_maybe_progress", Type::getVoidTy(Ctx));
+      M->getOrInsertFunction("mdmp_maybe_progress", Type::getVoidTy(Ctx));
 
   auto Windows = analyseRequestWindows(Requests, nullptr, AA, LI, MSSA, M);
-  if (Windows.empty())
+  if (Windows.empty()) {
+    if (ProgressDebug) {
+      errs() << "[MDMP PROGRESS] Function " << F.getName()
+             << ": no request windows\n";
+    }
     return;
+  }
 
   SmallVector<Loop *, 16> LeafLoops;
   collectLeafLoops(LI, LeafLoops);
-  if (LeafLoops.empty())
-    return;
 
-  static constexpr uint32_t ThrottleEvery = 64;
-  static_assert((ThrottleEvery & (ThrottleEvery - 1)) == 0,
-                "ThrottleEvery must be a power of two");
+  SmallVector<Loop *, 16> NonLeafLoops;
+  collectNonLeafLoops(LI, NonLeafLoops);
 
   ConstantInt *Zero = ConstantInt::get(I32Ty, 0);
   ConstantInt *One  = ConstantInt::get(I32Ty, 1);
-  ConstantInt *Mask = ConstantInt::get(I32Ty, ThrottleEvery - 1);
 
   BasicBlock &EntryBB = F.getEntryBlock();
   Instruction *EntryIP = &*EntryBB.getFirstInsertionPt();
   IRBuilder<> EntryBuilder(EntryIP);
 
   AllocaInst *CounterAlloc =
-    EntryBuilder.CreateAlloca(I32Ty, nullptr, "mdmp_progress_counter");
+      EntryBuilder.CreateAlloca(I32Ty, nullptr, "mdmp_progress_counter");
   EntryBuilder.CreateStore(Zero, CounterAlloc);
 
-  SmallPtrSet<BasicBlock *, 16> InstrumentedHeaders;
+  auto InsertProgressBefore = [&](Instruction *InsertPt, StringRef Kind) {
+    IRBuilder<> Builder(InsertPt);
 
-  for (Loop *L : LeafLoops) {
-    BasicBlock *Header = L->getHeader();
+    Value *Cur = Builder.CreateLoad(I32Ty, CounterAlloc, "mdmp_prog_cur");
+    Value *Next = Builder.CreateAdd(Cur, One, "mdmp_prog_next");
+    Builder.CreateStore(Next, CounterAlloc);
 
-    if (!InstrumentedHeaders.insert(Header).second)
-      continue;
-
-    bool ShouldInstrument = false;
-    for (const RequestWindowInfo &Info : Windows) {
-      if (requestWindowCoversLoopHeader(Info, L, DT)) {
-        ShouldInstrument = true;
-        break;
-      }
+    Value *DoTick = nullptr;
+    if ((Period & (Period - 1)) == 0) {
+      Value *Mask = ConstantInt::get(I32Ty, Period - 1);
+      Value *Masked = Builder.CreateAnd(Next, Mask, "mdmp_prog_masked");
+      DoTick = Builder.CreateICmpEQ(Masked, Zero, "mdmp_prog_tick");
+    } else {
+      Value *PeriodV = ConstantInt::get(I32Ty, Period);
+      Value *Rem = Builder.CreateURem(Next, PeriodV, "mdmp_prog_rem");
+      DoTick = Builder.CreateICmpEQ(Rem, Zero, "mdmp_prog_tick");
     }
-
-    if (!ShouldInstrument)
-      continue;
-
-    Instruction *InsertPt = &*Header->getFirstInsertionPt();
-    IRBuilder<> LoopBuilder(InsertPt);
-
-    Value *Cur = LoopBuilder.CreateLoad(I32Ty, CounterAlloc, "mdmp_prog_cur");
-    Value *Next = LoopBuilder.CreateAdd(Cur, One, "mdmp_prog_next");
-    LoopBuilder.CreateStore(Next, CounterAlloc);
-
-    Value *Masked = LoopBuilder.CreateAnd(Next, Mask, "mdmp_prog_masked");
-    Value *DoTick = LoopBuilder.CreateICmpEQ(Masked, Zero, "mdmp_prog_tick");
 
     Instruction *ThenTerm = SplitBlockAndInsertIfThen(DoTick, InsertPt, false);
     IRBuilder<> ThenBuilder(ThenTerm);
     ThenBuilder.CreateCall(runtime_maybe_progress);
+
+    if (ProgressDebug) {
+      errs() << "[MDMP PROGRESS] Inserted " << Kind
+             << " progress site in function " << F.getName();
+      if (InsertPt->getParent()->hasName())
+        errs() << " in block " << InsertPt->getParent()->getName();
+      errs() << "\n";
+    }
+  };
+
+  auto LoopMatchesExact = [&](Loop *L) {
+    for (const RequestWindowInfo &Info : Windows) {
+      if (requestWindowCoversLoopHeader(Info, L, DT))
+        return true;
+    }
+    return false;
+  };
+
+  auto LoopMatchesRelaxed = [&](Loop *L) {
+    for (const RequestWindowInfo &Info : Windows) {
+      if (requestWindowSuggestsLoopProgressRelaxed(Info, L, DT))
+        return true;
+    }
+    return false;
+  };
+
+  bool HasExactLeafCandidate = false;
+  for (Loop *L : LeafLoops) {
+    if (LoopMatchesExact(L)) {
+      HasExactLeafCandidate = true;
+      break;
+    }
+  }
+
+  bool UseRelaxedLeafFallback =
+      UseRelaxedProgressFallback && !HasExactLeafCandidate;
+
+  if (ProgressDebug) {
+    errs() << "[MDMP PROGRESS] Function " << F.getName()
+           << ": requests=" << Requests.size()
+           << ", windows=" << Windows.size()
+           << ", leaf_loops=" << LeafLoops.size()
+           << ", nonleaf_loops=" << NonLeafLoops.size()
+           << ", exact_leaf_candidates=" << (HasExactLeafCandidate ? "yes" : "no")
+           << ", relaxed_fallback=" << (UseRelaxedLeafFallback ? "on" : "off")
+           << ", period=" << Period
+           << ", max_callsite_fallbacks=" << MaxCallsiteFallbacks
+           << "\n";
+  }
+
+  SmallPtrSet<BasicBlock *, 32> InstrumentedHeaders;
+
+  unsigned NumExactLeafInserted = 0;
+  unsigned NumRelaxedLeafInserted = 0;
+  unsigned NumExactOuterInserted = 0;
+  unsigned NumRelaxedOuterInserted = 0;
+  unsigned NumCallsiteInserted = 0;
+
+  // ------------------------------------------------------------
+  // Stage 1: leaf-loop progress sites
+  // ------------------------------------------------------------
+  for (Loop *L : LeafLoops) {
+    BasicBlock *Header = L->getHeader();
+    if (InstrumentedHeaders.contains(Header))
+      continue;
+
+    bool ExactMatch = LoopMatchesExact(L);
+    bool RelaxedMatch = false;
+
+    if (!ExactMatch && UseRelaxedLeafFallback)
+      RelaxedMatch = LoopMatchesRelaxed(L);
+
+    if (!ExactMatch && !RelaxedMatch)
+      continue;
+
+    InstrumentedHeaders.insert(Header);
+    Instruction *InsertPt = &*Header->getFirstInsertionPt();
+    InsertProgressBefore(InsertPt, ExactMatch ? "exact-leaf" : "relaxed-leaf");
+
+    if (ExactMatch)
+      ++NumExactLeafInserted;
+    else
+      ++NumRelaxedLeafInserted;
+  }
+
+  // ------------------------------------------------------------
+  // Stage 2: outer-loop fallback if no leaf-loop site was inserted
+  // ------------------------------------------------------------
+  if ((NumExactLeafInserted + NumRelaxedLeafInserted) == 0) {
+    for (Loop *L : NonLeafLoops) {
+      BasicBlock *Header = L->getHeader();
+      if (InstrumentedHeaders.contains(Header))
+        continue;
+
+      bool ExactMatch = LoopMatchesExact(L);
+      bool RelaxedMatch = false;
+
+      if (!ExactMatch && UseRelaxedProgressFallback)
+        RelaxedMatch = LoopMatchesRelaxed(L);
+
+      if (!ExactMatch && !RelaxedMatch)
+        continue;
+
+      InstrumentedHeaders.insert(Header);
+      Instruction *InsertPt = &*Header->getFirstInsertionPt();
+      InsertProgressBefore(InsertPt, ExactMatch ? "exact-outer" : "relaxed-outer");
+
+      if (ExactMatch)
+        ++NumExactOuterInserted;
+      else
+        ++NumRelaxedOuterInserted;
+    }
+  }
+
+  // ------------------------------------------------------------
+  // Stage 3: call-site fallback if no loop-based site was inserted
+  // ------------------------------------------------------------
+  if ((NumExactLeafInserted + NumRelaxedLeafInserted +
+       NumExactOuterInserted + NumRelaxedOuterInserted) == 0) {
+
+    SmallVector<Instruction *, 32> CandidateCalls;
+    for (BasicBlock &BB : F) {
+      for (Instruction &I : BB) {
+        if (isCandidateCallForProgress(&I))
+          CandidateCalls.push_back(&I);
+      }
+    }
+
+    SmallPtrSet<BasicBlock *, 16> CallsiteBlocksUsed;
+
+    for (Instruction *CallI : CandidateCalls) {
+      bool Match = false;
+      for (const RequestWindowInfo &Info : Windows) {
+        if (requestWindowSuggestsCallSiteProgressRelaxed(Info, CallI, DT)) {
+          Match = true;
+          break;
+        }
+      }
+
+      if (!Match)
+        continue;
+
+      // Avoid spamming one block with multiple fallback sites.
+      if (!CallsiteBlocksUsed.insert(CallI->getParent()).second)
+        continue;
+
+      InsertProgressBefore(CallI, "callsite");
+      ++NumCallsiteInserted;
+
+      if (NumCallsiteInserted >= MaxCallsiteFallbacks)
+        break;
+    }
+  }
+
+  if (ProgressDebug) {
+    errs() << "[MDMP PROGRESS] Function " << F.getName()
+           << ": inserted exact-leaf=" << NumExactLeafInserted
+           << ", relaxed-leaf=" << NumRelaxedLeafInserted
+           << ", exact-outer=" << NumExactOuterInserted
+           << ", relaxed-outer=" << NumRelaxedOuterInserted
+           << ", callsite=" << NumCallsiteInserted
+           << "\n";
   }
 }
 
