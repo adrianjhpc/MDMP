@@ -814,20 +814,9 @@ bool MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
   
   FunctionCallee runtime_commit = M->getOrInsertFunction("mdmp_commit", Type::getInt32Ty(Ctx));
 
-  // Helper lambda to safely allocate state variables at the start of the function
-  auto CreateSafeAlloc = [&]() -> AllocaInst* {
-    BasicBlock &EntryBB = F.getEntryBlock();
-    IRBuilder<> EntryBuilder(&EntryBB, EntryBB.begin());
-    AllocaInst *Alloc = EntryBuilder.CreateAlloca(Type::getInt32Ty(Ctx), nullptr, "mdmp_req_id");
-    EntryBuilder.CreateStore(ConstantInt::get(Type::getInt32Ty(Ctx), -1), Alloc); // Initialize to -1
-    return Alloc;
-  };
-
   std::vector<Instruction*> toDelete;
   bool Changed = false;
   struct DeclarativePendingOp {
-    Value *WaitTokenValue;
-    AllocaInst *WaitTokenAlloc;
     std::vector<TrackedBuffer> Buffers;
   };
   
@@ -887,13 +876,11 @@ bool MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
         bool isSend = (Name == "__mdmp_marker_register_send");
         std::vector<TrackedBuffer> TrackedLocs = buildSendRecvBuffers(BufferPtr, CountVal, TypeVal, ByteSize, isSend);
 
-	AllocaInst *ReqAlloc = CreateSafeAlloc();
 	CallInst *NewCall = Builder.CreateCall(isSend ? runtime_register_send : runtime_register_recv,
-					       {BufferPtr, CountVal, TypeVal, ByteSize, ActorRank, PeerRank, TagVal});
-	Builder.CreateStore(NewCall, ReqAlloc);
+                                               {BufferPtr, CountVal, TypeVal, ByteSize, ActorRank, PeerRank, TagVal});
 
-	CI->replaceAllUsesWith(NewCall);
-	ActiveDeclarativeLocs.push_back({NewCall, ReqAlloc, TrackedLocs});
+        CI->replaceAllUsesWith(NewCall);
+        ActiveDeclarativeLocs.push_back({TrackedLocs});
         toDelete.push_back(CI);
       }
       else if (Name == "__mdmp_marker_register_reduce") {
@@ -906,13 +893,12 @@ bool MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
 								    CI->getArgOperand(3),  // type
 								    CI->getArgOperand(4)); // bytes
 
-	AllocaInst *ReqAlloc = CreateSafeAlloc();
 	CallInst *NewCall = Builder.CreateCall(runtime_register_reduce,
-					       {InBuf, OutBuf, CI->getArgOperand(2), CI->getArgOperand(3), CI->getArgOperand(4), CI->getArgOperand(5), CI->getArgOperand(6)});
-	Builder.CreateStore(NewCall, ReqAlloc);
+                                               {InBuf, OutBuf, CI->getArgOperand(2), CI->getArgOperand(3), CI->getArgOperand(4), CI->getArgOperand(5), CI->getArgOperand(6)});
 	
-	CI->replaceAllUsesWith(NewCall);
-	ActiveDeclarativeLocs.push_back({NewCall, ReqAlloc, TrackedLocs});
+        CI->replaceAllUsesWith(NewCall);
+        ActiveDeclarativeLocs.push_back({TrackedLocs});
+
         toDelete.push_back(CI);
       }
       else if (Name == "__mdmp_marker_register_gather") {
@@ -925,26 +911,19 @@ bool MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
                                                                     RecvBuf,
                                                                     CI->getArgOperand(3),  // type
                                                                     CI->getArgOperand(4)); // bytes
-        
-        AllocaInst *ReqAlloc = CreateSafeAlloc();
-	CallInst *NewCall = Builder.CreateCall(runtime_register_gather,
-					       {SendBuf, CI->getArgOperand(1), RecvBuf, CI->getArgOperand(3), CI->getArgOperand(4), CI->getArgOperand(5)});
-	Builder.CreateStore(NewCall, ReqAlloc);
-	
-	CI->replaceAllUsesWith(NewCall);
-	ActiveDeclarativeLocs.push_back({NewCall, ReqAlloc, TrackedLocs});
+
+        CallInst *NewCall = Builder.CreateCall(runtime_register_gather,
+                                               {SendBuf, CI->getArgOperand(1), RecvBuf, CI->getArgOperand(3), CI->getArgOperand(4), CI->getArgOperand(5)});
+
+        CI->replaceAllUsesWith(NewCall);
+        ActiveDeclarativeLocs.push_back({TrackedLocs});
 	toDelete.push_back(CI);
       }
       else if (Name == "__mdmp_marker_commit") {
-	Changed= true;
         CallInst *NewCommit = Builder.CreateCall(runtime_commit);
         CI->replaceAllUsesWith(NewCommit);
 
-        // Build the full mixed hazard set for this declarative batch so commit
-        // can be hoisted safely across unrelated computation, but never across:
-        //   - overlapping writes to send-like buffers
-        //   - overlapping reads/writes to recv-like buffers
-        //   - earlier mdmp_register_* calls or other hard barriers
+        // Build the full mixed hazard set for this declarative batch.
         std::vector<TrackedBuffer> CommitBuffers;
         size_t TotalTracked = 0;
         for (auto &Op : ActiveDeclarativeLocs)
@@ -956,19 +935,19 @@ bool MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
                                Op.Buffers.begin(), Op.Buffers.end());
         }
 
+        // Safely hoist commit again: this is now safe because hoistInitiation
+        // reasons over the per-buffer send/recv directionality.
         if (!CommitBuffers.empty()) {
           hoistInitiation(NewCommit, CommitBuffers, AA, DT);
         }
 
-        // Each registered declarative op becomes an async request that starts
-        // at the (possibly hoisted) commit point.
-        for (auto &Op : ActiveDeclarativeLocs) {
-          AsyncRequest Req;
-          Req.WaitTokenValue = Op.WaitTokenValue;
-          Req.WaitTokenAlloc = Op.WaitTokenAlloc;
-          Req.StartPoint = NewCommit;
-          Req.Buffers = Op.Buffers;
-          PendingRequests.push_back(std::move(Req));
+        // Declarative mode now uses one async request per commit/batch.
+        if (!CommitBuffers.empty()) {
+          AsyncRequest BatchReq;
+          BatchReq.WaitTokenValue = NewCommit;  // commit returns batch token
+          BatchReq.StartPoint = NewCommit;
+          BatchReq.Buffers = std::move(CommitBuffers);
+          PendingRequests.push_back(std::move(BatchReq));
         }
 
         ActiveDeclarativeLocs.clear();
@@ -1041,9 +1020,7 @@ bool MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
           Req.Buffers = Locs;
           PendingRequests.push_back(std::move(Req));
         } else {
-          AllocaInst *ReqAlloc = CreateSafeAlloc();
-          Builder.CreateStore(NewCall, ReqAlloc);
-          ActiveDeclarativeLocs.push_back({NewCall, ReqAlloc, Locs});
+          ActiveDeclarativeLocs.push_back({Locs});
         }
 
         toDelete.push_back(CI);
@@ -1071,9 +1048,7 @@ bool MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
           Req.Buffers = Locs;
           PendingRequests.push_back(std::move(Req));
         } else {
-          AllocaInst *ReqAlloc = CreateSafeAlloc();
-          Builder.CreateStore(NewCall, ReqAlloc);
-          ActiveDeclarativeLocs.push_back({NewCall, ReqAlloc, Locs});
+          ActiveDeclarativeLocs.push_back({Locs});
         }
 
         toDelete.push_back(CI);
@@ -1101,9 +1076,7 @@ bool MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
           Req.Buffers = Locs;
           PendingRequests.push_back(std::move(Req));
         } else {
-          AllocaInst *ReqAlloc = CreateSafeAlloc();
-          Builder.CreateStore(NewCall, ReqAlloc);
-          ActiveDeclarativeLocs.push_back({NewCall, ReqAlloc, Locs});
+          ActiveDeclarativeLocs.push_back({Locs});
         }
 
         toDelete.push_back(CI);

@@ -54,10 +54,9 @@ constexpr int MDMP_WAIT_MANY_MPI_BATCH_MIN = 16;
   
   bool mdmp_has_active_requests(); 
 
-  void mdmp_wait_unlocked(int req_id);
   void mdmp_wait(int req_id);
   void mdmp_wait_many(const int *ids, int n);
- 
+  
   void mdmp_abort(int error_code);
 
 
