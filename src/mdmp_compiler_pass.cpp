@@ -1497,6 +1497,8 @@ void MDMPPass::injectThrottledProgress(ArrayRef<AsyncRequest> Requests,
   // Profitability guard for aggressive fallback modes only.
   unsigned AggressiveMinReqs = mdmpEnvUnsigned("MDMP_PROGRESS_AGGR_MIN_REQS", 8);
   unsigned AggressiveMinBytes = mdmpEnvUnsigned("MDMP_PROGRESS_AGGR_MIN_BYTES", 131072);
+  unsigned AggressiveUnknownMinReqs = mdmpEnvUnsigned("MDMP_PROGRESS_AGGR_UNKNOWN_MIN_REQS", 8);
+
 
   LLVMContext &Ctx = M->getContext();
   IntegerType *I32Ty = Type::getInt32Ty(Ctx);
@@ -1533,12 +1535,16 @@ void MDMPPass::injectThrottledProgress(ArrayRef<AsyncRequest> Requests,
     }
   }
 
-  bool AllowAggressiveFallback = true;
-  if (!HasUnknownBytes &&
-      Requests.size() < AggressiveMinReqs &&
-      TotalPreciseBytes < AggressiveMinBytes) {
-    AllowAggressiveFallback = false;
+  bool AllowAggressiveFallback = false;
+
+  if (Requests.size() >= AggressiveMinReqs) {
+    AllowAggressiveFallback = true;
+  } else if (TotalPreciseBytes >= AggressiveMinBytes) {
+    AllowAggressiveFallback = true;
+  } else if (HasUnknownBytes && Requests.size() >= AggressiveUnknownMinReqs) {
+    AllowAggressiveFallback = true;
   }
+
 
   SmallVector<Loop *, 16> LeafLoops;
   collectLeafLoops(LI, LeafLoops);
@@ -1643,6 +1649,7 @@ void MDMPPass::injectThrottledProgress(ArrayRef<AsyncRequest> Requests,
            << ", unknown_bytes=" << (HasUnknownBytes ? "yes" : "no")
            << ", aggr_min_reqs=" << AggressiveMinReqs
            << ", aggr_min_bytes=" << AggressiveMinBytes
+           << ", aggr_unknown_min_reqs=" << AggressiveUnknownMinReqs
            << ", aggressive_fallback=" << (AllowAggressiveFallback ? "on" : "off")
            << "\n";
   }
