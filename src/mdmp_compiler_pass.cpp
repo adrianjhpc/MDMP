@@ -1494,7 +1494,9 @@ void MDMPPass::injectThrottledProgress(ArrayRef<AsyncRequest> Requests,
   unsigned MaxCallsiteFallbacks = mdmpEnvUnsigned("MDMP_PROGRESS_MAX_CALLSITES", 8);
   unsigned MaxDeepLoopFallbacks = mdmpEnvUnsigned("MDMP_PROGRESS_MAX_DEEP_LOOPS", 2);
 
-
+  // Profitability guard for aggressive fallback modes only.
+  unsigned AggressiveMinReqs = mdmpEnvUnsigned("MDMP_PROGRESS_AGGR_MIN_REQS", 8);
+  unsigned AggressiveMinBytes = mdmpEnvUnsigned("MDMP_PROGRESS_AGGR_MIN_BYTES", 131072);
 
   LLVMContext &Ctx = M->getContext();
   IntegerType *I32Ty = Type::getInt32Ty(Ctx);
@@ -1509,6 +1511,33 @@ void MDMPPass::injectThrottledProgress(ArrayRef<AsyncRequest> Requests,
              << ": no request windows\n";
     }
     return;
+  }
+
+  uint64_t TotalPreciseBytes = 0;
+  bool HasUnknownBytes = false;
+
+  auto AddBytesSaturating = [&](uint64_t Bytes) {
+    if (UINT64_MAX - TotalPreciseBytes < Bytes)
+      TotalPreciseBytes = UINT64_MAX;
+    else
+      TotalPreciseBytes += Bytes;
+  };
+
+  for (const AsyncRequest &Req : Requests) {
+    for (const TrackedBuffer &Buf : Req.Buffers) {
+      if (auto Sz = getPreciseSizeBytes(Buf.Loc.Size)) {
+        AddBytesSaturating(*Sz);
+      } else {
+        HasUnknownBytes = true;
+      }
+    }
+  }
+
+  bool AllowAggressiveFallback = true;
+  if (!HasUnknownBytes &&
+      Requests.size() < AggressiveMinReqs &&
+      TotalPreciseBytes < AggressiveMinBytes) {
+    AllowAggressiveFallback = false;
   }
 
   SmallVector<Loop *, 16> LeafLoops;
@@ -1599,7 +1628,7 @@ void MDMPPass::injectThrottledProgress(ArrayRef<AsyncRequest> Requests,
   bool UseRelaxedLeafFallback =
       UseRelaxedProgressFallback && !HasExactLeafCandidate;
 
-    if (ProgressDebug) {
+  if (ProgressDebug) {
     errs() << "[MDMP PROGRESS] Function " << F.getName()
            << ": requests=" << Requests.size()
            << ", windows=" << Windows.size()
@@ -1610,6 +1639,11 @@ void MDMPPass::injectThrottledProgress(ArrayRef<AsyncRequest> Requests,
            << ", period=" << Period
            << ", max_callsite_fallbacks=" << MaxCallsiteFallbacks
            << ", max_deep_loop_fallbacks=" << MaxDeepLoopFallbacks
+           << ", precise_bytes=" << TotalPreciseBytes
+           << ", unknown_bytes=" << (HasUnknownBytes ? "yes" : "no")
+           << ", aggr_min_reqs=" << AggressiveMinReqs
+           << ", aggr_min_bytes=" << AggressiveMinBytes
+           << ", aggressive_fallback=" << (AllowAggressiveFallback ? "on" : "off")
            << "\n";
   }
 
@@ -1700,7 +1734,8 @@ void MDMPPass::injectThrottledProgress(ArrayRef<AsyncRequest> Requests,
   // ------------------------------------------------------------
   // Stage 3: scored callsite fallback if no loop-based site was inserted
   // ------------------------------------------------------------
-  if ((NumExactLeafInserted + NumRelaxedLeafInserted +
+  if (AllowAggressiveFallback &&
+      (NumExactLeafInserted + NumRelaxedLeafInserted +
        NumExactOuterInserted + NumRelaxedOuterInserted) == 0) {
 
     struct CallsiteCandidate {
@@ -1846,7 +1881,8 @@ void MDMPPass::injectThrottledProgress(ArrayRef<AsyncRequest> Requests,
   // number of throttled progress sites into the deepest leaf loops whose
   // headers are dominated by at least one request start.
   // ------------------------------------------------------------
-  if ((NumExactLeafInserted + NumRelaxedLeafInserted +
+  if (AllowAggressiveFallback &&
+      (NumExactLeafInserted + NumRelaxedLeafInserted +
        NumExactOuterInserted + NumRelaxedOuterInserted +
        NumCallsiteInserted) == 0) {
 
