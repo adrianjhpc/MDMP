@@ -1906,17 +1906,29 @@ void MDMPPass::injectThrottledProgress(ArrayRef<AsyncRequest> Requests,
       if (InstrumentedHeaders.contains(Header))
         continue;
 
-      Instruction *HeaderIP = &*Header->getFirstInsertionPt();
+      bool MatchesSomeLiveWindow = false;
 
-      bool DominatedByAnyRequest = false;
       for (const RequestWindowInfo &Info : Windows) {
-        if (DT.dominates(Info.Req->StartPoint, HeaderIP)) {
-          DominatedByAnyRequest = true;
+        // Stronger condition than just "request start dominates loop header":
+        // only keep loops that are either inside a known live block region
+        // or that directly contain a future wait point.
+        if (Info.LiveBlocks.contains(Header)) {
+          MatchesSomeLiveWindow = true;
           break;
         }
+
+        for (Instruction *WP : Info.WaitPoints) {
+          if (L->contains(WP->getParent())) {
+            MatchesSomeLiveWindow = true;
+            break;
+          }
+        }
+
+        if (MatchesSomeLiveWindow)
+          break;
       }
 
-      if (!DominatedByAnyRequest)
+      if (!MatchesSomeLiveWindow)
         continue;
 
       DeepLoopCandidate Cand;
@@ -1925,6 +1937,7 @@ void MDMPPass::injectThrottledProgress(ArrayRef<AsyncRequest> Requests,
       Cand.NumBlocks = (unsigned)L->getBlocksVector().size();
       DeepCandidates.push_back(Cand);
     }
+
 
     std::stable_sort(DeepCandidates.begin(), DeepCandidates.end(),
                      [](const DeepLoopCandidate &A,

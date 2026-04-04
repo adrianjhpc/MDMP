@@ -921,7 +921,7 @@ void mdmp_init() {
   mdmp_profile_reset();
 
 
-  mdmp_log("[MDMP Runtime] Starting up thread progress engine on rank %dn", global_my_rank);
+  mdmp_log("[MDMP Runtime] Starting up thread progress engine on rank %d\n", global_my_rank);
   if (provided == MPI_THREAD_MULTIPLE) {
     mdmp_runtime_active = true;
     mdmp_progress_thread = std::thread(mdmp_progress_loop);
