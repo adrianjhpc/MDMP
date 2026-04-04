@@ -116,6 +116,8 @@ namespace llvm {
 
     bool isCandidateCallForProgress(Instruction *Inst);
 
+    bool isClearlyUnhelpfulProgressCallName(StringRef Name);
+
     bool requestWindowCoversLoopHeader(const RequestWindowInfo &Info, Loop *L, DominatorTree &DT);
 
     bool requestWindowSuggestsLoopProgressRelaxed(const RequestWindowInfo &Info, Loop *L, DominatorTree &DT);

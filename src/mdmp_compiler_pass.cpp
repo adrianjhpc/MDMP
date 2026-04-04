@@ -111,11 +111,39 @@ bool MDMPPass::isCandidateCallForProgress(Instruction *Inst) {
 
     if (Name == "MPI_Comm_rank" || Name == "MPI_Comm_size")
       return false;
+
+    if (isClearlyUnhelpfulProgressCallName(Name))
+      return false;
   }
 
-  // For now, treat most remaining calls as substantial enough to be useful
-  // fallback progress points.
+  // Keep indirect or unknown calls as possible candidates; they may represent
+  // substantial work and we cannot cheaply classify them here.
   return true;
+}
+
+bool MDMPPass::isClearlyUnhelpfulProgressCallName(StringRef Name) {
+  // Allocation / deallocation
+  if (Name == "malloc" || Name == "calloc" || Name == "realloc" ||
+      Name == "free" || Name == "aligned_alloc" || Name == "posix_memalign")
+    return true;
+
+  // Printing / logging / formatting
+  if (Name == "printf" || Name == "fprintf" || Name == "sprintf" ||
+      Name == "snprintf" || Name == "puts" || Name == "fputs" ||
+      Name == "fwrite" || Name == "fflush" || Name == "perror")
+    return true;
+
+  // Timing / tiny utility helpers commonly seen in Gadget
+  if (Name == "second" || Name == "timediff" || Name == "time" ||
+      Name == "clock" || Name == "gettimeofday")
+    return true;
+
+  // Generic library helpers that are usually not where we want to spend
+  // a scarce progress fallback site.
+  if (Name == "qsort" || Name == "bsearch")
+    return true;
+
+  return false;
 }
 
 bool MDMPPass::isHardBarrierInstForWaitPlacement(Instruction *Inst) {
@@ -1497,7 +1525,7 @@ void MDMPPass::injectThrottledProgress(ArrayRef<AsyncRequest> Requests,
       EntryBuilder.CreateAlloca(I32Ty, nullptr, "mdmp_progress_counter");
   EntryBuilder.CreateStore(Zero, CounterAlloc);
 
-  auto InsertProgressBefore = [&](Instruction *InsertPt, StringRef Kind) {
+  auto InsertThrottledProgressBefore = [&](Instruction *InsertPt, StringRef Kind) {
     IRBuilder<> Builder(InsertPt);
 
     Value *Cur = Builder.CreateLoad(I32Ty, CounterAlloc, "mdmp_prog_cur");
@@ -1518,6 +1546,27 @@ void MDMPPass::injectThrottledProgress(ArrayRef<AsyncRequest> Requests,
     Instruction *ThenTerm = SplitBlockAndInsertIfThen(DoTick, InsertPt, false);
     IRBuilder<> ThenBuilder(ThenTerm);
     ThenBuilder.CreateCall(runtime_maybe_progress);
+
+    if (ProgressDebug) {
+      errs() << "[MDMP PROGRESS] Inserted " << Kind
+             << " progress site in function " << F.getName();
+      if (InsertPt->getParent()->hasName())
+        errs() << " in block " << InsertPt->getParent()->getName();
+      errs() << "\n";
+    }
+  };
+
+  auto InsertDirectProgressBefore = [&](Instruction *InsertPt, StringRef Kind) {
+    IRBuilder<> Builder(InsertPt);
+    Builder.CreateCall(runtime_maybe_progress);
+
+    if (ProgressDebug) {
+      errs() << "[MDMP PROGRESS] Inserted " << Kind
+             << " progress site in function " << F.getName();
+      if (InsertPt->getParent()->hasName())
+        errs() << " in block " << InsertPt->getParent()->getName();
+      errs() << "\n";
+    }
   };
 
   auto LoopMatchesExact = [&](Loop *L) {
@@ -1587,7 +1636,7 @@ void MDMPPass::injectThrottledProgress(ArrayRef<AsyncRequest> Requests,
 
     InstrumentedHeaders.insert(Header);
     Instruction *InsertPt = &*Header->getFirstInsertionPt();
-    InsertProgressBefore(InsertPt, ExactMatch ? "exact-leaf" : "relaxed-leaf");
+    InsertThrottledProgressBefore(InsertPt, ExactMatch ? "exact-leaf" : "relaxed-leaf");
 
     if (ExactMatch)
       ++NumExactLeafInserted;
@@ -1624,7 +1673,7 @@ void MDMPPass::injectThrottledProgress(ArrayRef<AsyncRequest> Requests,
 
       InstrumentedHeaders.insert(Header);
       Instruction *InsertPt = &*Header->getFirstInsertionPt();
-      InsertProgressBefore(InsertPt, ExactMatch ? "exact-outer" : "relaxed-outer");
+      InsertThrottledProgressBefore(InsertPt, ExactMatch ? "exact-outer" : "relaxed-outer");
 
       if (ExactMatch)
         ++NumExactOuterInserted;
@@ -1656,7 +1705,8 @@ void MDMPPass::injectThrottledProgress(ArrayRef<AsyncRequest> Requests,
       bool DominatesWait = false;
     };
 
-    SmallVector<CallsiteCandidate, 32> Candidates;
+    SmallVector<CallsiteCandidate, 32> InLoopCandidates;
+    SmallVector<CallsiteCandidate, 32> OutOfLoopCandidates;
 
     for (BasicBlock &BB : F) {
       for (Instruction &I : BB) {
@@ -1698,7 +1748,7 @@ void MDMPPass::injectThrottledProgress(ArrayRef<AsyncRequest> Requests,
           if (DominatesSomeWait)
             Score += 20;
           if (LoopDepth > 0)
-            Score += 5;
+            Score += 50;
           Score += 10 * LoopDepth;
 
           if (Score > BestScore) {
@@ -1711,52 +1761,75 @@ void MDMPPass::injectThrottledProgress(ArrayRef<AsyncRequest> Requests,
         if (!Match)
           continue;
 
-        Candidates.push_back({CallI, BestScore, LoopDepth,
-                              BestInLiveBlock, BestDominatesWait});
+        CallsiteCandidate Cand{CallI, BestScore, LoopDepth,
+                               BestInLiveBlock, BestDominatesWait};
+
+        if (LoopDepth > 0)
+          InLoopCandidates.push_back(Cand);
+        else
+          OutOfLoopCandidates.push_back(Cand);
       }
     }
 
-    std::stable_sort(Candidates.begin(), Candidates.end(),
-                     [](const CallsiteCandidate &A, const CallsiteCandidate &B) {
-                       if (A.Score != B.Score)
-                         return A.Score > B.Score;
-                       if (A.LoopDepth != B.LoopDepth)
-                         return A.LoopDepth > B.LoopDepth;
-                       return false;
-                     });
+    auto SortCandidates = [](SmallVectorImpl<CallsiteCandidate> &Candidates) {
+      std::stable_sort(Candidates.begin(), Candidates.end(),
+                       [](const CallsiteCandidate &A, const CallsiteCandidate &B) {
+                         if (A.Score != B.Score)
+                           return A.Score > B.Score;
+                         if (A.LoopDepth != B.LoopDepth)
+                           return A.LoopDepth > B.LoopDepth;
+                         return false;
+                       });
+    };
+
+    SortCandidates(InLoopCandidates);
+    SortCandidates(OutOfLoopCandidates);
 
     SmallPtrSet<BasicBlock *, 16> CallsiteBlocksUsed;
 
-    for (const CallsiteCandidate &Cand : Candidates) {
-      Instruction *CallI = Cand.Inst;
+    auto EmitCandidates = [&](ArrayRef<CallsiteCandidate> Candidates) {
+      for (const CallsiteCandidate &Cand : Candidates) {
+        Instruction *CallI = Cand.Inst;
 
-      // Avoid spamming one block with multiple fallback sites.
-      if (!CallsiteBlocksUsed.insert(CallI->getParent()).second)
-        continue;
+        // Avoid spamming one block with multiple fallback sites.
+        if (!CallsiteBlocksUsed.insert(CallI->getParent()).second)
+          continue;
 
-      InsertProgressBefore(CallI, "callsite");
-      ++NumCallsiteInserted;
+        // IMPORTANT:
+        // Callsite fallback is intentionally unthrottled. These sites are sparse
+        // and are the only practical progress points in many irregular kernels.
+        InsertDirectProgressBefore(CallI, "callsite");
+        ++NumCallsiteInserted;
 
-      if (ProgressDebug) {
-        errs() << "[MDMP PROGRESS] Inserted callsite progress site in function "
-               << F.getName();
+        if (ProgressDebug) {
+          errs() << "[MDMP PROGRESS] Inserted callsite progress site in function "
+                 << F.getName();
 
-        if (auto *CB = dyn_cast<CallBase>(CallI)) {
-          if (Function *Callee = CB->getCalledFunction())
-            errs() << " before call " << Callee->getName();
-          else
-            errs() << " before indirect call";
+          if (auto *CB = dyn_cast<CallBase>(CallI)) {
+            if (Function *Callee = CB->getCalledFunction())
+              errs() << " before call " << Callee->getName();
+            else
+              errs() << " before indirect call";
+          }
+
+          errs() << " loop_depth=" << Cand.LoopDepth
+                 << " live_block=" << (Cand.InLiveBlock ? "yes" : "no")
+                 << " dominates_wait=" << (Cand.DominatesWait ? "yes" : "no")
+                 << " score=" << Cand.Score
+                 << "\n";
         }
 
-        errs() << " loop_depth=" << Cand.LoopDepth
-               << " live_block=" << (Cand.InLiveBlock ? "yes" : "no")
-               << " dominates_wait=" << (Cand.DominatesWait ? "yes" : "no")
-               << " score=" << Cand.Score
-               << "\n";
+        if (NumCallsiteInserted >= MaxCallsiteFallbacks)
+          return;
       }
+    };
 
-      if (NumCallsiteInserted >= MaxCallsiteFallbacks)
-        break;
+    // First try only in-loop callsites.
+    EmitCandidates(InLoopCandidates);
+
+    // If we still found nothing useful, fall back to out-of-loop callsites.
+    if (NumCallsiteInserted == 0) {
+      EmitCandidates(OutOfLoopCandidates);
     }
   }
 
@@ -1770,7 +1843,6 @@ void MDMPPass::injectThrottledProgress(ArrayRef<AsyncRequest> Requests,
            << "\n";
   }
 }
-
 
 static void addMDMPWithCleanupPipeline(ModulePassManager &MPM) {
   MPM.addPass(MDMPPass());
