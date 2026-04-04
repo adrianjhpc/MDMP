@@ -428,15 +428,15 @@ bool mdmp_has_active_requests() {
 }
 
 void mdmp_progress_loop() {
-  int flag;
   while (mdmp_runtime_active) {
     {
       std::lock_guard<std::mutex> lock(mdmp_mpi_mutex);
-      MPI_Iprobe(MPI_ANY_SOURCE, MPI_ANY_TAG, mdmp_comm, &flag, MPI_STATUS_IGNORE);
+      mdmp_progress();
     }
     std::this_thread::sleep_for(std::chrono::microseconds(10));
   }
 }
+
 
 void mdmp_progress() {
   int flag;
@@ -604,6 +604,7 @@ void mdmp_wait_unlocked(int req_id) {
 
             if (flag) {
               mdmp_prof_wait_decl_logical_fast++;
+              mdmp_note_requests_completed(1);
             } else {
               mdmp_prof_wait_decl_logical_blocking++;
               uint64_t t0 = mdmp_now_us();
@@ -616,6 +617,7 @@ void mdmp_wait_unlocked(int req_id) {
               B.Requests[mpi_idx] = MPI_REQUEST_NULL;
               mdmp_note_requests_completed(1);
             }
+
           } else {
             mdmp_check_mpi(
                 MPI_Wait(&B.Requests[mpi_idx], MPI_STATUS_IGNORE),
@@ -649,8 +651,9 @@ void mdmp_wait_unlocked(int req_id) {
             MPI_Test(&mdmp_request_pool[req_id], &flag, MPI_STATUS_IGNORE),
             "MPI_Test(imperative profile)");
 
-        if (flag) {
+                if (flag) {
           mdmp_prof_wait_imp_fast++;
+          mdmp_note_requests_completed(1);
         } else {
           mdmp_prof_wait_imp_blocking++;
           uint64_t t0 = mdmp_now_us();
@@ -663,6 +666,7 @@ void mdmp_wait_unlocked(int req_id) {
           mdmp_request_pool[req_id] = MPI_REQUEST_NULL;
           mdmp_note_requests_completed(1);
         }
+
       } else {
         mdmp_check_mpi(
             MPI_Wait(&mdmp_request_pool[req_id], MPI_STATUS_IGNORE),
@@ -1120,51 +1124,51 @@ int mdmp_register_recv(void* buffer, size_t count, int type, size_t bytes, int r
 }
 
 int mdmp_register_reduce(void* sendbuf, void* recvbuf, size_t count, int type, size_t bytes, int root_rank, int op) {
-  uint32_t id = mdmp_decl_req_counter++;
   if ((int)mdmp_decl_req_counter + MDMP_MAX_REQUESTS >= MDMP_DECL_BATCH_TOKEN_BASE) {
     fprintf(stderr, "[MDMP FATAL] Declarative logical ID space exhausted.\n");
     mdmp_abort(1);
-  }  
+  } 
+  uint32_t id = mdmp_decl_req_counter++; 
   reduce_queue.push_back({sendbuf, recvbuf, count, type, bytes, root_rank, op, (int)id});
   return (int)id + MDMP_MAX_REQUESTS;
 }
 
 int mdmp_register_gather(void* sendbuf, size_t sendcount, void* recvbuf, int type, size_t bytes, int root_rank) {
-  uint32_t id = mdmp_decl_req_counter++;
   if ((int)mdmp_decl_req_counter + MDMP_MAX_REQUESTS >= MDMP_DECL_BATCH_TOKEN_BASE) {
     fprintf(stderr, "[MDMP FATAL] Declarative logical ID space exhausted.\n");
     mdmp_abort(1);
   }  
+  uint32_t id = mdmp_decl_req_counter++;
   gather_queue.push_back({sendbuf, sendcount, recvbuf, type, bytes, root_rank, (int)id});
   return (int)id + MDMP_MAX_REQUESTS;
 }
 
 int mdmp_register_allreduce(void* sendbuf, void* recvbuf, size_t count, int type,  size_t bytes, int op) {
-  uint32_t id = mdmp_decl_req_counter++;
   if ((int)mdmp_decl_req_counter + MDMP_MAX_REQUESTS >= MDMP_DECL_BATCH_TOKEN_BASE) {
     fprintf(stderr, "[MDMP FATAL] Declarative logical ID space exhausted.\n");
     mdmp_abort(1);
   }
+  uint32_t id = mdmp_decl_req_counter++;
   allreduce_queue.push_back({sendbuf, recvbuf, count, type, bytes, op, (int)id});
   return (int)id + MDMP_MAX_REQUESTS;
 }
 
 int mdmp_register_allgather(void* sendbuf, size_t count, void* recvbuf, int type, size_t bytes) {
-  uint32_t id = mdmp_decl_req_counter++;
   if ((int)mdmp_decl_req_counter + MDMP_MAX_REQUESTS >= MDMP_DECL_BATCH_TOKEN_BASE) {
     fprintf(stderr, "[MDMP FATAL] Declarative logical ID space exhausted.\n");
     mdmp_abort(1);
   }
+  uint32_t id = mdmp_decl_req_counter++;
   allgather_queue.push_back({sendbuf, count, recvbuf, type, bytes, (int)id});
   return (int)id + MDMP_MAX_REQUESTS;
 }
 
 int mdmp_register_bcast(void* buffer, size_t count, int type, size_t bytes, int root_rank) {
-  uint32_t id = mdmp_decl_req_counter++;
   if ((int)mdmp_decl_req_counter + MDMP_MAX_REQUESTS >= MDMP_DECL_BATCH_TOKEN_BASE) {
     fprintf(stderr, "[MDMP FATAL] Declarative logical ID space exhausted.\n");
     mdmp_abort(1);
   }
+  uint32_t id = mdmp_decl_req_counter++;
   bcast_queue.push_back({buffer, count, type, bytes, root_rank, (int)id});
   return (int)id + MDMP_MAX_REQUESTS;
 }
