@@ -1492,6 +1492,9 @@ void MDMPPass::injectThrottledProgress(ArrayRef<AsyncRequest> Requests,
   bool UseRelaxedProgressFallback = mdmpEnvFlagEnabled("MDMP_PROGRESS_RELAXED", true);
   unsigned Period = mdmpEnvUnsigned("MDMP_PROGRESS_PERIOD", 64);
   unsigned MaxCallsiteFallbacks = mdmpEnvUnsigned("MDMP_PROGRESS_MAX_CALLSITES", 8);
+  unsigned MaxDeepLoopFallbacks = mdmpEnvUnsigned("MDMP_PROGRESS_MAX_DEEP_LOOPS", 2);
+
+
 
   LLVMContext &Ctx = M->getContext();
   IntegerType *I32Ty = Type::getInt32Ty(Ctx);
@@ -1596,7 +1599,7 @@ void MDMPPass::injectThrottledProgress(ArrayRef<AsyncRequest> Requests,
   bool UseRelaxedLeafFallback =
       UseRelaxedProgressFallback && !HasExactLeafCandidate;
 
-  if (ProgressDebug) {
+    if (ProgressDebug) {
     errs() << "[MDMP PROGRESS] Function " << F.getName()
            << ": requests=" << Requests.size()
            << ", windows=" << Windows.size()
@@ -1606,16 +1609,19 @@ void MDMPPass::injectThrottledProgress(ArrayRef<AsyncRequest> Requests,
            << ", relaxed_fallback=" << (UseRelaxedLeafFallback ? "on" : "off")
            << ", period=" << Period
            << ", max_callsite_fallbacks=" << MaxCallsiteFallbacks
+           << ", max_deep_loop_fallbacks=" << MaxDeepLoopFallbacks
            << "\n";
   }
 
   SmallPtrSet<BasicBlock *, 32> InstrumentedHeaders;
+
 
   unsigned NumExactLeafInserted = 0;
   unsigned NumRelaxedLeafInserted = 0;
   unsigned NumExactOuterInserted = 0;
   unsigned NumRelaxedOuterInserted = 0;
   unsigned NumCallsiteInserted = 0;
+  unsigned NumForcedDeepLeafInserted = 0;
 
   // ------------------------------------------------------------
   // Stage 1: leaf-loop progress sites
@@ -1833,6 +1839,85 @@ void MDMPPass::injectThrottledProgress(ArrayRef<AsyncRequest> Requests,
     }
   }
 
+    // ------------------------------------------------------------
+  // Stage 4: last-chance deep-leaf-loop fallback
+  //
+  // If we still failed to place any progress site at all, force a small
+  // number of throttled progress sites into the deepest leaf loops whose
+  // headers are dominated by at least one request start.
+  // ------------------------------------------------------------
+  if ((NumExactLeafInserted + NumRelaxedLeafInserted +
+       NumExactOuterInserted + NumRelaxedOuterInserted +
+       NumCallsiteInserted) == 0) {
+
+    struct DeepLoopCandidate {
+      Loop *L = nullptr;
+      unsigned Depth = 0;
+      unsigned NumBlocks = 0;
+    };
+
+    SmallVector<DeepLoopCandidate, 16> DeepCandidates;
+
+    for (Loop *L : LeafLoops) {
+      BasicBlock *Header = L->getHeader();
+      if (InstrumentedHeaders.contains(Header))
+        continue;
+
+      Instruction *HeaderIP = &*Header->getFirstInsertionPt();
+
+      bool DominatedByAnyRequest = false;
+      for (const RequestWindowInfo &Info : Windows) {
+        if (DT.dominates(Info.Req->StartPoint, HeaderIP)) {
+          DominatedByAnyRequest = true;
+          break;
+        }
+      }
+
+      if (!DominatedByAnyRequest)
+        continue;
+
+      DeepLoopCandidate Cand;
+      Cand.L = L;
+      Cand.Depth = LI.getLoopDepth(Header);
+      Cand.NumBlocks = (unsigned)L->getBlocksVector().size();
+      DeepCandidates.push_back(Cand);
+    }
+
+    std::stable_sort(DeepCandidates.begin(), DeepCandidates.end(),
+                     [](const DeepLoopCandidate &A,
+                        const DeepLoopCandidate &B) {
+                       if (A.Depth != B.Depth)
+                         return A.Depth > B.Depth;
+                       if (A.NumBlocks != B.NumBlocks)
+                         return A.NumBlocks > B.NumBlocks;
+                       return false;
+                     });
+
+    for (const DeepLoopCandidate &Cand : DeepCandidates) {
+      BasicBlock *Header = Cand.L->getHeader();
+      if (!InstrumentedHeaders.insert(Header).second)
+        continue;
+
+      Instruction *InsertPt = &*Header->getFirstInsertionPt();
+      InsertThrottledProgressBefore(InsertPt, "forced-deep-leaf");
+      ++NumForcedDeepLeafInserted;
+
+      if (ProgressDebug) {
+        errs() << "[MDMP PROGRESS] Inserted forced-deep-leaf progress site in function "
+               << F.getName();
+        if (Header->hasName())
+          errs() << " at loop header " << Header->getName();
+        errs() << " loop_depth=" << Cand.Depth
+               << " loop_blocks=" << Cand.NumBlocks
+               << "\n";
+      }
+
+      if (NumForcedDeepLeafInserted >= MaxDeepLoopFallbacks)
+        break;
+    }
+  }
+
+
   if (ProgressDebug) {
     errs() << "[MDMP PROGRESS] Function " << F.getName()
            << ": inserted exact-leaf=" << NumExactLeafInserted
@@ -1840,10 +1925,11 @@ void MDMPPass::injectThrottledProgress(ArrayRef<AsyncRequest> Requests,
            << ", exact-outer=" << NumExactOuterInserted
            << ", relaxed-outer=" << NumRelaxedOuterInserted
            << ", callsite=" << NumCallsiteInserted
+           << ", forced-deep-leaf=" << NumForcedDeepLeafInserted
            << "\n";
   }
-}
 
+}
 static void addMDMPWithCleanupPipeline(ModulePassManager &MPM) {
   MPM.addPass(MDMPPass());
 
