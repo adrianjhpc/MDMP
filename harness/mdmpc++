@@ -1,12 +1,80 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # mdmpc++ : The MDMP C++ Compiler Wrapper
 
-# Find where this script lives so we can locate the plugin and libraries
-MDMP_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
+set -euo pipefail
 
-PLUGIN="-fpass-plugin=${MDMP_DIR}/..//build/src/MDMP.so"
-INCLUDES="-I${MDMP_DIR}/../src"
-LIBS="-L${MDMP_DIR}/../build/src -lmdmp_runtime"
+MDMP_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
-# Call the real compiler (clang++), forcing at least -O1, injecting our plugin, and passing along user args
-clang++ -O3 ${PLUGIN} ${INCLUDES} "$@" ${LIBS}
+CXX_BIN="${MDMP_CXX:-clang++}"
+
+PLUGIN_PATH="${MDMP_DIR}/../build/src/MDMP.so"
+SRC_DIR="${MDMP_DIR}/../src"
+RUNTIME_DIR="${MDMP_DIR}/../build/src"
+
+if [[ ! -f "${PLUGIN_PATH}" ]]; then
+  echo "mdmpc++ error: MDMP pass plugin not found at ${PLUGIN_PATH}" >&2
+  exit 1
+fi
+
+PLUGIN_ARGS=( "-fpass-plugin=${PLUGIN_PATH}" )
+INCLUDE_ARGS=( "-I${SRC_DIR}" )
+LINK_ARGS=( "-L${RUNTIME_DIR}" "-Wl,-rpath,${RUNTIME_DIR}" "-lmdmp_runtime" )
+
+compile_only=0
+preprocess_only=0
+assemble_only=0
+has_source=0
+saw_opt=0
+
+USER_ARGS=()
+
+for arg in "$@"; do
+  case "${arg}" in
+    -c)
+      compile_only=1
+      USER_ARGS+=( "${arg}" )
+      ;;
+    -E)
+      preprocess_only=1
+      USER_ARGS+=( "${arg}" )
+      ;;
+    -S)
+      assemble_only=1
+      USER_ARGS+=( "${arg}" )
+      ;;
+    *.cc|*.cpp|*.cxx|*.C|*.CPP)
+      has_source=1
+      USER_ARGS+=( "${arg}" )
+      ;;
+    -O0)
+      saw_opt=1
+      USER_ARGS+=( "-O1" )
+      ;;
+    -O|-O1|-O2|-O3|-Ofast|-Og|-Os|-Oz)
+      saw_opt=1
+      USER_ARGS+=( "${arg}" )
+      ;;
+    *)
+      USER_ARGS+=( "${arg}" )
+      ;;
+  esac
+done
+
+if (( ! saw_opt )); then
+  USER_ARGS=( "-O1" "${USER_ARGS[@]}" )
+fi
+
+if (( preprocess_only )); then
+  exec "${CXX_BIN}" "${INCLUDE_ARGS[@]}" "${USER_ARGS[@]}"
+fi
+
+if (( compile_only || assemble_only )); then
+  exec "${CXX_BIN}" "${PLUGIN_ARGS[@]}" "${INCLUDE_ARGS[@]}" "${USER_ARGS[@]}"
+fi
+
+if (( has_source )); then
+  exec "${CXX_BIN}" "${PLUGIN_ARGS[@]}" "${INCLUDE_ARGS[@]}" "${USER_ARGS[@]}" "${LINK_ARGS[@]}"
+fi
+
+exec "${CXX_BIN}" "${USER_ARGS[@]}" "${LINK_ARGS[@]}"
+
