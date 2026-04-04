@@ -860,25 +860,31 @@ bool MDMPPass::runOnFunction(Function &F, AAResults &AA, DominatorTree &DT, Loop
   AllRequestsForProgress.insert(AllRequestsForProgress.end(),
                                 PendingRequests.begin(), PendingRequests.end());
 
-  // Build a fresh MemorySSA on the transformed function.
-  MemorySSA FreshMSSA(F, &AA, &DT);
+  // Build MemorySSA on the transformed function for wait insertion.
+  MemorySSA WaitMSSA(F, &AA, &DT);
 
   for (auto &R : CompletedRegions) {
-    injectWaitsForRegion(R.Requests, R.RegionEnd, AA, LI, Ctx, M, DT, FreshMSSA);
+    injectWaitsForRegion(R.Requests, R.RegionEnd, AA, LI, Ctx, M, DT, WaitMSSA);
   }
 
   if (!PendingRequests.empty()) {
-    injectWaitsForRegion(PendingRequests, nullptr, AA, LI, Ctx, M, DT, FreshMSSA);
+    injectWaitsForRegion(PendingRequests, nullptr, AA, LI, Ctx, M, DT, WaitMSSA);
   }
 
+  // IMPORTANT:
+  // Rebuild MemorySSA after wait insertion. Wait calls are real memory-affecting
+  // barriers, so progress placement must see the post-wait IR, not the stale one.
+  MemorySSA ProgressMSSA(F, &AA, &DT);
+
   if (!AllRequestsForProgress.empty()) {
-    injectThrottledProgress(AllRequestsForProgress, F, AA, DT, LI, FreshMSSA, M);
+    injectThrottledProgress(AllRequestsForProgress, F, AA, DT, LI, ProgressMSSA, M);
   }
 
   CompletedRegions.clear();
   PendingRequests.clear();
   return Changed;
 }
+
 
 bool MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTree &DT, LoopInfo &LI) {
   Module *M = F.getParent();
@@ -1444,7 +1450,6 @@ void MDMPPass::injectWaitsForRegion(ArrayRef<AsyncRequest> Requests, Instruction
 
 }
 
-
 void MDMPPass::injectThrottledProgress(ArrayRef<AsyncRequest> Requests,
                                        Function &F,
                                        AAResults &AA,
@@ -1513,14 +1518,6 @@ void MDMPPass::injectThrottledProgress(ArrayRef<AsyncRequest> Requests,
     Instruction *ThenTerm = SplitBlockAndInsertIfThen(DoTick, InsertPt, false);
     IRBuilder<> ThenBuilder(ThenTerm);
     ThenBuilder.CreateCall(runtime_maybe_progress);
-
-    if (ProgressDebug) {
-      errs() << "[MDMP PROGRESS] Inserted " << Kind
-             << " progress site in function " << F.getName();
-      if (InsertPt->getParent()->hasName())
-        errs() << " in block " << InsertPt->getParent()->getName();
-      errs() << "\n";
-    }
   };
 
   auto LoopMatchesExact = [&](Loop *L) {
@@ -1596,6 +1593,15 @@ void MDMPPass::injectThrottledProgress(ArrayRef<AsyncRequest> Requests,
       ++NumExactLeafInserted;
     else
       ++NumRelaxedLeafInserted;
+
+    if (ProgressDebug) {
+      errs() << "[MDMP PROGRESS] Inserted "
+             << (ExactMatch ? "exact-leaf" : "relaxed-leaf")
+             << " progress site in function " << F.getName();
+      if (Header->hasName())
+        errs() << " at loop header " << Header->getName();
+      errs() << "\n";
+    }
   }
 
   // ------------------------------------------------------------
@@ -1624,43 +1630,130 @@ void MDMPPass::injectThrottledProgress(ArrayRef<AsyncRequest> Requests,
         ++NumExactOuterInserted;
       else
         ++NumRelaxedOuterInserted;
+
+      if (ProgressDebug) {
+        errs() << "[MDMP PROGRESS] Inserted "
+               << (ExactMatch ? "exact-outer" : "relaxed-outer")
+               << " progress site in function " << F.getName();
+        if (Header->hasName())
+          errs() << " at loop header " << Header->getName();
+        errs() << "\n";
+      }
     }
   }
 
   // ------------------------------------------------------------
-  // Stage 3: callsite fallback if no loop-based site was inserted
+  // Stage 3: scored callsite fallback if no loop-based site was inserted
   // ------------------------------------------------------------
   if ((NumExactLeafInserted + NumRelaxedLeafInserted +
        NumExactOuterInserted + NumRelaxedOuterInserted) == 0) {
 
-    SmallVector<Instruction *, 32> CandidateCalls;
+    struct CallsiteCandidate {
+      Instruction *Inst = nullptr;
+      unsigned Score = 0;
+      unsigned LoopDepth = 0;
+      bool InLiveBlock = false;
+      bool DominatesWait = false;
+    };
+
+    SmallVector<CallsiteCandidate, 32> Candidates;
+
     for (BasicBlock &BB : F) {
       for (Instruction &I : BB) {
-        if (isCandidateCallForProgress(&I))
-          CandidateCalls.push_back(&I);
+        Instruction *CallI = &I;
+        if (!isCandidateCallForProgress(CallI))
+          continue;
+
+        bool Match = false;
+        unsigned BestScore = 0;
+        bool BestInLiveBlock = false;
+        bool BestDominatesWait = false;
+        unsigned LoopDepth = LI.getLoopDepth(CallI->getParent());
+
+        for (const RequestWindowInfo &Info : Windows) {
+          if (!requestWindowSuggestsCallSiteProgressRelaxed(Info, CallI, DT))
+            continue;
+
+          Match = true;
+
+          bool InLiveBlock = Info.LiveBlocks.contains(CallI->getParent());
+          bool DominatesSomeWait = false;
+
+          for (Instruction *WP : Info.WaitPoints) {
+            if (WP->getParent() == CallI->getParent()) {
+              if (CallI->comesBefore(WP)) {
+                DominatesSomeWait = true;
+                break;
+              }
+            }
+            if (DT.dominates(CallI, WP)) {
+              DominatesSomeWait = true;
+              break;
+            }
+          }
+
+          unsigned Score = 0;
+          if (InLiveBlock)
+            Score += 100;
+          if (DominatesSomeWait)
+            Score += 20;
+          if (LoopDepth > 0)
+            Score += 5;
+          Score += 10 * LoopDepth;
+
+          if (Score > BestScore) {
+            BestScore = Score;
+            BestInLiveBlock = InLiveBlock;
+            BestDominatesWait = DominatesSomeWait;
+          }
+        }
+
+        if (!Match)
+          continue;
+
+        Candidates.push_back({CallI, BestScore, LoopDepth,
+                              BestInLiveBlock, BestDominatesWait});
       }
     }
 
+    std::stable_sort(Candidates.begin(), Candidates.end(),
+                     [](const CallsiteCandidate &A, const CallsiteCandidate &B) {
+                       if (A.Score != B.Score)
+                         return A.Score > B.Score;
+                       if (A.LoopDepth != B.LoopDepth)
+                         return A.LoopDepth > B.LoopDepth;
+                       return false;
+                     });
+
     SmallPtrSet<BasicBlock *, 16> CallsiteBlocksUsed;
 
-    for (Instruction *CallI : CandidateCalls) {
-      bool Match = false;
-      for (const RequestWindowInfo &Info : Windows) {
-        if (requestWindowSuggestsCallSiteProgressRelaxed(Info, CallI, DT)) {
-          Match = true;
-          break;
-        }
-      }
+    for (const CallsiteCandidate &Cand : Candidates) {
+      Instruction *CallI = Cand.Inst;
 
-      if (!Match)
-        continue;
-
-      // Avoid spamming one block with multiple fallback progress sites.
+      // Avoid spamming one block with multiple fallback sites.
       if (!CallsiteBlocksUsed.insert(CallI->getParent()).second)
         continue;
 
       InsertProgressBefore(CallI, "callsite");
       ++NumCallsiteInserted;
+
+      if (ProgressDebug) {
+        errs() << "[MDMP PROGRESS] Inserted callsite progress site in function "
+               << F.getName();
+
+        if (auto *CB = dyn_cast<CallBase>(CallI)) {
+          if (Function *Callee = CB->getCalledFunction())
+            errs() << " before call " << Callee->getName();
+          else
+            errs() << " before indirect call";
+        }
+
+        errs() << " loop_depth=" << Cand.LoopDepth
+               << " live_block=" << (Cand.InLiveBlock ? "yes" : "no")
+               << " dominates_wait=" << (Cand.DominatesWait ? "yes" : "no")
+               << " score=" << Cand.Score
+               << "\n";
+      }
 
       if (NumCallsiteInserted >= MaxCallsiteFallbacks)
         break;
