@@ -1388,7 +1388,29 @@ void MDMPPass::injectWaitsForRegion(ArrayRef<AsyncRequest> Requests, Instruction
 
     for (Instruction *InsertPt : Info.WaitPoints) {
       if (!DT.dominates(Info.Req->StartPoint, InsertPt)) {
-        InsertPt = Info.Req->StartPoint->getParent()->getTerminator();
+	InsertPt = Info.Req->StartPoint->getParent()->getTerminator();
+      }
+
+      // ------------------------------------------------------------
+      // Preserve precise in-loop waits.
+      //
+      // If the first true consumer/clobber is a normal instruction inside a loop,
+      // do NOT hoist the wait to the loop preheader. Hoisting in this case destroys
+      // overlap for kernels like heat/stencil, because the interior loop body could
+      // have run before the boundary-dependent use.
+      //
+      // We only keep the exact in-loop placement for non-terminator instructions.
+      // Coarse fallback wait points (latch terminators, function exits, etc.) still
+      // use the existing preheader-hoisting logic below.
+      // ------------------------------------------------------------
+      Loop *InsertLoop = LI.getLoopFor(InsertPt->getParent());
+      bool IsPreciseInLoopWait =
+        (InsertLoop != nullptr &&
+         InsertPt != InsertPt->getParent()->getTerminator());
+
+      if (IsPreciseInLoopWait) {
+	UniqueWaitPoints.insert(InsertPt);
+	continue;
       }
 
       Instruction *HoistPt = InsertPt;
@@ -1396,24 +1418,25 @@ void MDMPPass::injectWaitsForRegion(ArrayRef<AsyncRequest> Requests, Instruction
       Loop *ReqLoop = LI.getLoopFor(Info.Req->StartPoint->getParent());
 
       while (L && L != ReqLoop) {
-        BasicBlock *Latch = L->getLoopLatch();
-        if (Latch && DT.dominates(HoistPt->getParent(), Latch)) {
-          BasicBlock *Preheader = L->getLoopPreheader();
-          if (Preheader) {
-            Instruction *PotentialHoistPt = Preheader->getTerminator();
-            if (DT.dominates(Info.Req->StartPoint, PotentialHoistPt)) {
-              HoistPt = PotentialHoistPt;
-              L = LI.getLoopFor(HoistPt->getParent());
-              continue;
-            }
-          }
-        }
-        break;
+	BasicBlock *Latch = L->getLoopLatch();
+	if (Latch && DT.dominates(HoistPt->getParent(), Latch)) {
+	  BasicBlock *Preheader = L->getLoopPreheader();
+	  if (Preheader) {
+	    Instruction *PotentialHoistPt = Preheader->getTerminator();
+	    if (DT.dominates(Info.Req->StartPoint, PotentialHoistPt)) {
+	      HoistPt = PotentialHoistPt;
+	      L = LI.getLoopFor(HoistPt->getParent());
+	      continue;
+	    }
+	  }
+	}
+	break;
       }
 
       UniqueWaitPoints.insert(HoistPt);
     }
 
+    
     for (Instruction *Pt : UniqueWaitPoints) {
       GroupedWaits[Pt].push_back(Info.Req);
     }
