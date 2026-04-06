@@ -24,9 +24,9 @@ extern "C" {
 #define MDMP_DECLARATIVE_WAIT -1
 #define MDMP_PROCESS_NOT_INVOLVED -2
 
-constexpr int MDMP_WAIT_MANY_TINY_CUTOFF   = 8;
-constexpr int MDMP_WAIT_MANY_STACK_CUTOFF  = 32;
-constexpr int MDMP_WAIT_MANY_MPI_BATCH_MIN = 16;
+  constexpr int MDMP_WAIT_MANY_TINY_CUTOFF   = 8;
+  constexpr int MDMP_WAIT_MANY_STACK_CUTOFF  = 32;
+  constexpr int MDMP_WAIT_MANY_MPI_BATCH_MIN = 16;
   
   void mdmp_init();
   void mdmp_final();
@@ -49,6 +49,7 @@ constexpr int MDMP_WAIT_MANY_MPI_BATCH_MIN = 16;
   void mdmp_free_declarative_types_if_all_complete();
   
   void mdmp_maybe_progress();
+  void mdmp_maybe_progress_site(int site_id);
   void mdmp_progress();
   void mdmp_finish_declarative_batch();
   

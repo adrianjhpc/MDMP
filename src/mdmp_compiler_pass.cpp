@@ -853,6 +853,8 @@ PreservedAnalyses MDMPPass::run(Module &M, ModuleAnalysisManager &MAM) {
   bool changed = false;
   auto &FAM = MAM.getResult<FunctionAnalysisManagerModuleProxy>(M).getManager();
 
+  NextProgressSiteID = 0;
+  
   for (auto &F : M) {
     if (!F.isDeclaration()) {
       AAResults &AA = FAM.getResult<AAManager>(F);
@@ -904,7 +906,9 @@ bool MDMPPass::runOnFunction(Function &F, AAResults &AA, DominatorTree &DT, Loop
   // barriers, so progress placement must see the post-wait IR, not the stale one.
   MemorySSA ProgressMSSA(F, &AA, &DT);
 
-  if (!AllRequestsForProgress.empty()) {
+  bool EnableJITProgress = mdmpEnvFlagEnabled("MDMP_ENABLE_JIT_PROGRESS", true);
+
+  if (EnableJITProgress && !AllRequestsForProgress.empty()) {
     injectThrottledProgress(AllRequestsForProgress, F, AA, DT, LI, ProgressMSSA, M);
   }
 
@@ -1503,8 +1507,9 @@ void MDMPPass::injectThrottledProgress(ArrayRef<AsyncRequest> Requests,
   LLVMContext &Ctx = M->getContext();
   IntegerType *I32Ty = Type::getInt32Ty(Ctx);
 
-  FunctionCallee runtime_maybe_progress =
-      M->getOrInsertFunction("mdmp_maybe_progress", Type::getVoidTy(Ctx));
+  FunctionCallee runtime_maybe_progress_site =
+    M->getOrInsertFunction("mdmp_maybe_progress_site",
+			   Type::getVoidTy(Ctx), I32Ty);
 
   auto Windows = analyseRequestWindows(Requests, nullptr, AA, LI, MSSA, M);
   if (Windows.empty()) {
@@ -1560,10 +1565,12 @@ void MDMPPass::injectThrottledProgress(ArrayRef<AsyncRequest> Requests,
   IRBuilder<> EntryBuilder(EntryIP);
 
   AllocaInst *CounterAlloc =
-      EntryBuilder.CreateAlloca(I32Ty, nullptr, "mdmp_progress_counter");
+    EntryBuilder.CreateAlloca(I32Ty, nullptr, "mdmp_progress_counter");
   EntryBuilder.CreateStore(Zero, CounterAlloc);
 
   auto InsertThrottledProgressBefore = [&](Instruction *InsertPt, StringRef Kind) {
+    unsigned SiteID = NextProgressSiteID++;
+
     IRBuilder<> Builder(InsertPt);
 
     Value *Cur = Builder.CreateLoad(I32Ty, CounterAlloc, "mdmp_prog_cur");
@@ -1583,24 +1590,30 @@ void MDMPPass::injectThrottledProgress(ArrayRef<AsyncRequest> Requests,
 
     Instruction *ThenTerm = SplitBlockAndInsertIfThen(DoTick, InsertPt, false);
     IRBuilder<> ThenBuilder(ThenTerm);
-    ThenBuilder.CreateCall(runtime_maybe_progress);
+    ThenBuilder.CreateCall(runtime_maybe_progress_site,
+                           {ConstantInt::get(I32Ty, SiteID)});
 
     if (ProgressDebug) {
       errs() << "[MDMP PROGRESS] Inserted " << Kind
-             << " progress site in function " << F.getName();
+             << " progress site in function " << F.getName()
+             << " site_id=" << SiteID;
       if (InsertPt->getParent()->hasName())
         errs() << " in block " << InsertPt->getParent()->getName();
       errs() << "\n";
     }
-  };
+  }; 
 
   auto InsertDirectProgressBefore = [&](Instruction *InsertPt, StringRef Kind) {
+    unsigned SiteID = NextProgressSiteID++;
+
     IRBuilder<> Builder(InsertPt);
-    Builder.CreateCall(runtime_maybe_progress);
+    Builder.CreateCall(runtime_maybe_progress_site,
+                       {ConstantInt::get(I32Ty, SiteID)});
 
     if (ProgressDebug) {
       errs() << "[MDMP PROGRESS] Inserted " << Kind
-             << " progress site in function " << F.getName();
+             << " progress site in function " << F.getName()
+             << " site_id=" << SiteID;
       if (InsertPt->getParent()->hasName())
         errs() << " in block " << InsertPt->getParent()->getName();
       errs() << "\n";
@@ -1632,7 +1645,7 @@ void MDMPPass::injectThrottledProgress(ArrayRef<AsyncRequest> Requests,
   }
 
   bool UseRelaxedLeafFallback =
-      UseRelaxedProgressFallback && !HasExactLeafCandidate;
+    UseRelaxedProgressFallback && !HasExactLeafCandidate;
 
   if (ProgressDebug) {
     errs() << "[MDMP PROGRESS] Function " << F.getName()
@@ -1810,7 +1823,7 @@ void MDMPPass::injectThrottledProgress(ArrayRef<AsyncRequest> Requests,
           continue;
 
         CallsiteCandidate Cand{CallI, BestScore, LoopDepth,
-                               BestInLiveBlock, BestDominatesWait};
+	  BestInLiveBlock, BestDominatesWait};
 
         if (LoopDepth > 0)
           InLoopCandidates.push_back(Cand);
@@ -1881,7 +1894,7 @@ void MDMPPass::injectThrottledProgress(ArrayRef<AsyncRequest> Requests,
     }
   }
 
-    // ------------------------------------------------------------
+  // ------------------------------------------------------------
   // Stage 4: last-chance deep-leaf-loop fallback
   //
   // If we still failed to place any progress site at all, force a small

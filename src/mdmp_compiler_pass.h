@@ -1,8 +1,8 @@
 #ifndef MDMP_PASS_H
 #define MDMP_PASS_H
 
-#define LLVM_VERSION_GE(major, minor)                                          \
-  (LLVM_VERSION_MAJOR > (major) ||                                             \
+#define LLVM_VERSION_GE(major, minor)					\
+  (LLVM_VERSION_MAJOR > (major) ||					\
    LLVM_VERSION_MAJOR == (major) && LLVM_VERSION_MINOR >= (minor))
 
 #include "llvm/IR/PassManager.h"
@@ -78,6 +78,8 @@ namespace llvm {
     
   private:
 
+    unsigned NextProgressSiteID = 0;   
+    
     std::vector<CompletedRegion> CompletedRegions;    
 
     bool isHardBarrierInstForWaitPlacement(Instruction *Inst);
@@ -185,9 +187,9 @@ namespace llvm {
 						  Value *RecvBuf, Value *Type,
 						  Value *Bytes);
 
-     std::vector<TrackedBuffer> buildAllreduceBuffers(Value *SendBuf, Value *RecvBuf,
-						      Value *Count, Value *Type,
-						      Value *Bytes);
+    std::vector<TrackedBuffer> buildAllreduceBuffers(Value *SendBuf, Value *RecvBuf,
+						     Value *Count, Value *Type,
+						     Value *Bytes);
 
     std::vector<TrackedBuffer> buildAllgatherBuffers(Value *SendBuf, Value *Count,
 						     Value *RecvBuf, Value *Type,
