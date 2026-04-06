@@ -98,7 +98,16 @@ static DeclWaitTarget decl_to_req_target[65536];
 
 // MPI request tracking
 MPI_Request mdmp_request_pool[MDMP_MAX_REQUESTS];
-uint32_t mdmp_imper_req_counter = 0;
+
+// Free-list of available imperative request slots
+int mdmp_imper_free_slots[MDMP_MAX_REQUESTS];
+int mdmp_imper_free_top = 0;
+
+// Dense active list of currently in-flight imperative slots
+int mdmp_imper_active_slots[MDMP_MAX_REQUESTS];
+int mdmp_imper_active_pos[MDMP_MAX_REQUESTS];
+int mdmp_imper_active_count = 0;
+
 uint32_t mdmp_decl_req_counter = 0;    
 uint32_t mdmp_decl_batch_counter = 0;  
 
@@ -304,17 +313,38 @@ inline int mdmp_actual_count(size_t count, int type, size_t bytes) {
   return (type == 4) ? (int)bytes : (int)count;
 }
 
+
 int mdmp_alloc_imperative_slot_unlocked() {
-  // L1 Cache Trap Fix: Always search from 0 to keep active slots pinned in cache.
-  for (int i = 0; i < MDMP_MAX_REQUESTS; ++i) {
-    if (mdmp_request_pool[i] == MPI_REQUEST_NULL) {
-      mdmp_imper_req_counter++; // Increment just for logical tracking
-      return i;
-    }
+  if (mdmp_imper_free_top == 0) {
+    fprintf(stderr,
+            "[MDMP FATAL] Request pool overflow! Exceeded %d concurrent imperative requests.\n",
+            MDMP_MAX_REQUESTS);
+    mdmp_abort(1);
   }
-  fprintf(stderr, "[MDMP FATAL] Request ring buffer overflow! Exceeded %d concurrent imperative requests.\n", MDMP_MAX_REQUESTS);
-  mdmp_abort(1);
-  return -1;
+
+  int id = mdmp_imper_free_slots[--mdmp_imper_free_top];
+
+  mdmp_imper_active_pos[id] = mdmp_imper_active_count;
+  mdmp_imper_active_slots[mdmp_imper_active_count++] = id;
+
+  return id;
+}
+
+static inline void mdmp_release_imperative_slot_unlocked(int id) {
+  if (id < 0 || id >= MDMP_MAX_REQUESTS)
+    return;
+
+  int pos = mdmp_imper_active_pos[id];
+  if (pos < 0)
+    return;
+
+  int last_slot = mdmp_imper_active_slots[mdmp_imper_active_count - 1];
+  mdmp_imper_active_slots[pos] = last_slot;
+  mdmp_imper_active_pos[last_slot] = pos;
+
+  mdmp_imper_active_count--;
+  mdmp_imper_active_pos[id] = -1;
+  mdmp_imper_free_slots[mdmp_imper_free_top++] = id;
 }
 
 inline bool mdmp_is_decl_batch_token(int token) { return token >= MDMP_DECL_BATCH_TOKEN_BASE; }
@@ -384,12 +414,21 @@ bool mdmp_has_active_requests() {
 
 void mdmp_progress() {
   int flag;
-  for (int i = 0; i < MDMP_MAX_REQUESTS; i++) {
-    if (mdmp_request_pool[i] != MPI_REQUEST_NULL) {
-      MPI_Test(&mdmp_request_pool[i], &flag, MPI_STATUS_IGNORE);
-      if (flag && mdmp_request_pool[i] == MPI_REQUEST_NULL) {
-        mdmp_note_requests_completed(1);
-      }
+  uint64_t tested_imp = 0;
+  
+  for (int idx = 0; idx < mdmp_imper_active_count; ) {
+    int slot = mdmp_imper_active_slots[idx];
+    int flag_local = 0;
+
+    MPI_Test(&mdmp_request_pool[slot], &flag_local, MPI_STATUS_IGNORE);
+    tested_imp++;
+
+    if (flag_local && mdmp_request_pool[slot] == MPI_REQUEST_NULL) {
+      mdmp_note_requests_completed(1);
+      mdmp_release_imperative_slot_unlocked(slot);
+      // do not increment idx: active list has been compacted
+    } else {
+      ++idx;
     }
   }
 
@@ -645,7 +684,15 @@ void mdmp_init() {
   MPI_Comm_size(MPI_COMM_WORLD, &global_size);
   MPI_Comm_dup(MPI_COMM_WORLD, &mdmp_comm);
 
-  mdmp_imper_req_counter = 0;
+  mdmp_imper_active_count = 0;
+  mdmp_imper_free_top = MDMP_MAX_REQUESTS;
+
+  for (int i = 0; i < MDMP_MAX_REQUESTS; ++i) {
+    mdmp_request_pool[i] = MPI_REQUEST_NULL;
+    mdmp_imper_free_slots[i] = MDMP_MAX_REQUESTS - 1 - i;
+    mdmp_imper_active_pos[i] = -1;
+  }
+
   mdmp_decl_req_counter = 0;
   mdmp_decl_batch_counter = 0;
   

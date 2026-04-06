@@ -1922,14 +1922,21 @@ void MDMPPass::injectThrottledProgress(ArrayRef<AsyncRequest> Requests,
       bool MatchesSomeLiveWindow = false;
 
       for (const RequestWindowInfo &Info : Windows) {
-        // Stronger condition than just "request start dominates loop header":
-        // only keep loops that are either inside a known live block region
-        // or that directly contain a future wait point.
-        if (Info.LiveBlocks.contains(Header)) {
-          MatchesSomeLiveWindow = true;
-          break;
+        // Better fallback test:
+        // accept the loop if ANY block in the loop is inside the known live
+        // request window, not just the header block.
+        for (BasicBlock *LoopBB : L->getBlocksVector()) {
+          if (Info.LiveBlocks.contains(LoopBB)) {
+            MatchesSomeLiveWindow = true;
+            break;
+          }
         }
 
+        if (MatchesSomeLiveWindow)
+          break;
+
+        // Secondary fallback: if the loop directly contains a future wait point,
+        // it still lies on a path where the request remains interesting.
         for (Instruction *WP : Info.WaitPoints) {
           if (L->contains(WP->getParent())) {
             MatchesSomeLiveWindow = true;
@@ -1940,9 +1947,6 @@ void MDMPPass::injectThrottledProgress(ArrayRef<AsyncRequest> Requests,
         if (MatchesSomeLiveWindow)
           break;
       }
-
-      if (!MatchesSomeLiveWindow)
-        continue;
 
       DeepLoopCandidate Cand;
       Cand.L = L;
