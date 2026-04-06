@@ -106,6 +106,8 @@ struct DeclarativeBatch {
   uint32_t Serial = 0;
   MPI_Request Requests[MDMP_STATIC_P2P_Q_SIZE * 4];
   int RequestCount = 0;
+  MPI_Datatype TypesToFree[MDMP_STATIC_P2P_Q_SIZE * 4];
+  int TypeCount = 0;
   bool Active = false;
 };
 
@@ -135,7 +137,6 @@ uint32_t mdmp_decl_req_counter = 0;
 uint32_t mdmp_decl_batch_counter = 0;  
 
 std::atomic<int> mdmp_active_request_count{0};
-
 
 static inline void mdmp_profile_ensure_site(int site_id) {
   if (site_id < 0)
@@ -430,6 +431,50 @@ inline uint64_t mdmp_actual_bytes(size_t count, int type, size_t bytes) {
   }
 }
 
+inline int mdmp_registered_msg_actual_bytes(const RegisteredMsg &M) {
+  return (int)mdmp_actual_bytes(M.count, M.type, M.bytes);
+}
+
+bool mdmp_group_is_contiguous(const RegisteredMsg *queue, int begin, int end) {
+  if (end - begin <= 1)
+    return true;
+
+  auto ptr_of = [](const RegisteredMsg &M) -> uintptr_t {
+    return reinterpret_cast<uintptr_t>(M.buffer);
+  };
+
+  uintptr_t expected = ptr_of(queue[begin]) + (uintptr_t)mdmp_registered_msg_actual_bytes(queue[begin]);
+
+  for (int i = begin + 1; i < end; ++i) {
+    uintptr_t cur = ptr_of(queue[i]);
+    if (cur != expected)
+      return false;
+    expected = cur + (uintptr_t)mdmp_registered_msg_actual_bytes(queue[i]);
+  }
+
+  return true;
+}
+
+inline size_t mdmp_group_total_bytes(const RegisteredMsg *queue, int begin, int end) {
+  size_t total = 0;
+  for (int i = begin; i < end; ++i) {
+    total += (size_t)mdmp_registered_msg_actual_bytes(queue[i]);
+  }
+  return total;
+}
+
+inline void mdmp_reset_batch_metadata(DeclarativeBatch &B) {
+  for (int i = 0; i < B.TypeCount; ++i) {
+    if (B.TypesToFree[i] != MPI_DATATYPE_NULL) {
+      MPI_Type_free(&B.TypesToFree[i]);
+      B.TypesToFree[i] = MPI_DATATYPE_NULL;
+    }
+  }
+  B.TypeCount = 0;
+  B.RequestCount = 0;
+  B.Active = false;
+}
+
 int mdmp_alloc_imperative_slot_unlocked() {
   if (mdmp_imper_free_top == 0) {
     fprintf(stderr,
@@ -446,7 +491,7 @@ int mdmp_alloc_imperative_slot_unlocked() {
   return id;
 }
 
-static inline void mdmp_release_imperative_slot_unlocked(int id) {
+inline void mdmp_release_imperative_slot_unlocked(int id) {
   if (id < 0 || id >= MDMP_MAX_REQUESTS)
     return;
 
@@ -467,37 +512,40 @@ inline bool mdmp_is_decl_batch_token(int token) { return token >= MDMP_DECL_BATC
 inline int mdmp_make_decl_batch_token(uint32_t serial) { return MDMP_DECL_BATCH_TOKEN_BASE + (int)serial; }
 inline uint32_t mdmp_decl_batch_serial_from_token(int token) { return (uint32_t)(token - MDMP_DECL_BATCH_TOKEN_BASE); }
 
+
 void mdmp_wait_declarative_batch_unlocked(uint32_t serial) {
   DeclarativeBatch& B = mdmp_batch_pool[serial % 16];
-  if (B.Serial == serial && B.Active) {
-    
-    if (mdmp_profile_enabled) {
-      mdmp_prof_wait_decl_batch_calls++;
-      int all_done = 0;
-      MPI_Testall(B.RequestCount, B.Requests, &all_done, MPI_STATUSES_IGNORE);
-      if (all_done) {
-        mdmp_prof_wait_decl_batch_fast++;
-      } else {
-        mdmp_prof_wait_decl_batch_blocking++;
-        uint64_t t0 = mdmp_now_us();
-        
-        bool use_locks = mdmp_runtime_active.load(std::memory_order_relaxed);
-        if (use_locks) mdmp_mpi_mutex.unlock();
-        MPI_Waitall(B.RequestCount, B.Requests, MPI_STATUSES_IGNORE);
-        if (use_locks) mdmp_mpi_mutex.lock();
-        
-        mdmp_prof_wait_decl_batch_block_time_us += (mdmp_now_us() - t0);
-      }
+  if (B.Serial != serial || !B.Active)
+    return;
+
+  if (mdmp_profile_enabled) {
+    mdmp_prof_wait_decl_batch_calls++;
+    int all_done = 0;
+    MPI_Testall(B.RequestCount, B.Requests, &all_done, MPI_STATUSES_IGNORE);
+
+    if (all_done) {
+      mdmp_prof_wait_decl_batch_fast++;
     } else {
+      mdmp_prof_wait_decl_batch_blocking++;
+      uint64_t t0 = mdmp_now_us();
+
       bool use_locks = mdmp_runtime_active.load(std::memory_order_relaxed);
       if (use_locks) mdmp_mpi_mutex.unlock();
-      mdmp_check_mpi(MPI_Waitall(B.RequestCount, B.Requests, MPI_STATUSES_IGNORE), "MPI_Waitall(declarative batch)");
+      MPI_Waitall(B.RequestCount, B.Requests, MPI_STATUSES_IGNORE);
       if (use_locks) mdmp_mpi_mutex.lock();
-    }
 
-    mdmp_note_requests_completed(B.RequestCount);
-    B.Active = false;
+      mdmp_prof_wait_decl_batch_block_time_us += (mdmp_now_us() - t0);
+    }
+  } else {
+    bool use_locks = mdmp_runtime_active.load(std::memory_order_relaxed);
+    if (use_locks) mdmp_mpi_mutex.unlock();
+    mdmp_check_mpi(MPI_Waitall(B.RequestCount, B.Requests, MPI_STATUSES_IGNORE),
+                   "MPI_Waitall(declarative batch)");
+    if (use_locks) mdmp_mpi_mutex.lock();
   }
+
+  mdmp_note_requests_completed(B.RequestCount);
+  mdmp_reset_batch_metadata(B);
 }
 
 void mdmp_wait_all_declarative_batches_unlocked() {
@@ -560,9 +608,14 @@ void mdmp_progress() {
       }
       bool all_done = true;
       for (int j = 0; j < mdmp_batch_pool[i].RequestCount; j++) {
-        if (mdmp_batch_pool[i].Requests[j] != MPI_REQUEST_NULL) { all_done = false; break; }
+        if (mdmp_batch_pool[i].Requests[j] != MPI_REQUEST_NULL) {
+          all_done = false;
+          break;
+        }
       }
-      if (all_done) mdmp_batch_pool[i].Active = false;
+      if (all_done) {
+        mdmp_reset_batch_metadata(mdmp_batch_pool[i]);
+      }
     }
   }
 }
@@ -1104,8 +1157,8 @@ int mdmp_bcast(void* buffer, size_t count, int type, size_t bytes, int root_rank
 int mdmp_register_send(void* buffer, size_t count, int type, size_t bytes, int sender_rank, int dest_rank, int tag) {
   if (dest_rank >= 0 && dest_rank < global_size && global_my_rank == sender_rank) {
     if (send_q_count >= MDMP_STATIC_P2P_Q_SIZE) {
-       fprintf(stderr, "[MDMP FATAL] Rank %d: exhausted send request queue count\n", global_my_rank);
-       mdmp_abort(1);
+      fprintf(stderr, "[MDMP FATAL] Rank %d: exhausted send request queue count\n", global_my_rank);
+      mdmp_abort(1);
     }
     uint32_t id = mdmp_decl_req_counter++;
     send_queue[send_q_count++] = {buffer, count, type, bytes, dest_rank, tag, (int)id}; 
@@ -1117,8 +1170,8 @@ int mdmp_register_send(void* buffer, size_t count, int type, size_t bytes, int s
 int mdmp_register_recv(void* buffer, size_t count, int type, size_t bytes, int receiver_rank, int src_rank, int tag) {  
   if (src_rank >= 0 && src_rank < global_size && global_my_rank == receiver_rank) {
     if (recv_q_count >= MDMP_STATIC_P2P_Q_SIZE) {
-       fprintf(stderr, "[MDMP FATAL] Rank %d: exhausted recv request queue count\n", global_my_rank);
-       mdmp_abort(1);
+      fprintf(stderr, "[MDMP FATAL] Rank %d: exhausted recv request queue count\n", global_my_rank);
+      mdmp_abort(1);
     }
 
     uint32_t id = mdmp_decl_req_counter++;
@@ -1130,9 +1183,9 @@ int mdmp_register_recv(void* buffer, size_t count, int type, size_t bytes, int r
 
 int mdmp_register_reduce(void* sendbuf, void* recvbuf, size_t count, int type, size_t bytes, int root_rank, int op) {
   if (reduce_q_count >= MDMP_STATIC_COLL_Q_SIZE) {
-       fprintf(stderr, "[MDMP FATAL] Rank %d: exhausted reduce request queue count\n", global_my_rank);
-       mdmp_abort(1);
-    }
+    fprintf(stderr, "[MDMP FATAL] Rank %d: exhausted reduce request queue count\n", global_my_rank);
+    mdmp_abort(1);
+  }
 
   uint32_t id = mdmp_decl_req_counter++; 
   reduce_queue[reduce_q_count++] = {sendbuf, recvbuf, count, type, bytes, root_rank, op, (int)id};
@@ -1141,9 +1194,9 @@ int mdmp_register_reduce(void* sendbuf, void* recvbuf, size_t count, int type, s
 
 int mdmp_register_gather(void* sendbuf, size_t sendcount, void* recvbuf, int type, size_t bytes, int root_rank) {
   if (gather_q_count >= MDMP_STATIC_COLL_Q_SIZE) {
-       fprintf(stderr, "[MDMP FATAL] Rank %d: exhausted gather request queue count\n", global_my_rank);
-       mdmp_abort(1);
-    }
+    fprintf(stderr, "[MDMP FATAL] Rank %d: exhausted gather request queue count\n", global_my_rank);
+    mdmp_abort(1);
+  }
 
   uint32_t id = mdmp_decl_req_counter++;
   gather_queue[gather_q_count++] = {sendbuf, sendcount, recvbuf, type, bytes, root_rank, (int)id};
@@ -1152,9 +1205,9 @@ int mdmp_register_gather(void* sendbuf, size_t sendcount, void* recvbuf, int typ
 
 int mdmp_register_allreduce(void* sendbuf, void* recvbuf, size_t count, int type,  size_t bytes, int op) {
   if (allreduce_q_count >= MDMP_STATIC_COLL_Q_SIZE) {
-       fprintf(stderr, "[MDMP FATAL] Rank %d: exhausted allreduce request queue count\n", global_my_rank);
-       mdmp_abort(1);
-    }
+    fprintf(stderr, "[MDMP FATAL] Rank %d: exhausted allreduce request queue count\n", global_my_rank);
+    mdmp_abort(1);
+  }
 
   uint32_t id = mdmp_decl_req_counter++;
   allreduce_queue[allreduce_q_count++] = {sendbuf, recvbuf, count, type, bytes, op, (int)id};
@@ -1163,9 +1216,9 @@ int mdmp_register_allreduce(void* sendbuf, void* recvbuf, size_t count, int type
 
 int mdmp_register_allgather(void* sendbuf, size_t count, void* recvbuf, int type, size_t bytes) {
   if (allgather_q_count >= MDMP_STATIC_COLL_Q_SIZE) {
-       fprintf(stderr, "[MDMP FATAL] Rank %d: exhausted allgather request queue count\n", global_my_rank);
-       mdmp_abort(1);
-    }
+    fprintf(stderr, "[MDMP FATAL] Rank %d: exhausted allgather request queue count\n", global_my_rank);
+    mdmp_abort(1);
+  }
 
   uint32_t id = mdmp_decl_req_counter++;
   allgather_queue[allgather_q_count++] = {sendbuf, count, recvbuf, type, bytes, (int)id};
@@ -1174,9 +1227,9 @@ int mdmp_register_allgather(void* sendbuf, size_t count, void* recvbuf, int type
 
 int mdmp_register_bcast(void* buffer, size_t count, int type, size_t bytes, int root_rank) {
   if (bcast_q_count >= MDMP_STATIC_COLL_Q_SIZE) {
-       fprintf(stderr, "[MDMP FATAL] Rank %d: exhausted bcast request queue count\n", global_my_rank);
-       mdmp_abort(1);
-    }
+    fprintf(stderr, "[MDMP FATAL] Rank %d: exhausted bcast request queue count\n", global_my_rank);
+    mdmp_abort(1);
+  }
 
   uint32_t id = mdmp_decl_req_counter++;
   bcast_queue[bcast_q_count++] = {buffer, count, type, bytes, root_rank, (int)id};
@@ -1188,75 +1241,263 @@ int mdmp_commit() {
   if (use_locks) mdmp_mpi_mutex.lock();
 
   DeclarativeBatch& Batch = mdmp_batch_pool[mdmp_decl_batch_counter % 16];
+
+  // If this slot is still active, the batch pool is too small for the current usage pattern.
+  if (Batch.Active) {
+    fprintf(stderr,
+            "[MDMP FATAL] Declarative batch pool slot reuse before completion "
+            "(slot=%u, serial=%u active).\n",
+            mdmp_decl_batch_counter % 16, Batch.Serial);
+    mdmp_abort(1);
+  }
+
   Batch.Serial = mdmp_decl_batch_counter++;
   Batch.RequestCount = 0;
+  Batch.TypeCount = 0;
   Batch.Active = true;
 
   auto MapLogicalReq = [&](int logicalReqID, int mpi_idx) {
     decl_to_req_target[logicalReqID % 65536] = {Batch.Serial, mpi_idx};
   };
 
-  // Zero-Allocation Direct Dispatch
-  for (int i = 0; i < recv_q_count; ++i) {
-    int actual = (recv_queue[i].type == 4) ? recv_queue[i].bytes : recv_queue[i].count;
-    mdmp_check_mpi(MPI_Irecv(recv_queue[i].buffer, actual, get_mpi_type(recv_queue[i].type), 
-			     recv_queue[i].rank, recv_queue[i].tag, mdmp_comm, &Batch.Requests[Batch.RequestCount]), "MPI_Irecv");
-    MapLogicalReq(recv_queue[i].req_id, Batch.RequestCount);
-    Batch.RequestCount++;
-  }
-  recv_q_count = 0;
+  auto EnsureBatchCapacity = [&](int extraReqs, int extraTypes) {
+    if (Batch.RequestCount + extraReqs > MDMP_STATIC_P2P_Q_SIZE * 4 ||
+        Batch.TypeCount + extraTypes > MDMP_STATIC_P2P_Q_SIZE * 4) {
+      fprintf(stderr, "[MDMP FATAL] Declarative batch capacity exceeded.\n");
+      mdmp_abort(1);
+    }
+  };
 
-  for (int i = 0; i < send_q_count; ++i) {
-    int actual = (send_queue[i].type == 4) ? send_queue[i].bytes : send_queue[i].count;
-    mdmp_check_mpi(MPI_Isend(send_queue[i].buffer, actual, get_mpi_type(send_queue[i].type), 
-			     send_queue[i].rank, send_queue[i].tag, mdmp_comm, &Batch.Requests[Batch.RequestCount]), "MPI_Isend");
-    MapLogicalReq(send_queue[i].req_id, Batch.RequestCount);
-    Batch.RequestCount++;
-  }
-  send_q_count = 0;
+  auto MsgLess = [](const RegisteredMsg &A, const RegisteredMsg &B) {
+    if (A.rank != B.rank) return A.rank < B.rank;
+    return A.tag < B.tag;
+  };
 
+  auto ProcessMsgQueue = [&](RegisteredMsg *queue, int &q_count, bool isSend) {
+    if (q_count == 0)
+      return;
+
+    std::stable_sort(queue, queue + q_count, MsgLess);
+
+    int i = 0;
+    while (i < q_count) {
+      int peer = queue[i].rank;
+      int tag  = queue[i].tag;
+
+      int j = i + 1;
+      while (j < q_count && queue[j].rank == peer && queue[j].tag == tag)
+        ++j;
+
+      int mpi_idx = Batch.RequestCount;
+      EnsureBatchCapacity(1, 1);
+      Batch.Requests[Batch.RequestCount++] = MPI_REQUEST_NULL;
+
+      // Whole peer/tag group handling:
+      // 1. single message -> direct
+      // 2. fully contiguous -> one bulk MPI_BYTE request
+      // 3. otherwise -> one hindexed request for the whole group
+      if (j - i == 1) {
+        int actual = mdmp_registered_msg_actual_bytes(queue[i]);
+
+        if (isSend) {
+          mdmp_check_mpi(
+              MPI_Isend(queue[i].buffer, actual, MPI_BYTE, peer, tag,
+                        mdmp_comm, &Batch.Requests[mpi_idx]),
+              "MPI_Isend(declarative direct)");
+        } else {
+          mdmp_check_mpi(
+              MPI_Irecv(queue[i].buffer, actual, MPI_BYTE, peer, tag,
+                        mdmp_comm, &Batch.Requests[mpi_idx]),
+              "MPI_Irecv(declarative direct)");
+        }
+
+        MapLogicalReq(queue[i].req_id, mpi_idx);
+      }
+      else if (mdmp_group_is_contiguous(queue, i, j)) {
+        void *base = queue[i].buffer;
+        int total_bytes = (int)mdmp_group_total_bytes(queue, i, j);
+
+        if (isSend) {
+          mdmp_check_mpi(
+              MPI_Isend(base, total_bytes, MPI_BYTE, peer, tag,
+                        mdmp_comm, &Batch.Requests[mpi_idx]),
+              "MPI_Isend(declarative contiguous)");
+        } else {
+          mdmp_check_mpi(
+              MPI_Irecv(base, total_bytes, MPI_BYTE, peer, tag,
+                        mdmp_comm, &Batch.Requests[mpi_idx]),
+              "MPI_Irecv(declarative contiguous)");
+        }
+
+        for (int k = i; k < j; ++k) {
+          MapLogicalReq(queue[k].req_id, mpi_idx);
+        }
+      }
+      else {
+        std::vector<int> block_lengths;
+        std::vector<MPI_Aint> displs;
+
+        block_lengths.reserve(j - i);
+        displs.reserve(j - i);
+
+        for (int k = i; k < j; ++k) {
+          block_lengths.push_back(mdmp_registered_msg_actual_bytes(queue[k]));
+          MPI_Aint addr = 0;
+          mdmp_check_mpi(MPI_Get_address(queue[k].buffer, &addr),
+                         "MPI_Get_address(declarative hindexed)");
+          displs.push_back(addr);
+        }
+
+        MPI_Datatype ntype = MPI_DATATYPE_NULL;
+        mdmp_check_mpi(
+            MPI_Type_create_hindexed((int)block_lengths.size(),
+                                     block_lengths.data(),
+                                     displs.data(),
+                                     MPI_BYTE, &ntype),
+            "MPI_Type_create_hindexed(declarative)");
+        mdmp_check_mpi(
+            MPI_Type_commit(&ntype),
+            "MPI_Type_commit(declarative)");
+
+        Batch.TypesToFree[Batch.TypeCount++] = ntype;
+
+        if (isSend) {
+          mdmp_check_mpi(
+              MPI_Isend(MPI_BOTTOM, 1, ntype, peer, tag,
+                        mdmp_comm, &Batch.Requests[mpi_idx]),
+              "MPI_Isend(declarative hindexed)");
+        } else {
+          mdmp_check_mpi(
+              MPI_Irecv(MPI_BOTTOM, 1, ntype, peer, tag,
+                        mdmp_comm, &Batch.Requests[mpi_idx]),
+              "MPI_Irecv(declarative hindexed)");
+        }
+
+        for (int k = i; k < j; ++k) {
+          MapLogicalReq(queue[k].req_id, mpi_idx);
+        }
+      }
+
+      i = j;
+    }
+
+    q_count = 0;
+  };
+
+  // Point-to-point declarative queues: restore peer/tag coalescing.
+  ProcessMsgQueue(recv_queue, recv_q_count, false);
+  ProcessMsgQueue(send_queue, send_q_count, true);
+
+  // Collectives remain one request per logical collective op for now.
   for (int i = 0; i < reduce_q_count; ++i) {
+    EnsureBatchCapacity(1, 0);
+    int idx = Batch.RequestCount++;
+    Batch.Requests[idx] = MPI_REQUEST_NULL;
+
     int actual = (reduce_queue[i].type == 4) ? reduce_queue[i].bytes : reduce_queue[i].count;
-    const void* final_sb = (reduce_queue[i].sendbuf == reduce_queue[i].recvbuf && global_my_rank == reduce_queue[i].root) ? MPI_IN_PLACE : reduce_queue[i].sendbuf;
-    mdmp_check_mpi(MPI_Ireduce(final_sb, reduce_queue[i].recvbuf, actual, get_mpi_type(reduce_queue[i].type), 
-			       get_mpi_op(reduce_queue[i].op), reduce_queue[i].root, mdmp_comm, &Batch.Requests[Batch.RequestCount]), "MPI_Ireduce");
-    MapLogicalReq(reduce_queue[i].req_id, Batch.RequestCount);
-    Batch.RequestCount++;
+    const void* final_sb =
+        (reduce_queue[i].sendbuf == reduce_queue[i].recvbuf &&
+         global_my_rank == reduce_queue[i].root)
+            ? MPI_IN_PLACE
+            : reduce_queue[i].sendbuf;
+
+    mdmp_check_mpi(
+        MPI_Ireduce(final_sb, reduce_queue[i].recvbuf, actual,
+                    get_mpi_type(reduce_queue[i].type),
+                    get_mpi_op(reduce_queue[i].op),
+                    reduce_queue[i].root, mdmp_comm,
+                    &Batch.Requests[idx]),
+        "MPI_Ireduce(declarative)");
+
+    MapLogicalReq(reduce_queue[i].req_id, idx);
   }
   reduce_q_count = 0;
-  
+
   for (int i = 0; i < gather_q_count; ++i) {
+    EnsureBatchCapacity(1, 0);
+    int idx = Batch.RequestCount++;
+    Batch.Requests[idx] = MPI_REQUEST_NULL;
+
     int actual = (gather_queue[i].type == 4) ? gather_queue[i].bytes : gather_queue[i].sendcount;
-    const void* final_sb = (gather_queue[i].sendbuf == gather_queue[i].recvbuf && global_my_rank == gather_queue[i].root) ? MPI_IN_PLACE : gather_queue[i].sendbuf;
-    mdmp_check_mpi(MPI_Igather(final_sb, actual, get_mpi_type(gather_queue[i].type), gather_queue[i].recvbuf, actual, get_mpi_type(gather_queue[i].type), gather_queue[i].root, mdmp_comm, &Batch.Requests[Batch.RequestCount]), "MPI_Igather");
-    MapLogicalReq(gather_queue[i].req_id, Batch.RequestCount);
-    Batch.RequestCount++;
+    const void* final_sb =
+        (gather_queue[i].sendbuf == gather_queue[i].recvbuf &&
+         global_my_rank == gather_queue[i].root)
+            ? MPI_IN_PLACE
+            : gather_queue[i].sendbuf;
+
+    mdmp_check_mpi(
+        MPI_Igather(final_sb, actual,
+                    get_mpi_type(gather_queue[i].type),
+                    gather_queue[i].recvbuf, actual,
+                    get_mpi_type(gather_queue[i].type),
+                    gather_queue[i].root, mdmp_comm,
+                    &Batch.Requests[idx]),
+        "MPI_Igather(declarative)");
+
+    MapLogicalReq(gather_queue[i].req_id, idx);
   }
   gather_q_count = 0;
 
   for (int i = 0; i < allreduce_q_count; ++i) {
+    EnsureBatchCapacity(1, 0);
+    int idx = Batch.RequestCount++;
+    Batch.Requests[idx] = MPI_REQUEST_NULL;
+
     int actual = (allreduce_queue[i].type == 4) ? allreduce_queue[i].bytes : allreduce_queue[i].count;
-    const void* final_sb = (allreduce_queue[i].sendbuf == allreduce_queue[i].recvbuf) ? MPI_IN_PLACE : allreduce_queue[i].sendbuf;
-    mdmp_check_mpi(MPI_Iallreduce(final_sb, allreduce_queue[i].recvbuf, actual, get_mpi_type(allreduce_queue[i].type), get_mpi_op(allreduce_queue[i].op), mdmp_comm, &Batch.Requests[Batch.RequestCount]), "MPI_Iallreduce");
-    MapLogicalReq(allreduce_queue[i].req_id, Batch.RequestCount);
-    Batch.RequestCount++;
+    const void* final_sb =
+        (allreduce_queue[i].sendbuf == allreduce_queue[i].recvbuf)
+            ? MPI_IN_PLACE
+            : allreduce_queue[i].sendbuf;
+
+    mdmp_check_mpi(
+        MPI_Iallreduce(final_sb, allreduce_queue[i].recvbuf, actual,
+                       get_mpi_type(allreduce_queue[i].type),
+                       get_mpi_op(allreduce_queue[i].op),
+                       mdmp_comm, &Batch.Requests[idx]),
+        "MPI_Iallreduce(declarative)");
+
+    MapLogicalReq(allreduce_queue[i].req_id, idx);
   }
   allreduce_q_count = 0;
 
   for (int i = 0; i < allgather_q_count; ++i) {
+    EnsureBatchCapacity(1, 0);
+    int idx = Batch.RequestCount++;
+    Batch.Requests[idx] = MPI_REQUEST_NULL;
+
     int actual = (allgather_queue[i].type == 4) ? allgather_queue[i].bytes : allgather_queue[i].count;
-    const void* final_sb = (allgather_queue[i].sendbuf == allgather_queue[i].recvbuf) ? MPI_IN_PLACE : allgather_queue[i].sendbuf;
-    mdmp_check_mpi(MPI_Iallgather(final_sb, actual, get_mpi_type(allgather_queue[i].type), allgather_queue[i].recvbuf, actual, get_mpi_type(allgather_queue[i].type), mdmp_comm, &Batch.Requests[Batch.RequestCount]), "MPI_Iallgather");
-    MapLogicalReq(allgather_queue[i].req_id, Batch.RequestCount);
-    Batch.RequestCount++;
+    const void* final_sb =
+        (allgather_queue[i].sendbuf == allgather_queue[i].recvbuf)
+            ? MPI_IN_PLACE
+            : allgather_queue[i].sendbuf;
+
+    mdmp_check_mpi(
+        MPI_Iallgather(final_sb, actual,
+                       get_mpi_type(allgather_queue[i].type),
+                       allgather_queue[i].recvbuf, actual,
+                       get_mpi_type(allgather_queue[i].type),
+                       mdmp_comm, &Batch.Requests[idx]),
+        "MPI_Iallgather(declarative)");
+
+    MapLogicalReq(allgather_queue[i].req_id, idx);
   }
   allgather_q_count = 0;
 
   for (int i = 0; i < bcast_q_count; ++i) {
+    EnsureBatchCapacity(1, 0);
+    int idx = Batch.RequestCount++;
+    Batch.Requests[idx] = MPI_REQUEST_NULL;
+
     int actual = (bcast_queue[i].type == 4) ? bcast_queue[i].bytes : bcast_queue[i].count;
-    mdmp_check_mpi(MPI_Ibcast(bcast_queue[i].buffer, actual, get_mpi_type(bcast_queue[i].type), bcast_queue[i].root, mdmp_comm, &Batch.Requests[Batch.RequestCount]), "MPI_Ibcast");
-    MapLogicalReq(bcast_queue[i].req_id, Batch.RequestCount);
-    Batch.RequestCount++;
+
+    mdmp_check_mpi(
+        MPI_Ibcast(bcast_queue[i].buffer, actual,
+                   get_mpi_type(bcast_queue[i].type),
+                   bcast_queue[i].root, mdmp_comm,
+                   &Batch.Requests[idx]),
+        "MPI_Ibcast(declarative)");
+
+    MapLogicalReq(bcast_queue[i].req_id, idx);
   }
   bcast_q_count = 0;
 
@@ -1271,3 +1512,4 @@ int mdmp_commit() {
   if (use_locks) mdmp_mpi_mutex.unlock();
   return mdmp_make_decl_batch_token(Batch.Serial);
 }
+
