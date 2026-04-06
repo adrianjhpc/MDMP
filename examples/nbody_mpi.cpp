@@ -85,7 +85,7 @@ int main(int argc, char** argv) {
 
 
     if (!correct) {
-        printf("[MDMP] Rank %d Validation FAILED! Expected z = %f, but got %f\n", rank, expected_z, send_list[0].x);
+        printf("[MDMP] Rank %d Validation FAILED! Expected z = %f, but got %f\n", rank, expected_z, send_list[0].z);
     } else {
         if (rank == 0) {
             printf("[MDMP] Rank %d Validation PASSED!\n", rank);
