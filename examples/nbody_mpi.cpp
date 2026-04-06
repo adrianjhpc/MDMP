@@ -97,7 +97,7 @@ int main(int argc, char** argv) {
         printf("------------------------------------------------\n");
         printf(" BENCHMARK: N-Body Particle Exchange (Raw MPI)\n");
         printf("------------------------------------------------\n");
-        printf("Running on %d peowaawa\n", size);
+        printf("Running on %d processes\n", size);
         printf("Particles Exchanged: %d per step\n", num_migrating);
         printf("Iterations: %d\n", iterations);
         printf("Elapsed Time: %f seconds\n", end_time - start_time);
