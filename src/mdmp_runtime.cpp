@@ -71,38 +71,40 @@ static std::vector<MDMPProgressSiteStats> mdmp_prof_progress_sites;
 // ZERO-ALLOCATION STATIC QUEUES (DECLARATIVE API)
 // ==============================================================================
 static constexpr int MDMP_DECL_BATCH_TOKEN_BASE = (1 << 30);
-#define MDMP_STATIC_Q_SIZE 2048
+#define MDMP_STATIC_P2P_Q_SIZE 32768
 
 struct RegisteredMsg { void* buffer; size_t count; int type; size_t bytes; int rank; int tag; int req_id; };
-static RegisteredMsg send_queue[MDMP_STATIC_Q_SIZE];
+static RegisteredMsg send_queue[MDMP_STATIC_P2P_Q_SIZE];
 static int send_q_count = 0;
 
-static RegisteredMsg recv_queue[MDMP_STATIC_Q_SIZE];
+static RegisteredMsg recv_queue[MDMP_STATIC_P2P_Q_SIZE];
 static int recv_q_count = 0;
 
+#define MDMP_STATIC_COLL_Q_SIZE 2048
+
 struct RegisteredReduce { void* sendbuf; void* recvbuf; size_t count; int type; size_t bytes; int root; int op; int req_id; };
-static RegisteredReduce reduce_queue[MDMP_STATIC_Q_SIZE];
+static RegisteredReduce reduce_queue[MDMP_STATIC_COLL_Q_SIZE];
 static int reduce_q_count = 0;
 
 struct RegisteredGather { void* sendbuf; size_t sendcount; void* recvbuf; int type; size_t bytes; int root; int req_id; };
-static RegisteredGather gather_queue[MDMP_STATIC_Q_SIZE];
+static RegisteredGather gather_queue[MDMP_STATIC_COLL_Q_SIZE];
 static int gather_q_count = 0;
 
 struct RegisteredAllreduce { void* sendbuf; void* recvbuf; size_t count; int type; size_t bytes; int op; int req_id; };
-static RegisteredAllreduce allreduce_queue[MDMP_STATIC_Q_SIZE];
+static RegisteredAllreduce allreduce_queue[MDMP_STATIC_COLL_Q_SIZE];
 static int allreduce_q_count = 0;
 
 struct RegisteredAllgather { void* sendbuf; size_t count; void* recvbuf; int type; size_t bytes; int req_id; };
-static RegisteredAllgather allgather_queue[MDMP_STATIC_Q_SIZE];
+static RegisteredAllgather allgather_queue[MDMP_STATIC_COLL_Q_SIZE];
 static int allgather_q_count = 0;
 
 struct RegisteredBcast { void* buffer; size_t count; int type; size_t bytes; int root; int req_id; };
-static RegisteredBcast bcast_queue[MDMP_STATIC_Q_SIZE];
+static RegisteredBcast bcast_queue[MDMP_STATIC_COLL_Q_SIZE];
 static int bcast_q_count = 0;
 
 struct DeclarativeBatch {
   uint32_t Serial = 0;
-  MPI_Request Requests[MDMP_STATIC_Q_SIZE * 4];
+  MPI_Request Requests[MDMP_STATIC_P2P_Q_SIZE * 4];
   int RequestCount = 0;
   bool Active = false;
 };
@@ -1101,7 +1103,10 @@ int mdmp_bcast(void* buffer, size_t count, int type, size_t bytes, int root_rank
 
 int mdmp_register_send(void* buffer, size_t count, int type, size_t bytes, int sender_rank, int dest_rank, int tag) {
   if (dest_rank >= 0 && dest_rank < global_size && global_my_rank == sender_rank) {
-    if (send_q_count >= MDMP_STATIC_Q_SIZE) mdmp_abort(1);
+    if (send_q_count >= MDMP_STATIC_P2P_Q_SIZE) {
+       fprintf(stderr, "[MDMP FATAL] Rank %d: exhausted send request queue count\n", global_my_rank);
+       mdmp_abort(1);
+    }
     uint32_t id = mdmp_decl_req_counter++;
     send_queue[send_q_count++] = {buffer, count, type, bytes, dest_rank, tag, (int)id}; 
     return (int)id + MDMP_MAX_REQUESTS;
@@ -1111,7 +1116,11 @@ int mdmp_register_send(void* buffer, size_t count, int type, size_t bytes, int s
 
 int mdmp_register_recv(void* buffer, size_t count, int type, size_t bytes, int receiver_rank, int src_rank, int tag) {  
   if (src_rank >= 0 && src_rank < global_size && global_my_rank == receiver_rank) {
-    if (recv_q_count >= MDMP_STATIC_Q_SIZE) mdmp_abort(1);
+    if (recv_q_count >= MDMP_STATIC_P2P_Q_SIZE) {
+       fprintf(stderr, "[MDMP FATAL] Rank %d: exhausted recv request queue count\n", global_my_rank);
+       mdmp_abort(1);
+    }
+
     uint32_t id = mdmp_decl_req_counter++;
     recv_queue[recv_q_count++] = {buffer, count, type, bytes, src_rank, tag, (int)id}; 
     return (int)id + MDMP_MAX_REQUESTS;
@@ -1120,35 +1129,55 @@ int mdmp_register_recv(void* buffer, size_t count, int type, size_t bytes, int r
 }
 
 int mdmp_register_reduce(void* sendbuf, void* recvbuf, size_t count, int type, size_t bytes, int root_rank, int op) {
-  if (reduce_q_count >= MDMP_STATIC_Q_SIZE) mdmp_abort(1);
+  if (reduce_q_count >= MDMP_STATIC_COLL_Q_SIZE) {
+       fprintf(stderr, "[MDMP FATAL] Rank %d: exhausted reduce request queue count\n", global_my_rank);
+       mdmp_abort(1);
+    }
+
   uint32_t id = mdmp_decl_req_counter++; 
   reduce_queue[reduce_q_count++] = {sendbuf, recvbuf, count, type, bytes, root_rank, op, (int)id};
   return (int)id + MDMP_MAX_REQUESTS;
 }
 
 int mdmp_register_gather(void* sendbuf, size_t sendcount, void* recvbuf, int type, size_t bytes, int root_rank) {
-  if (gather_q_count >= MDMP_STATIC_Q_SIZE) mdmp_abort(1);
+  if (gather_q_count >= MDMP_STATIC_COLL_Q_SIZE) {
+       fprintf(stderr, "[MDMP FATAL] Rank %d: exhausted gather request queue count\n", global_my_rank);
+       mdmp_abort(1);
+    }
+
   uint32_t id = mdmp_decl_req_counter++;
   gather_queue[gather_q_count++] = {sendbuf, sendcount, recvbuf, type, bytes, root_rank, (int)id};
   return (int)id + MDMP_MAX_REQUESTS;
 }
 
 int mdmp_register_allreduce(void* sendbuf, void* recvbuf, size_t count, int type,  size_t bytes, int op) {
-  if (allreduce_q_count >= MDMP_STATIC_Q_SIZE) mdmp_abort(1);
+  if (allreduce_q_count >= MDMP_STATIC_COLL_Q_SIZE) {
+       fprintf(stderr, "[MDMP FATAL] Rank %d: exhausted allreduce request queue count\n", global_my_rank);
+       mdmp_abort(1);
+    }
+
   uint32_t id = mdmp_decl_req_counter++;
   allreduce_queue[allreduce_q_count++] = {sendbuf, recvbuf, count, type, bytes, op, (int)id};
   return (int)id + MDMP_MAX_REQUESTS;
 }
 
 int mdmp_register_allgather(void* sendbuf, size_t count, void* recvbuf, int type, size_t bytes) {
-  if (allgather_q_count >= MDMP_STATIC_Q_SIZE) mdmp_abort(1);
+  if (allgather_q_count >= MDMP_STATIC_COLL_Q_SIZE) {
+       fprintf(stderr, "[MDMP FATAL] Rank %d: exhausted allgather request queue count\n", global_my_rank);
+       mdmp_abort(1);
+    }
+
   uint32_t id = mdmp_decl_req_counter++;
   allgather_queue[allgather_q_count++] = {sendbuf, count, recvbuf, type, bytes, (int)id};
   return (int)id + MDMP_MAX_REQUESTS;
 }
 
 int mdmp_register_bcast(void* buffer, size_t count, int type, size_t bytes, int root_rank) {
-  if (bcast_q_count >= MDMP_STATIC_Q_SIZE) mdmp_abort(1);
+  if (bcast_q_count >= MDMP_STATIC_COLL_Q_SIZE) {
+       fprintf(stderr, "[MDMP FATAL] Rank %d: exhausted bcast request queue count\n", global_my_rank);
+       mdmp_abort(1);
+    }
+
   uint32_t id = mdmp_decl_req_counter++;
   bcast_queue[bcast_q_count++] = {buffer, count, type, bytes, root_rank, (int)id};
   return (int)id + MDMP_MAX_REQUESTS;
