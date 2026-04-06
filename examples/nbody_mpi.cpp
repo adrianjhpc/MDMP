@@ -23,8 +23,8 @@ int main(int argc, char** argv) {
     std::vector<Particle> send_list(num_migrating);
     std::vector<Particle> recv_list(num_migrating);
 
-    int right_neighbor = (rank + 1) % size;
-    int left_neighbor = (rank - 1 + size) % size;
+    int right_neighbour = (rank + 1) % size;
+    int left_neighbour = (rank - 1 + size) % size;
 
     for (int i = 0; i < num_migrating; ++i) {
         send_list[i].z = (double)rank;
@@ -39,8 +39,8 @@ int main(int argc, char** argv) {
         int req_idx = 0;
 
         for (int i = 0; i < num_migrating; ++i) {
-            MPI_Isend(&send_list[i], sizeof(Particle), MPI_BYTE, right_neighbor, 0, MPI_COMM_WORLD, &reqs[req_idx++]);
-            MPI_Irecv(&recv_list[i], sizeof(Particle), MPI_BYTE, left_neighbor, 0, MPI_COMM_WORLD, &reqs[req_idx++]);
+            MPI_Isend(&send_list[i], sizeof(Particle), MPI_BYTE, right_neighbour, 0, MPI_COMM_WORLD, &reqs[req_idx++]);
+            MPI_Irecv(&recv_list[i], sizeof(Particle), MPI_BYTE, left_neighbour, 0, MPI_COMM_WORLD, &reqs[req_idx++]);
         }
 
         double dummy_work = 0.0;
