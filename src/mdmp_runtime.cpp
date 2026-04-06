@@ -37,6 +37,27 @@ static uint64_t mdmp_prof_wait_decl_batch_fast = 0;
 static uint64_t mdmp_prof_wait_decl_batch_blocking = 0;
 static uint64_t mdmp_prof_wait_decl_batch_block_time_us = 0;
 
+static uint64_t mdmp_prof_send_calls = 0;
+static uint64_t mdmp_prof_send_bytes = 0;
+static uint64_t mdmp_prof_send_time_us = 0;
+
+static uint64_t mdmp_prof_recv_calls = 0;
+static uint64_t mdmp_prof_recv_bytes = 0;
+static uint64_t mdmp_prof_recv_time_us = 0;
+
+static uint64_t mdmp_prof_wait_many_calls = 0;
+static uint64_t mdmp_prof_wait_many_ids_total = 0;
+static uint64_t mdmp_prof_wait_many_time_us = 0;
+
+static uint64_t mdmp_prof_wait_many_fast_calls = 0;
+static uint64_t mdmp_prof_wait_many_tiny_seq_calls = 0;
+static uint64_t mdmp_prof_wait_many_fallback_calls = 0;
+
+static uint64_t mdmp_prof_imp_wait_scan_calls = 0;
+static uint64_t mdmp_prof_imp_wait_scan_slots = 0;
+static uint64_t mdmp_prof_imp_wait_active_found = 0;
+static uint64_t mdmp_prof_imp_wait_scan_time_us = 0;
+
 struct MDMPProgressSiteStats {
   uint64_t Hits = 0;
   uint64_t IdleSkips = 0;
@@ -142,23 +163,46 @@ void mdmp_profile_reset() {
   mdmp_prof_maybe_progress_calls = 0;
   mdmp_prof_maybe_progress_skipped_thread = 0;
   mdmp_prof_maybe_progress_skipped_idle = 0;
+  
   mdmp_prof_progress_calls = 0;
   mdmp_prof_progress_tested_imperative = 0;
   mdmp_prof_progress_tested_declarative = 0;
+  
   mdmp_prof_progress_time_us = 0;
+
+  mdmp_prof_send_calls = 0;
+  mdmp_prof_send_bytes = 0;
+  mdmp_prof_send_time_us = 0;
+
+  mdmp_prof_recv_calls = 0;
+  mdmp_prof_recv_bytes = 0;
+  mdmp_prof_recv_time_us = 0;
+  
   mdmp_prof_wait_imp_calls = 0;
   mdmp_prof_wait_imp_fast = 0;
   mdmp_prof_wait_imp_blocking = 0;
   mdmp_prof_wait_imp_block_time_us = 0;
+  
   mdmp_prof_wait_decl_logical_calls = 0;
   mdmp_prof_wait_decl_logical_fast = 0;
   mdmp_prof_wait_decl_logical_blocking = 0;
   mdmp_prof_wait_decl_logical_block_time_us = 0;
+  
   mdmp_prof_wait_decl_batch_calls = 0;
   mdmp_prof_wait_decl_batch_fast = 0;
   mdmp_prof_wait_decl_batch_blocking = 0;
   mdmp_prof_wait_decl_batch_block_time_us = 0;
-  mdmp_prof_progress_sites.clear();  
+
+  mdmp_prof_wait_many_calls = 0;
+  mdmp_prof_wait_many_ids_total = 0;
+  mdmp_prof_wait_many_time_us = 0;
+
+  mdmp_prof_wait_many_fast_calls = 0;
+  mdmp_prof_wait_many_tiny_seq_calls = 0;
+  mdmp_prof_wait_many_fallback_calls = 0;
+
+  mdmp_prof_progress_sites.clear();
+
 }
 
 void mdmp_profile_report() {
@@ -195,6 +239,40 @@ void mdmp_profile_report() {
   uint64_t global_batch[4] = {0};
   mdmp_check_mpi(MPI_Reduce(local_batch, global_batch, 4, MPI_UNSIGNED_LONG_LONG, MPI_SUM, 0, mdmp_comm), "MPI_Reduce");
 
+  uint64_t local_wait_many[6] = {
+    mdmp_prof_wait_many_calls,
+    mdmp_prof_wait_many_ids_total,
+    mdmp_prof_wait_many_time_us,
+    mdmp_prof_wait_many_fast_calls,
+    mdmp_prof_wait_many_tiny_seq_calls,
+    mdmp_prof_wait_many_fallback_calls
+  };
+
+  uint64_t global_wait_many[6] = {0};
+
+  mdmp_check_mpi(
+		 MPI_Reduce(local_wait_many, global_wait_many, 6, MPI_UNSIGNED_LONG_LONG,
+			    MPI_SUM, 0, mdmp_comm),
+		 "MPI_Reduce(mdmp_profile wait_many)");
+
+  uint64_t local_comm[6] = {
+    mdmp_prof_send_calls,
+    mdmp_prof_send_bytes,
+    mdmp_prof_send_time_us,
+    mdmp_prof_recv_calls,
+    mdmp_prof_recv_bytes,
+    mdmp_prof_recv_time_us
+  };
+
+  uint64_t global_comm[6] = {0};
+
+  mdmp_check_mpi(
+		 MPI_Reduce(local_comm, global_comm, 6, MPI_UNSIGNED_LONG_LONG,
+			    MPI_SUM, 0, mdmp_comm),
+		 "MPI_Reduce(mdmp_profile comm)");
+
+  
+
   if (global_my_rank == 0) {
     auto pct = [](uint64_t num, uint64_t den) -> double {
       return (den == 0) ? 0.0 : (100.0 * (double)num / (double)den);
@@ -210,6 +288,32 @@ void mdmp_profile_report() {
     printf("    blocking                           : %llu (%.1f%%)\n", (unsigned long long)global_batch[2], pct(global_batch[2], global_batch[0]));
     printf("    total block time (s)               : %.6f\n", (double)global_batch[3] / 1.0e6);
     printf("\n");
+    printf("  wait_many calls                      : %llu\n",
+           (unsigned long long)global_wait_many[0]);
+    printf("    total ids passed                   : %llu\n",
+           (unsigned long long)global_wait_many[1]);
+    printf("    total time (s)                     : %.6f\n",
+           (double)global_wait_many[2] / 1.0e6);
+    printf("    micro fast-path calls              : %llu\n",
+           (unsigned long long)global_wait_many[3]);
+    printf("    tiny sequential calls              : %llu\n",
+           (unsigned long long)global_wait_many[4]);
+    printf("    large fallback calls               : %llu\n",
+           (unsigned long long)global_wait_many[5]);
+    printf("  send calls                            : %llu\n",
+           (unsigned long long)global_comm[0]);
+    printf("    total bytes                         : %llu\n",
+           (unsigned long long)global_comm[1]);
+    printf("    total time (s)                      : %.6f\n",
+           (double)global_comm[2] / 1.0e6);
+
+    printf("  recv calls                            : %llu\n",
+           (unsigned long long)global_comm[3]);
+    printf("    total bytes                         : %llu\n",
+           (unsigned long long)global_comm[4]);
+    printf("    total time (s)                      : %.6f\n",
+           (double)global_comm[5] / 1.0e6);
+
   }
 
   int local_num_sites = static_cast<int>(mdmp_prof_progress_sites.size());
@@ -312,6 +416,17 @@ inline int mdmp_actual_count(size_t count, int type, size_t bytes) {
   return (type == 4) ? (int)bytes : (int)count;
 }
 
+inline uint64_t mdmp_actual_bytes(size_t count, int type, size_t bytes) {
+  switch (type) {
+  case 0: return (uint64_t)count * 4; // int
+  case 1: return (uint64_t)count * 8; // double
+  case 2: return (uint64_t)count * 4; // float
+  case 3: return (uint64_t)count;     // char
+  case 4: return (uint64_t)bytes;     // raw bytes
+  default:
+    return (bytes != 0) ? (uint64_t)bytes : (uint64_t)count;
+  }
+}
 
 int mdmp_alloc_imperative_slot_unlocked() {
   if (mdmp_imper_free_top == 0) {
@@ -502,11 +617,17 @@ void mdmp_maybe_progress() {
 
 void mdmp_wait_unlocked(int req_id) {
   if (req_id == MDMP_PROCESS_NOT_INVOLVED) return;
-
+  
   // 1. FAST PATH: IMPLICIT WAIT BATCHING
   if (req_id >= 0 && req_id < MDMP_MAX_REQUESTS) {
     if (mdmp_request_pool[req_id] != MPI_REQUEST_NULL) {
 
+      uint64_t scan_t0 = 0;
+      if (mdmp_profile_enabled) {
+	mdmp_prof_imp_wait_scan_calls++;
+	scan_t0 = mdmp_now_us();
+      }
+            
       MPI_Request stack_reqs[32];
       int active_slots[32];
       int active_count = 0;
@@ -547,11 +668,18 @@ void mdmp_wait_unlocked(int req_id) {
         }
         mdmp_note_requests_completed(active_count);
       }
+      
+      if (mdmp_profile_enabled) {
+	mdmp_prof_imp_wait_scan_slots += mdmp_imper_active_count; // if using dense list
+	mdmp_prof_imp_wait_active_found += active_count;
+	mdmp_prof_imp_wait_scan_time_us += (mdmp_now_us() - scan_t0);
+      }
+      
     }
     return;
   }
 
-
+  
   // 2. Whole declarative batch token
   if (mdmp_is_decl_batch_token(req_id)) {
     uint32_t batchSerial = mdmp_decl_batch_serial_from_token(req_id);
@@ -611,11 +739,29 @@ void mdmp_wait_many_sequential_unlocked(const int *uniq, int count) {
 }
 
 void mdmp_wait_many(const int *ids, int n) {
-  if (ids == nullptr || n <= 0) return;
+  if (ids == nullptr || n <= 0)
+    return;
+
+  uint64_t t0 = 0;
+  if (mdmp_profile_enabled) {
+    t0 = mdmp_now_us();
+    mdmp_prof_wait_many_calls++;
+    mdmp_prof_wait_many_ids_total += (uint64_t)n;
+  }
+
+  auto finish_wait_many_profile = [&](uint64_t *path_counter) {
+    if (mdmp_profile_enabled) {
+      if (path_counter)
+        (*path_counter)++;
+      mdmp_prof_wait_many_time_us += (mdmp_now_us() - t0);
+    }
+  };
 
   bool use_locks = mdmp_runtime_active.load(std::memory_order_relaxed);
 
-  // --- THE MICRO-STENCIL FAST PATH (SAFE) ---
+  // --------------------------------------------------------------------------
+  // 1. MICRO-STENCIL FAST PATH
+  // --------------------------------------------------------------------------
   if (n <= 8 && !use_locks) {
     MPI_Request stack_reqs[8];
     int active_slots[8];
@@ -624,61 +770,91 @@ void mdmp_wait_many(const int *ids, int n) {
 
     for (int i = 0; i < n; ++i) {
       int id = ids[i];
-      if (id == MDMP_PROCESS_NOT_INVOLVED) continue;
-      if (id < 0 || id >= MDMP_MAX_REQUESTS) { 
-	fast_path_valid = false; 
-	break;
+      if (id == MDMP_PROCESS_NOT_INVOLVED)
+        continue;
+
+      if (id < 0 || id >= MDMP_MAX_REQUESTS) {
+        fast_path_valid = false;
+        break;
       }
 
       bool duplicate = false;
       for (int j = 0; j < active_count; ++j) {
-	if (active_slots[j] == id) { duplicate = true; break; }
+        if (active_slots[j] == id) {
+          duplicate = true;
+          break;
+        }
       }
-      if (duplicate) continue;
+      if (duplicate)
+        continue;
 
       if (mdmp_request_pool[id] != MPI_REQUEST_NULL) {
-	stack_reqs[active_count] = mdmp_request_pool[id];
-	active_slots[active_count] = id;
-	active_count++;
+        stack_reqs[active_count] = mdmp_request_pool[id];
+        active_slots[active_count] = id;
+        active_count++;
       }
     }
 
     if (fast_path_valid) {
       if (active_count > 0) {
-	mdmp_check_mpi(MPI_Waitall(active_count, stack_reqs, MPI_STATUSES_IGNORE),
+        mdmp_check_mpi(
+		       MPI_Waitall(active_count, stack_reqs, MPI_STATUSES_IGNORE),
 		       "MPI_Waitall(fast path)");
-	mdmp_note_requests_completed(active_count);
-	for (int i = 0; i < active_count; ++i) {
-	  int slot = active_slots[i];
-	  mdmp_request_pool[slot] = MPI_REQUEST_NULL;
-	  mdmp_release_imperative_slot_unlocked(slot);
-	}
+        mdmp_note_requests_completed(active_count);
+
+        for (int i = 0; i < active_count; ++i) {
+          int slot = active_slots[i];
+          mdmp_request_pool[slot] = MPI_REQUEST_NULL;
+          mdmp_release_imperative_slot_unlocked(slot);
+        }
       }
-      return; 
+
+      finish_wait_many_profile(&mdmp_prof_wait_many_fast_calls);
+      return;
     }
   }
 
   std::unique_lock<std::mutex> lock(mdmp_mpi_mutex, std::defer_lock);
-  if (use_locks) lock.lock();
+  if (use_locks)
+    lock.lock();
 
+  // --------------------------------------------------------------------------
+  // 2. TINY SEQUENTIAL DEDUP PATH
+  // --------------------------------------------------------------------------
   if (n <= MDMP_WAIT_MANY_TINY_CUTOFF) {
     int uniq[MDMP_WAIT_MANY_TINY_CUTOFF];
     int u = 0;
-    for(int i=0; i<n; ++i) {
+
+    for (int i = 0; i < n; ++i) {
       int id = ids[i];
-      if(id == MDMP_PROCESS_NOT_INVOLVED) continue;
+      if (id == MDMP_PROCESS_NOT_INVOLVED)
+        continue;
+
       bool seen = false;
-      for(int j=0; j<u; ++j) { if(uniq[j] == id) { seen = true; break; } }
-      if(!seen) uniq[u++] = id;
+      for (int j = 0; j < u; ++j) {
+        if (uniq[j] == id) {
+          seen = true;
+          break;
+        }
+      }
+
+      if (!seen)
+        uniq[u++] = id;
     }
+
     mdmp_wait_many_sequential_unlocked(uniq, u);
+    finish_wait_many_profile(&mdmp_prof_wait_many_tiny_seq_calls);
     return;
   }
 
-  // Large fallback handling...
+  // --------------------------------------------------------------------------
+  // 3. LARGE FALLBACK PATH
+  // --------------------------------------------------------------------------
   for (int i = 0; i < n; ++i) {
     mdmp_wait_unlocked(ids[i]);
   }
+
+  finish_wait_many_profile(&mdmp_prof_wait_many_fallback_calls);
 }
 
 void mdmp_init() {
@@ -783,30 +959,70 @@ void mdmp_abort(int error_code) {
 // Imperative Calls 
 // ==============================================================================
 int mdmp_send(void* buf, size_t count, int type, size_t bytes, int sender, int dest, int tag) {
-  if (dest < 0 || dest >= global_size || global_my_rank != sender) return MDMP_PROCESS_NOT_INVOLVED;
+  if (dest < 0 || dest >= global_size || global_my_rank != sender)
+    return MDMP_PROCESS_NOT_INVOLVED;
+
+  uint64_t t0 = 0;
+  if (mdmp_profile_enabled)
+    t0 = mdmp_now_us();
+
   bool use_locks = mdmp_runtime_active.load(std::memory_order_relaxed);
-  if (use_locks) mdmp_mpi_mutex.lock();
+  if (use_locks)
+    mdmp_mpi_mutex.lock();
 
   int id = mdmp_alloc_imperative_slot_unlocked();
   int actual_count = mdmp_actual_count(count, type, bytes);
-  mdmp_check_mpi(MPI_Isend(buf, actual_count, get_mpi_type(type), dest, tag, mdmp_comm, &mdmp_request_pool[id]), "MPI_Isend");
+  uint64_t actual_bytes = mdmp_actual_bytes(count, type, bytes);
+
+  mdmp_check_mpi(
+		 MPI_Isend(buf, actual_count, get_mpi_type(type),
+			   dest, tag, mdmp_comm, &mdmp_request_pool[id]),
+		 "MPI_Isend");
   mdmp_note_requests_started(1);
 
-  if (use_locks) mdmp_mpi_mutex.unlock();
+  if (use_locks)
+    mdmp_mpi_mutex.unlock();
+
+  if (mdmp_profile_enabled) {
+    mdmp_prof_send_calls++;
+    mdmp_prof_send_bytes += actual_bytes;
+    mdmp_prof_send_time_us += (mdmp_now_us() - t0);
+  }
+
   return id;
 }
 
 int mdmp_recv(void* buf, size_t count, int type, size_t bytes, int receiver, int src, int tag) {
-  if (src < 0 || src >= global_size || global_my_rank != receiver) return MDMP_PROCESS_NOT_INVOLVED;
+  if (src < 0 || src >= global_size || global_my_rank != receiver)
+    return MDMP_PROCESS_NOT_INVOLVED;
+
+  uint64_t t0 = 0;
+  if (mdmp_profile_enabled)
+    t0 = mdmp_now_us();
+
   bool use_locks = mdmp_runtime_active.load(std::memory_order_relaxed);
-  if (use_locks) mdmp_mpi_mutex.lock();
+  if (use_locks)
+    mdmp_mpi_mutex.lock();
 
   int id = mdmp_alloc_imperative_slot_unlocked();
   int actual_count = mdmp_actual_count(count, type, bytes);
-  mdmp_check_mpi(MPI_Irecv(buf, actual_count, get_mpi_type(type), src, tag, mdmp_comm, &mdmp_request_pool[id]), "MPI_Irecv");
+  uint64_t actual_bytes = mdmp_actual_bytes(count, type, bytes);
+
+  mdmp_check_mpi(
+		 MPI_Irecv(buf, actual_count, get_mpi_type(type),
+			   src, tag, mdmp_comm, &mdmp_request_pool[id]),
+		 "MPI_Irecv");
   mdmp_note_requests_started(1);
 
-  if (use_locks) mdmp_mpi_mutex.unlock();
+  if (use_locks)
+    mdmp_mpi_mutex.unlock();
+
+  if (mdmp_profile_enabled) {
+    mdmp_prof_recv_calls++;
+    mdmp_prof_recv_bytes += actual_bytes;
+    mdmp_prof_recv_time_us += (mdmp_now_us() - t0);
+  }
+
   return id;
 }
 
