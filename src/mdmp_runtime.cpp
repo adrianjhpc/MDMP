@@ -125,16 +125,15 @@ static inline void mdmp_profile_ensure_site(int site_id) {
 
 // Fast pipeline bypass for atomic increments
 static inline void mdmp_note_requests_started(int n) {
-  if (n > 0 && mdmp_runtime_active.load(std::memory_order_relaxed))
+  if (n > 0)
     mdmp_active_request_count.fetch_add(n, std::memory_order_relaxed);
 }
 
 static inline void mdmp_note_requests_completed(int n) {
-  if (n > 0 && mdmp_runtime_active.load(std::memory_order_relaxed))
+  if (n > 0)
     mdmp_active_request_count.fetch_sub(n, std::memory_order_relaxed);
 }
 
-// Profiling helpers
 uint64_t mdmp_now_us() {
   return (uint64_t)(MPI_Wtime() * 1.0e6);
 }
@@ -507,41 +506,51 @@ void mdmp_wait_unlocked(int req_id) {
   // 1. FAST PATH: IMPLICIT WAIT BATCHING
   if (req_id >= 0 && req_id < MDMP_MAX_REQUESTS) {
     if (mdmp_request_pool[req_id] != MPI_REQUEST_NULL) {
-      
+
       MPI_Request stack_reqs[32];
       int active_slots[32];
       int active_count = 0;
 
-      // Sweep the pool to catch fragmented compiler waits!
-      for (int i = 0; i < MDMP_MAX_REQUESTS; ++i) {
-        if (mdmp_request_pool[i] != MPI_REQUEST_NULL) {
-          stack_reqs[active_count] = mdmp_request_pool[i];
-          active_slots[active_count] = i;
+      // Use the dense active set, not a full pool scan.
+      for (int i = 0; i < mdmp_imper_active_count; ++i) {
+        int slot = mdmp_imper_active_slots[i];
+        if (mdmp_request_pool[slot] != MPI_REQUEST_NULL) {
+          stack_reqs[active_count] = mdmp_request_pool[slot];
+          active_slots[active_count] = slot;
           active_count++;
           if (active_count == 32) break;
         }
       }
 
       if (active_count == 1) {
-        mdmp_check_mpi(MPI_Wait(&mdmp_request_pool[req_id], MPI_STATUS_IGNORE), "MPI_Wait(imperative)");
-        mdmp_request_pool[req_id] = MPI_REQUEST_NULL;
+        int slot = active_slots[0];
+        mdmp_check_mpi(
+		       MPI_Wait(&mdmp_request_pool[slot], MPI_STATUS_IGNORE),
+		       "MPI_Wait(imperative)");
+        mdmp_request_pool[slot] = MPI_REQUEST_NULL;
         mdmp_note_requests_completed(1);
+        mdmp_release_imperative_slot_unlocked(slot);
       } else if (active_count > 1) {
         bool use_locks = mdmp_runtime_active.load(std::memory_order_relaxed);
         if (use_locks) mdmp_mpi_mutex.unlock();
-        
-        mdmp_check_mpi(MPI_Waitall(active_count, stack_reqs, MPI_STATUSES_IGNORE), "MPI_Waitall(implicit batch)");
-        
+
+        mdmp_check_mpi(
+		       MPI_Waitall(active_count, stack_reqs, MPI_STATUSES_IGNORE),
+		       "MPI_Waitall(implicit batch)");
+
         if (use_locks) mdmp_mpi_mutex.lock();
 
         for (int i = 0; i < active_count; ++i) {
-          mdmp_request_pool[active_slots[i]] = MPI_REQUEST_NULL;
+          int slot = active_slots[i];
+          mdmp_request_pool[slot] = MPI_REQUEST_NULL;
+          mdmp_release_imperative_slot_unlocked(slot);
         }
         mdmp_note_requests_completed(active_count);
       }
     }
     return;
   }
+
 
   // 2. Whole declarative batch token
   if (mdmp_is_decl_batch_token(req_id)) {
@@ -560,15 +569,15 @@ void mdmp_wait_unlocked(int req_id) {
     if (B.Serial == batchSerial && B.Active) {
       int mpi_idx = Target.MPIIndex;
       if (mpi_idx >= 0 && mpi_idx < B.RequestCount && B.Requests[mpi_idx] != MPI_REQUEST_NULL) {
-        mdmp_check_mpi(MPI_Wait(&B.Requests[mpi_idx], MPI_STATUS_IGNORE), "MPI_Wait(declarative logical)");
-        B.Requests[mpi_idx] = MPI_REQUEST_NULL;
-        mdmp_note_requests_completed(1);
+	mdmp_check_mpi(MPI_Wait(&B.Requests[mpi_idx], MPI_STATUS_IGNORE), "MPI_Wait(declarative logical)");
+	B.Requests[mpi_idx] = MPI_REQUEST_NULL;
+	mdmp_note_requests_completed(1);
         
-        bool all_done = true;
-        for (int i=0; i < B.RequestCount; i++) {
-          if (B.Requests[i] != MPI_REQUEST_NULL) { all_done = false; break; }
-        }
-        if (all_done) B.Active = false;
+	bool all_done = true;
+	for (int i=0; i < B.RequestCount; i++) {
+	  if (B.Requests[i] != MPI_REQUEST_NULL) { all_done = false; break; }
+	}
+	if (all_done) B.Active = false;
       }
     }
     return;
@@ -583,6 +592,7 @@ void mdmp_wait_unlocked(int req_id) {
   fprintf(stderr, "[MDMP Runtime Error] Invalid Request ID: %d\n", req_id);
   mdmp_abort(1);
 }
+
 
 void mdmp_wait(int req_id) {
   // Lock Bypass Fast Path
@@ -616,28 +626,33 @@ void mdmp_wait_many(const int *ids, int n) {
       int id = ids[i];
       if (id == MDMP_PROCESS_NOT_INVOLVED) continue;
       if (id < 0 || id >= MDMP_MAX_REQUESTS) { 
-        fast_path_valid = false; 
-        break;
+	fast_path_valid = false; 
+	break;
       }
 
       bool duplicate = false;
       for (int j = 0; j < active_count; ++j) {
-        if (active_slots[j] == id) { duplicate = true; break; }
+	if (active_slots[j] == id) { duplicate = true; break; }
       }
       if (duplicate) continue;
 
       if (mdmp_request_pool[id] != MPI_REQUEST_NULL) {
-        stack_reqs[active_count] = mdmp_request_pool[id];
-        active_slots[active_count] = id;
-        active_count++;
+	stack_reqs[active_count] = mdmp_request_pool[id];
+	active_slots[active_count] = id;
+	active_count++;
       }
     }
 
     if (fast_path_valid) {
       if (active_count > 0) {
-        mdmp_check_mpi(MPI_Waitall(active_count, stack_reqs, MPI_STATUSES_IGNORE), "MPI_Waitall(fast path)");
-        mdmp_note_requests_completed(active_count);
-        for (int i = 0; i < active_count; ++i) mdmp_request_pool[active_slots[i]] = MPI_REQUEST_NULL;
+	mdmp_check_mpi(MPI_Waitall(active_count, stack_reqs, MPI_STATUSES_IGNORE),
+		       "MPI_Waitall(fast path)");
+	mdmp_note_requests_completed(active_count);
+	for (int i = 0; i < active_count; ++i) {
+	  int slot = active_slots[i];
+	  mdmp_request_pool[slot] = MPI_REQUEST_NULL;
+	  mdmp_release_imperative_slot_unlocked(slot);
+	}
       }
       return; 
     }
