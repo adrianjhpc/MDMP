@@ -86,6 +86,8 @@ namespace llvm {
 
     bool isAsyncMDMPInstForWaitPlacement(Instruction *Inst);
 
+    Instruction *mdmpInstructionAfter(Instruction *I);
+    
     bool instructionIsTrueConsumerOrClobber(Instruction *I, const TrackedBuffer &Buf, AAResults &AA, MemorySSA &MSSA, const DataLayout &DL);
 
     bool instructionTouchesAnyTrackedBufferPhase2(Instruction *I, ArrayRef<TrackedBuffer> Buffers, AAResults &AA, MemorySSA &MSSA, const DataLayout &DL);

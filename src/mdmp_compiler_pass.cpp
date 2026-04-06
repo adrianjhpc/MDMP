@@ -24,6 +24,7 @@ unsigned mdmpEnvUnsigned(const char *Name, unsigned DefaultValue) {
   if (End == V || *End != '\0')
     return DefaultValue;
 
+  // This is required to avoid division by zero bugs
   if (Parsed == 0)
     return 1;
 
@@ -46,6 +47,14 @@ void MDMPPass::collectNonLeafLoops(LoopInfo &LI, SmallVectorImpl<Loop *> &Out) {
   for (Loop *TopL : LI) {
     collectNonLeafLoops(TopL, Out);
   }
+}
+
+Instruction *MDMPPass::mdmpInstructionAfter(Instruction *I) {
+  auto It = I->getIterator();
+  ++It;
+  assert(It != I->getParent()->end() &&
+         "Expected a non-terminator instruction");
+  return &*It;
 }
 
 bool MDMPPass::requestWindowSuggestsCallSiteProgressRelaxed(const RequestWindowInfo &Info,
@@ -1023,14 +1032,14 @@ bool MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
       IRBuilder<> Builder(CI);
 
       if (Name == "__mdmp_marker_commregion_begin") {
-	Changed= true;
+	Changed = true;
         CallInst *NewCall = Builder.CreateCall(runtime_begin);
         CI->replaceAllUsesWith(NewCall);
         ActiveDeclarativeLocs.clear(); 
         toDelete.push_back(CI);
       }
       else if (Name == "__mdmp_marker_send" || Name == "__mdmp_marker_recv") {
-	Changed= true;
+	Changed = true;
         Value *BufferPtr = CI->getArgOperand(0);
         Value *CountVal  = CI->getArgOperand(1);
         Value *TypeVal   = CI->getArgOperand(2);
@@ -1055,7 +1064,7 @@ bool MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
         toDelete.push_back(CI);
       } 
       else if (Name == "__mdmp_marker_register_send" || Name == "__mdmp_marker_register_recv") {
-	Changed= true;
+	Changed = true;
         Value *BufferPtr = CI->getArgOperand(0);
         Value *CountVal  = CI->getArgOperand(1);
         Value *TypeVal   = CI->getArgOperand(2);
@@ -1075,7 +1084,7 @@ bool MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
         toDelete.push_back(CI);
       }
       else if (Name == "__mdmp_marker_register_reduce") {
-	Changed= true;
+	Changed = true;
         Value *InBuf = CI->getArgOperand(0); Value *OutBuf = CI->getArgOperand(1);
         Value *ByteSize = CI->getArgOperand(4); 
 
@@ -1093,7 +1102,7 @@ bool MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
         toDelete.push_back(CI);
       }
       else if (Name == "__mdmp_marker_register_gather") {
-	Changed= true;
+	Changed = true;
         Value *SendBuf = CI->getArgOperand(0); Value *RecvBuf = CI->getArgOperand(2);
         Value *ByteSize = CI->getArgOperand(4); 
 
@@ -1111,6 +1120,7 @@ bool MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
 	toDelete.push_back(CI);
       }
       else if (Name == "__mdmp_marker_commit") {
+	Changed = true;
         CallInst *NewCommit = Builder.CreateCall(runtime_commit);
         CI->replaceAllUsesWith(NewCommit);
 
@@ -1145,7 +1155,7 @@ bool MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
         toDelete.push_back(CI);
       }
       else if (Name == "__mdmp_marker_reduce") {
-	Changed= true;
+	Changed = true;
         CallInst *NewCall = Builder.CreateCall(runtime_reduce, 
 					       {CI->getArgOperand(0), CI->getArgOperand(1), CI->getArgOperand(2), CI->getArgOperand(3), CI->getArgOperand(4), CI->getArgOperand(5), CI->getArgOperand(6)});
        
@@ -1168,6 +1178,7 @@ bool MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
         toDelete.push_back(CI);
       }
       else if (Name == "__mdmp_marker_gather") {
+	Changed =  true;
         CallInst *NewCall = Builder.CreateCall(runtime_gather, 
 					       {CI->getArgOperand(0), CI->getArgOperand(1), CI->getArgOperand(2), CI->getArgOperand(3), CI->getArgOperand(4), CI->getArgOperand(5)});
         
@@ -1189,7 +1200,7 @@ bool MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
         toDelete.push_back(CI);
       }
       else if (Name == "__mdmp_marker_allreduce" || Name == "__mdmp_marker_register_allreduce") {
-	Changed= true;
+	Changed = true;
         FunctionCallee target_func = (Name == "__mdmp_marker_allreduce") ? runtime_allreduce : runtime_register_allreduce;
         CallInst *NewCall = Builder.CreateCall(target_func,
                                                {CI->getArgOperand(0), CI->getArgOperand(1), CI->getArgOperand(2), CI->getArgOperand(3), CI->getArgOperand(4), CI->getArgOperand(5)});
@@ -1217,7 +1228,7 @@ bool MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
         toDelete.push_back(CI);
       }
       else if (Name == "__mdmp_marker_allgather" || Name == "__mdmp_marker_register_allgather") {
-	Changed= true;
+	Changed = true;
         FunctionCallee target_func = (Name == "__mdmp_marker_allgather") ? runtime_allgather : runtime_register_allgather;
         CallInst *NewCall = Builder.CreateCall(target_func,
                                                {CI->getArgOperand(0), CI->getArgOperand(1), CI->getArgOperand(2), CI->getArgOperand(3), CI->getArgOperand(4)});
@@ -1246,7 +1257,7 @@ bool MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
       }
 
       else if (Name == "__mdmp_marker_bcast" || Name == "__mdmp_marker_register_bcast") {
-	Changed= true;
+	Changed = true;
         FunctionCallee target_func = (Name == "__mdmp_marker_bcast") ? runtime_bcast : runtime_register_bcast;
         CallInst *NewCall = Builder.CreateCall(target_func,
                                                {CI->getArgOperand(0), CI->getArgOperand(1), CI->getArgOperand(2), CI->getArgOperand(3), CI->getArgOperand(4)});
@@ -1273,7 +1284,7 @@ bool MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
         toDelete.push_back(CI);
       }
       else if (Name == "__mdmp_marker_commregion_end") {
-	Changed= true;
+	Changed = true;
 	CallInst *NewEnd = Builder.CreateCall(runtime_end);
 	
 	if (!PendingRequests.empty()) {
@@ -1286,21 +1297,21 @@ bool MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
 	
 	toDelete.push_back(CI);
       }      
-      else if (Name == "__mdmp_marker_get_rank") { Changed= true; CallInst *NewCall = Builder.CreateCall(runtime_get_rank); CI->replaceAllUsesWith(NewCall); toDelete.push_back(CI); }
-      else if (Name == "__mdmp_marker_get_size") { Changed= true; CallInst *NewCall = Builder.CreateCall(runtime_get_size); CI->replaceAllUsesWith(NewCall); toDelete.push_back(CI); }
-      else if (Name == "__mdmp_marker_init") { Changed= true; Builder.CreateCall(runtime_init); toDelete.push_back(CI); }
-      else if (Name == "__mdmp_marker_final") { Changed= true; Builder.CreateCall(runtime_final); toDelete.push_back(CI); }
-      else if (Name == "__mdmp_marker_sync") { Changed= true; Builder.CreateCall(runtime_sync); toDelete.push_back(CI); }
-      else if (Name == "__mdmp_marker_wtime") { Changed= true; CallInst *NewCall = Builder.CreateCall(runtime_wtime); CI->replaceAllUsesWith(NewCall); toDelete.push_back(CI); }
+      else if (Name == "__mdmp_marker_get_rank") { Changed = true; CallInst *NewCall = Builder.CreateCall(runtime_get_rank); CI->replaceAllUsesWith(NewCall); toDelete.push_back(CI); }
+      else if (Name == "__mdmp_marker_get_size") { Changed = true; CallInst *NewCall = Builder.CreateCall(runtime_get_size); CI->replaceAllUsesWith(NewCall); toDelete.push_back(CI); }
+      else if (Name == "__mdmp_marker_init") { Changed = true; Builder.CreateCall(runtime_init); toDelete.push_back(CI); }
+      else if (Name == "__mdmp_marker_final") { Changed = true; Builder.CreateCall(runtime_final); toDelete.push_back(CI); }
+      else if (Name == "__mdmp_marker_sync") { Changed = true; Builder.CreateCall(runtime_sync); toDelete.push_back(CI); }
+      else if (Name == "__mdmp_marker_wtime") { Changed = true; CallInst *NewCall = Builder.CreateCall(runtime_wtime); CI->replaceAllUsesWith(NewCall); toDelete.push_back(CI); }
       else if (Name == "__mdmp_marker_set_debug") {
-	Changed= true;
+	Changed = true;
         Value *EnableArg = CI->getArgOperand(0); 
         CallInst *NewCall = Builder.CreateCall(runtime_set_debug, {EnableArg});
         CI->replaceAllUsesWith(NewCall);
         toDelete.push_back(CI);
       }
       else if (Name == "__mdmp_marker_abort") {
-	Changed= true; 
+	Changed = true; 
         Value *EnableArg = CI->getArgOperand(0);
         CallInst *NewCall = Builder.CreateCall(runtime_abort, {EnableArg});
         CI->replaceAllUsesWith(NewCall);
@@ -1386,11 +1397,21 @@ void MDMPPass::injectWaitsForRegion(ArrayRef<AsyncRequest> Requests, Instruction
   for (RequestWindowInfo &Info : Windows) {
     SmallPtrSet<Instruction *, 4> UniqueWaitPoints;
 
-    for (Instruction *InsertPt : Info.WaitPoints) {
+    for (Instruction *RawPt : Info.WaitPoints) {
+      Instruction *InsertPt = RawPt;
+      
+      // Declarative-region fix:
+      // if the chosen stop point is exactly mdmp_commregion_end,
+      // insert the wait *after* the end call, not before it.
+      if (RegionEnd && RawPt == RegionEnd) {
+	InsertPt = mdmpInstructionAfter(RawPt);
+      }
+      
       if (!DT.dominates(Info.Req->StartPoint, InsertPt)) {
 	InsertPt = Info.Req->StartPoint->getParent()->getTerminator();
       }
 
+      /*
       // ------------------------------------------------------------
       // Preserve precise in-loop waits.
       //
@@ -1405,14 +1426,14 @@ void MDMPPass::injectWaitsForRegion(ArrayRef<AsyncRequest> Requests, Instruction
       // ------------------------------------------------------------
       Loop *InsertLoop = LI.getLoopFor(InsertPt->getParent());
       bool IsPreciseInLoopWait =
-        (InsertLoop != nullptr &&
-         InsertPt != InsertPt->getParent()->getTerminator());
+      (InsertLoop != nullptr &&
+      InsertPt != InsertPt->getParent()->getTerminator());
 
       if (IsPreciseInLoopWait) {
-	UniqueWaitPoints.insert(InsertPt);
-	continue;
+      UniqueWaitPoints.insert(InsertPt);
+      continue;
       }
-
+      */
       Instruction *HoistPt = InsertPt;
       Loop *L = LI.getLoopFor(HoistPt->getParent());
       Loop *ReqLoop = LI.getLoopFor(Info.Req->StartPoint->getParent());
@@ -1925,10 +1946,11 @@ void MDMPPass::injectThrottledProgress(ArrayRef<AsyncRequest> Requests,
   // headers are dominated by at least one request start.
   // ------------------------------------------------------------
   if (AllowAggressiveFallback &&
+      MaxDeepLoopFallbacks > 0 &&
       (NumExactLeafInserted + NumRelaxedLeafInserted +
        NumExactOuterInserted + NumRelaxedOuterInserted +
        NumCallsiteInserted) == 0) {
-
+    
     struct DeepLoopCandidate {
       Loop *L = nullptr;
       unsigned Depth = 0;
@@ -1940,44 +1962,41 @@ void MDMPPass::injectThrottledProgress(ArrayRef<AsyncRequest> Requests,
     for (Loop *L : LeafLoops) {
       BasicBlock *Header = L->getHeader();
       if (InstrumentedHeaders.contains(Header))
-        continue;
+	continue;
 
       bool MatchesSomeLiveWindow = false;
 
       for (const RequestWindowInfo &Info : Windows) {
-        // Better fallback test:
-        // accept the loop if ANY block in the loop is inside the known live
-        // request window, not just the header block.
-        for (BasicBlock *LoopBB : L->getBlocksVector()) {
-          if (Info.LiveBlocks.contains(LoopBB)) {
-            MatchesSomeLiveWindow = true;
-            break;
-          }
-        }
+	for (BasicBlock *LoopBB : L->getBlocksVector()) {
+	  if (Info.LiveBlocks.contains(LoopBB)) {
+	    MatchesSomeLiveWindow = true;
+	    break;
+	  }
+	}
 
-        if (MatchesSomeLiveWindow)
-          break;
+	if (MatchesSomeLiveWindow)
+	  break;
 
-        // Secondary fallback: if the loop directly contains a future wait point,
-        // it still lies on a path where the request remains interesting.
-        for (Instruction *WP : Info.WaitPoints) {
-          if (L->contains(WP->getParent())) {
-            MatchesSomeLiveWindow = true;
-            break;
-          }
-        }
+	for (Instruction *WP : Info.WaitPoints) {
+	  if (L->contains(WP->getParent())) {
+	    MatchesSomeLiveWindow = true;
+	    break;
+	  }
+	}
 
-        if (MatchesSomeLiveWindow)
-          break;
+	if (MatchesSomeLiveWindow)
+	  break;
       }
+
+      if (!MatchesSomeLiveWindow)
+	continue;
 
       DeepLoopCandidate Cand;
       Cand.L = L;
       Cand.Depth = LI.getLoopDepth(Header);
       Cand.NumBlocks = (unsigned)L->getBlocksVector().size();
       DeepCandidates.push_back(Cand);
-    }
-
+    }   
 
     std::stable_sort(DeepCandidates.begin(), DeepCandidates.end(),
                      [](const DeepLoopCandidate &A,
