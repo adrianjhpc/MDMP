@@ -163,7 +163,8 @@ export MDMP_PROGRESS_AGGR_UNKNOWN_MIN_REQS=12
 ### Interpretation
 
 This enables more aggressive fallback progress insertion in functions that look large or communication-heavy enough to justify it.
-Debug / diagnostics profile
+
+## Debug / diagnostics profile
 
 Use this when investigating where progress sites are inserted.
 
