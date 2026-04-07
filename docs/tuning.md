@@ -140,7 +140,8 @@ export MDMP_PROGRESS_AGGR_UNKNOWN_MIN_REQS=999999
 ### Interpretation
 
 This effectively disables aggressive fallback progress insertion and keeps any remaining loop-based progress extremely infrequent.
-Aggressive irregular-application profile
+
+## Aggressive irregular-application profile
 
 Use this for:
 
