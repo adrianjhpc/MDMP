@@ -129,10 +129,7 @@ int main ( int argc, char *argv[] )
 //
   solution_num_local = 0;
 
-  if ( id == 0 )
-  {
-    wtime = MPI_Wtime ( );
-  }
+  wtime = MPI_Wtime ( );
 
   for ( i = ilo2; i < ihi2; i++ )
   {
@@ -170,8 +167,6 @@ int main ( int argc, char *argv[] )
 //
   if ( id == 0 )
   {
-
-
     cout << "\n";
     cout << "  Number of solutions found was " << solution_num << "\n";
     cout << "  Elapsed wall clock time (seconds) " << max_time << "\n";

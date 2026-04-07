@@ -132,10 +132,7 @@ int main ( int argc, char *argv[] )
 //
   solution_num_local = 0;
 
-  if ( id == 0 )
-  {
-    wtime = MDMP_WTIME();
-  }
+  wtime = MDMP_WTIME();
 
   for ( i = ilo2; i < ihi2; i++ )
   {
