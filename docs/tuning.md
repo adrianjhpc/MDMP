@@ -271,8 +271,8 @@ In that case:
  - lower `MDMP_PROGRESS_MAX_CALLSITES`
  - lower `MDMP_PROGRESS_MAX_DEEP_LOOPS`
  - or increase the aggressive profitability thresholds
-
-6. Summary
+ 
+# Summary
 ## Recommended default
 
 For general use, a conservative default is safer.
