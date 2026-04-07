@@ -48,10 +48,7 @@ int main ( int argc, char *argv[] )
   /* 
     Record the starting time. 
    */
-  if ( id == 0 ) 
-  {
-    wtime = MDMP_WTIME(); // Replaced MPI_Wtime
-  }
+  wtime = MDMP_WTIME(); // Replaced MPI_Wtime
 
   update ( id, p );
   /*

@@ -76,10 +76,7 @@ int main ( int argc, char *argv[] )
 /*
   Record the starting time.
 */
-  if ( id == 0 ) 
-  {
-    wtime = MPI_Wtime ( );
-  }
+  wtime = MPI_Wtime ( );
 
   update ( id, p );
 /*
