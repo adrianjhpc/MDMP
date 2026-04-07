@@ -160,16 +160,21 @@ int main ( int argc, char *argv[] )
 //
   MPI_Reduce ( &solution_num_local, &solution_num, 1, MPI_INT, MPI_SUM, 0, 
     MPI_COMM_WORLD );
+
+  wtime = MPI_Wtime ( ) - wtime;
+  double max_time = 0.0;
+  MPI_Reduce(&wtime, &max_time, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+
 //
 //  Let process 0 print the closing remarks.
 //
   if ( id == 0 )
   {
-    wtime = MPI_Wtime ( ) - wtime;
+
 
     cout << "\n";
     cout << "  Number of solutions found was " << solution_num << "\n";
-    cout << "  Elapsed wall clock time (seconds) " << wtime << "\n";
+    cout << "  Elapsed wall clock time (seconds) " << max_time << "\n";
   }
 //
 //  Terminate MPI.

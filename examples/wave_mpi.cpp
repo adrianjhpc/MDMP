@@ -142,10 +142,15 @@ int main ( int argc, char *argv[] )
 //  Report elapsed wallclock time.
 //
   wtime = MPI_Wtime ( ) - wtime;
+
+  double max_time = 0.0;
+  
+  MPI_Reduce(&wtime, &max_time, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+  
   if ( id == 0 )
   {
     cout << "\n";
-    cout << "  Elapsed wallclock time was " << wtime << " seconds\n";
+    cout << "  Elapsed wallclock time was " << max_time << " seconds\n";
   }
 //
 //  Terminate MPI.

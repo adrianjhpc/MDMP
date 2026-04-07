@@ -57,6 +57,10 @@ int main(int argc, char** argv) {
     }
 
     double end_time = MPI_Wtime();
+    double calc_time = (end_time - start_time);
+    double max_time = 0.0;
+    MPI_Reduce(&calc_time, &max_time, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+
 
     if (rank == 0) {
         printf("Validation Check (Prevents DCE): %f\n", local_vals[0]); 
@@ -66,7 +70,7 @@ int main(int argc, char** argv) {
         printf("------------------------------------------------\n");
         printf(" BENCHMARK: Graph Analytics (Raw MPI)\n");
         printf("------------------------------------------------\n");
-        printf("Elapsed Time: %f seconds\n", end_time - start_time);
+        printf("Elapsed Time: %f seconds\n", max_time);
     }
 
     MPI_Finalize();

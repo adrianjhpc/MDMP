@@ -168,13 +168,15 @@ int main ( int argc, char *argv[] )
 //
 //  Let process 0 print the closing remarks.
 //
+  wtime = MDMP_WTIME() - wtime;
+  double max_time = 0.0;
+  MDMP_REDUCE(&wtime, &max_time, 1, 0, MDMP_MAX);
+  
   if ( id == 0 )
-  {
-    wtime = MDMP_WTIME() - wtime;
-
+  {    
     cout << "\n";
     cout << "  Number of solutions found was " << solution_num << "\n";
-    cout << "  Elapsed wall clock time (seconds) " << wtime << "\n";
+    cout << "  Elapsed wall clock time (seconds) " << max_time << "\n";
   }
 //
 //  Terminate MPI.

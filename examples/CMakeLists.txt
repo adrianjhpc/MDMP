@@ -3,7 +3,7 @@ find_package(MPI REQUIRED)
 set(MDMP_HARNESS_C "${CMAKE_SOURCE_DIR}/harness/mdmpc")
 set(MDMP_HARNESS_CXX "${CMAKE_SOURCE_DIR}/harness/mdmpc++")
 
-set(BENCHMARK_RANKS 256)
+set(BENCHMARK_RANKS 8)
 
 add_custom_target(run_examples
     COMMENT "Executing all benchmarks: MPI vs MDMP Imperative vs MDMP RegCom..."
@@ -27,19 +27,39 @@ function(add_comparison_example EXAMPLE_NAME EXT)
     target_include_directories(${EXAMPLE_NAME}_mpi PRIVATE ${MPI_C_INCLUDE_DIRS} ${MPI_CXX_INCLUDE_DIRS})
     target_link_libraries(${EXAMPLE_NAME}_mpi PRIVATE ${MPI_C_LIBRARIES} ${MPI_CXX_LIBRARIES} ${ARG_LINK_LIBS})
 
+    # 1. Get the current build type (Release, Debug, RelWithDebInfo, etc.) in uppercase
+    string(TOUPPER "${CMAKE_BUILD_TYPE}" UPPER_BUILD_TYPE)
+
     if("${EXT}" STREQUAL "c")
         set(CURRENT_HARNESS ${MDMP_HARNESS_C})
-        set(MPI_INC ${MPI_CXX_HEADER_DIR})
-        set(MPI_LIB ${MPI_CXX_LIBRARIES})
+        set(MPI_INC ${MPI_C_HEADER_DIR}) # FIXED: Now using C headers
+        set(MPI_LIB ${MPI_C_LIBRARIES})  # FIXED: Now using C libraries
+        
+        # 2. Grab the base C flags and append the build-type specific C flags
+        set(RAW_MDMP_FLAGS "${CMAKE_C_FLAGS}")
+        if(UPPER_BUILD_TYPE)
+            string(APPEND RAW_MDMP_FLAGS " ${CMAKE_C_FLAGS_${UPPER_BUILD_TYPE}}")
+        endif()
     else()
         set(CURRENT_HARNESS ${MDMP_HARNESS_CXX})
-        set(MPI_INC ${MPI_C_HEADER_DIR})
-        set(MPI_LIB ${MPI_C_LIBRARIES})
+        set(MPI_INC ${MPI_CXX_HEADER_DIR}) # FIXED: Now using CXX headers
+        set(MPI_LIB ${MPI_CXX_LIBRARIES})  # FIXED: Now using CXX libraries
+        
+        # 2. Grab the base CXX flags and append the build-type specific CXX flags
+        set(RAW_MDMP_FLAGS "${CMAKE_CXX_FLAGS}")
+        if(UPPER_BUILD_TYPE)
+            string(APPEND RAW_MDMP_FLAGS " ${CMAKE_CXX_FLAGS_${UPPER_BUILD_TYPE}}")
+        endif()
     endif()
+
+    # 3. Convert the space-separated string of flags into a CMake list 
+    # so add_custom_command passes them correctly to the underlying shell
+    separate_arguments(MDMP_FLAGS_LIST NATIVE_COMMAND "${RAW_MDMP_FLAGS}")
 
     add_custom_command(
         OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${EXAMPLE_NAME}_mdmp
         COMMAND ${CURRENT_HARNESS} ${CMAKE_CURRENT_SOURCE_DIR}/${EXAMPLE_NAME}_mdmp.${EXT}
+                ${MDMP_FLAGS_LIST}
                 -I${CMAKE_SOURCE_DIR}/src -I${MPI_INC}
                 ${MPI_LIB} ${ARG_LINK_LIBS}
                 -o ${CMAKE_CURRENT_BINARY_DIR}/${EXAMPLE_NAME}_mdmp
@@ -51,6 +71,7 @@ function(add_comparison_example EXAMPLE_NAME EXT)
     add_custom_command(
         OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${EXAMPLE_NAME}_mdmp_regcom
         COMMAND ${CURRENT_HARNESS} ${CMAKE_CURRENT_SOURCE_DIR}/${EXAMPLE_NAME}_mdmp_regcom.${EXT}
+                ${MDMP_FLAGS_LIST}
                 -I${CMAKE_SOURCE_DIR}/src -I${MPI_INC}
                 ${MPI_LIB} ${ARG_LINK_LIBS}
                 -o ${CMAKE_CURRENT_BINARY_DIR}/${EXAMPLE_NAME}_mdmp_regcom
@@ -59,9 +80,9 @@ function(add_comparison_example EXAMPLE_NAME EXT)
     )
     add_custom_target(target_${EXAMPLE_NAME}_mdmp_regcom ALL DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/${EXAMPLE_NAME}_mdmp_regcom)
 
-    set(RUN_MPI ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${ARG_RANKS} ${CMAKE_CURRENT_BINARY_DIR}/${EXAMPLE_NAME}_mpi ${ARG_RUN_ARGS})
-    set(RUN_MDMP ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${ARG_RANKS} ${CMAKE_CURRENT_BINARY_DIR}/${EXAMPLE_NAME}_mdmp ${ARG_RUN_ARGS})
-    set(RUN_REGCOM ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${ARG_RANKS} ${CMAKE_CURRENT_BINARY_DIR}/${EXAMPLE_NAME}_mdmp_regcom ${ARG_RUN_ARGS})
+    set(RUN_MPI ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${ARG_RANKS} -bind-to core -map-by core ${CMAKE_CURRENT_BINARY_DIR}/${EXAMPLE_NAME}_mpi ${ARG_RUN_ARGS})
+    set(RUN_MDMP ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${ARG_RANKS} -bind-to core -map-by core ${CMAKE_CURRENT_BINARY_DIR}/${EXAMPLE_NAME}_mdmp ${ARG_RUN_ARGS})
+    set(RUN_REGCOM ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${ARG_RANKS} -bind-to core -map-by core ${CMAKE_CURRENT_BINARY_DIR}/${EXAMPLE_NAME}_mdmp_regcom ${ARG_RUN_ARGS})
     set(MDMP_ENV "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}/src:/usr/lib64/mpich/lib:$ENV{LD_LIBRARY_PATH}")
 
     add_custom_target(run_example_${EXAMPLE_NAME}

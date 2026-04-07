@@ -52,11 +52,15 @@ int main(int argc, char** argv) {
 
     double end_time = MDMP_WTIME();
 
+    double calc_time = (end_time - start_time);
+    double max_time = 0.0;
+    MDMP_REDUCE(&calc_time, &max_time, 1, 1, MDMP_MAX);    
+    
     if (rank == 1) {
         printf("------------------------------------------------\n");
         printf(" BENCHMARK: Imbalanced Wavefront (Declarative)\n");
         printf("------------------------------------------------\n");
-        printf("Elapsed Time: %f seconds\n", end_time - start_time);
+        printf("Elapsed Time: %f seconds\n", max_time);
         printf("Validation (Prevents DCE): %f\n", local_data[0]);
     }
 

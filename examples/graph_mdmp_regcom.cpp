@@ -60,6 +60,10 @@ int main(int argc, char** argv) {
     }
 
     double end_time = MDMP_WTIME();
+    double calc_time = (end_time - start_time);
+    double max_time = 0.0;
+    MDMP_REDUCE(&calc_time, &max_time, 1, 0, MDMP_MAX);
+
 
     if (rank == 0) {
         printf("Validation Check (Prevents DCE): %f\n", local_vals[0]); 
@@ -67,7 +71,7 @@ int main(int argc, char** argv) {
         printf(" BENCHMARK: Graph Analytics (Declarative MDMP)\n");
         printf("------------------------------------------------\n");
         printf("Declarative Region now successfully overlaps compute and comm!\n");
-        printf("Elapsed Time: %f seconds\n", end_time - start_time);
+        printf("Elapsed Time: %f seconds\n", max_time);
     }
 
     MDMP_COMM_FINAL();

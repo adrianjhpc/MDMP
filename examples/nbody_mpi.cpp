@@ -54,7 +54,8 @@ int main(int argc, char** argv) {
             send_list[i].z = recv_list[i].z + dummy_work; 
         }
     }
-
+ 
+    MPI_Barrier(MPI_COMM_WORLD);
     double end_time = MPI_Wtime();
 
     // ==========================================
@@ -93,6 +94,10 @@ int main(int argc, char** argv) {
     }
     // ==========================================
 
+    double calc_time = (end_time - start_time);
+    double max_time = 0.0;
+    MPI_Reduce(&calc_time, &max_time, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+
     if (rank == 0) {
         printf("------------------------------------------------\n");
         printf(" BENCHMARK: N-Body Particle Exchange (Raw MPI)\n");
@@ -100,7 +105,7 @@ int main(int argc, char** argv) {
         printf("Running on %d processes\n", size);
         printf("Particles Exchanged: %d per step\n", num_migrating);
         printf("Iterations: %d\n", iterations);
-        printf("Elapsed Time: %f seconds\n", end_time - start_time);
+        printf("Elapsed Time: %f seconds\n", max_time);
     }
 
     MPI_Finalize();

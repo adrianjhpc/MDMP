@@ -88,12 +88,15 @@ int main ( int argc, char *argv[] )
   /* 
     Record the final time. 
    */
+  wtime = MDMP_WTIME() - wtime;
+
+  double max_time = 0.0;
+  MDMP_REDUCE(&wtime, &max_time, 1, 0, MDMP_MAX);
+
   if ( id == 0 )
   {
-    wtime = MDMP_WTIME() - wtime;
-
     printf ( "\n");       
-    printf ( "  Wall clock elapsed seconds = %f\n", wtime );      
+    printf ( "  Wall clock elapsed seconds = %f\n", max_time );      
   }
   /* 
     Terminate MDMP. 
@@ -155,7 +158,7 @@ void update ( int id, int p )
   int i;
   int j;
   int j_min = 0;
-  long j_max = 2654208000;
+  long j_max = 2208000;
   int n = 17361;
   double k = 7.5e-11;
   double time;
@@ -287,7 +290,7 @@ void update ( int id, int p )
                / ( double ) ( j_max     - j_min );
 
     // Open communication region
-    MDMP_COMMREGION_BEGIN();
+    //MDMP_COMMREGION_BEGIN();
 
     // Declare intent to send and receive
     // Tag 1: Leftward Send, Rightward Recv
@@ -341,7 +344,7 @@ void update ( int id, int p )
     }
 
     // Close the communication region
-    MDMP_COMMREGION_END();
+    //MDMP_COMMREGION_END();
 
     if ( p == 1 )
     {

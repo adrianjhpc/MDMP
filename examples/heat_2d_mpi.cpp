@@ -83,11 +83,15 @@ int main(int argc, char** argv) {
 
     double end_time = MPI_Wtime();
 
+    double calc_time = (end_time - start_time);
+    double max_time = 0.0;
+    MPI_Reduce(&calc_time, &max_time, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+
     if (rank == 0) {
         printf("Standard MPI 2D Heat Equation Benchmark\n");
         printf("Grid Size: %d x %d per rank\n", Nx, local_Ny);
         printf("Iterations: %d\n", iterations);
-        printf("Elapsed Time: %f seconds\n", end_time - start_time);
+        printf("Elapsed Time: %f seconds\n", max_time);
     }
 
     MPI_Finalize();

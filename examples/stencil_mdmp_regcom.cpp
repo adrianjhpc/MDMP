@@ -63,12 +63,16 @@ int main(int argc, char** argv) {
 
     double end_time = MDMP_WTIME();
 
+    double calc_time = (end_time - start_time);
+    double max_time = 0.0;
+    MDMP_REDUCE(&calc_time, &max_time, 1, 1, MDMP_MAX);
+        
     if (rank == 1) {
         printf("------------------------------------------------\n");
         printf(" BENCHMARK: 2D Heat Equation (MDMP Declarative)\n");
         printf("------------------------------------------------\n");
         printf("Grid Size per Rank: %d x %d\n", N, N);
-        printf("Elapsed Time: %f seconds\n", end_time - start_time);
+        printf("Elapsed Time: %f seconds\n", max_time);
         printf("Validation: %f\n", grid[N/2 + N/2]); 
     }
 

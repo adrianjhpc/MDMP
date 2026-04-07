@@ -62,9 +62,13 @@ int main ( int argc, char *argv[] )
   collect ( id, p, n_global, n_local, nsteps, dt, u1_local );
 
   wtime = MDMP_WTIME() - wtime;
+  double max_time = 0.0;
+  
+  MDMP_REDUCE(&wtime, &max_time, 1, 0, MDMP_MAX);
+  
   if ( id == 0 )
   {
-    cout << "\n  Elapsed wallclock time was " << wtime << " seconds\n";
+    cout << "\n  Elapsed wallclock time was " << max_time << " seconds\n";
   }
 
   delete [] u1_local;

@@ -85,12 +85,15 @@ int main ( int argc, char *argv[] )
 /*
   Record the final time.
 */
+
+  wtime = MPI_Wtime ( ) - wtime;
+  double max_time = 0.0;
+  MPI_Reduce(&wtime, &max_time, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+
   if ( id == 0 )
   {
-    wtime = MPI_Wtime ( ) - wtime;
-
     printf ( "\n");       
-    printf ( "  Wall clock elapsed seconds = %f\n", wtime );      
+    printf ( "  Wall clock elapsed seconds = %f\n", max_time );      
   }
 /*
   Terminate MPI.
@@ -152,7 +155,7 @@ void update ( int id, int p )
   int i;
   int j;
   int j_min = 0;
-  long j_max = 2654208000;
+  long j_max = 2208000;
   int n = 17361; 
   double k = 7.5e-11;
   MPI_Status status;

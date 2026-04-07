@@ -92,6 +92,10 @@ int main(int argc, char** argv) {
     }
     // ==========================================
 
+    double calc_time = (end_time - start_time);
+    double max_time = 0.0;
+    MDMP_REDUCE(&calc_time, &max_time, 1, 0, MDMP_MAX);
+
     if (rank == 0) {
         printf("------------------------------------------------\n");
         printf(" BENCHMARK: N-Body Particle Exchange (Declarative)\n");
@@ -99,7 +103,7 @@ int main(int argc, char** argv) {
         printf("Running on %d processes\n", size);
         printf("Particles Exchanged: %d per step\n", num_migrating);
         printf("Iterations: %d\n", iterations);
-        printf("Elapsed Time: %f seconds\n", end_time - start_time);
+        printf("Elapsed Time: %f seconds\n", max_time);
     }
 
     MDMP_COMM_FINAL();
