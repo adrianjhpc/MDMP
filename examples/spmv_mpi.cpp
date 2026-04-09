@@ -138,6 +138,7 @@ int main(int argc, char** argv) {
 
 
     if (rank == 0) {
+        std::cout << "SpMV example run on " << size << " processes\n";
         std::cout << "Standard MPI SpMV completed in " << max_time << " seconds.\n";
     }
 

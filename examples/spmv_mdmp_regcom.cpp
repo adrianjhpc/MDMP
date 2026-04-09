@@ -105,23 +105,20 @@ int main(int argc, char** argv) {
     // =====================================================================
     for (int iter = 0; iter < max_iter; ++iter) {
         
-        // A. Pack Sends (Pure Memory, No opaque C calls)
+        // Pack Sends (Pure Memory, No opaque C calls)
         for (int i = 0; i < num_actual_neighbours; ++i) {
             for (int j = 0; j < send_counts[i]; ++j) {
                 send_buffers[i][j] = local_x[send_indices[i][j]];
             }
         }
 
-        // B. Batched Dispatch
+        // Batched Dispatch
         MDMP_COMMIT(); 
 
-        // C. Overlapped Compute
+        // Overlapped Compute
         compute_spmv(local_A, local_x, local_y);
 
-        // D. JIT Progress Engine Synchronization
-        MDMP_COMM_SYNC(); 
-
-        // E. Unpack & Finish Compute
+        // Unpack & Finish Compute
         for (int i = 0; i < num_actual_neighbours; ++i) {
             for (int j = 0; j < recv_counts[i]; ++j) {
                 ghost_x[recv_indices[i][j]] = recv_buffers[i][j];
@@ -137,6 +134,7 @@ int main(int argc, char** argv) {
     MDMP_REDUCE(&calc_time, &max_time, 1, 0, MDMP_MAX);
 
     if (rank == 0) {
+        std::cout << "SpMV example run on " << size << " processes\n";
         std::cout << "MDMP Declarative SpMV completed in " << max_time << " seconds.\n";
     }
 
