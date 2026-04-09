@@ -92,31 +92,27 @@ int main(int argc, char** argv) {
     // =====================================================================
     // 2. THE HOT SOLVER LOOP (IMPERATIVE)
     // =====================================================================
-    // We store the slot IDs returned by MDMP to track in-flight requests
-    std::vector<int> active_requests(num_actual_neighbours * 2);
-
     for (int iter = 0; iter < max_iter; ++iter) {
-        int req_idx = 0;
+
+        MDMP_COMMREGION_BEGIN();
 
         // Pack & Dispatch Sends dynamically into the Request Pool
         for (int i = 0; i < num_actual_neighbours; ++i) {
             for (int j = 0; j < send_counts[i]; ++j) {
                 send_buffers[i][j] = local_x[send_indices[i][j]];
             }
-            active_requests[req_idx++] = MDMP_SEND(
-                send_buffers[i].data(), send_counts[i], rank, neighbours[i], 0
-            );
+            MDMP_SEND(send_buffers[i].data(), send_counts[i], rank, neighbours[i], 0);
         }
 
         // Dispatch Receives dynamically
         for (int i = 0; i < num_actual_neighbours; ++i) {
-            active_requests[req_idx++] = MDMP_RECV(
-                recv_buffers[i].data(), recv_counts[i], rank, neighbours[i], 0
-            );
+            MDMP_RECV(recv_buffers[i].data(), recv_counts[i], rank, neighbours[i], 0);
         }
 
         // Overlapped Compute (JIT Progress Engine protects the CPU here)
         compute_spmv(local_A, local_x, local_y);
+
+        MDMP_COMMREGION_END();
 
         // Unpack & Finish Compute
         for (int i = 0; i < num_actual_neighbours; ++i) {
