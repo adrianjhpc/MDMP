@@ -132,8 +132,12 @@ int main(int argc, char** argv) {
 
     double end_time = MDMP_WTIME();
 
+    double calc_time = (end_time - start_time);
+    double max_time = 0.0;
+    MDMP_REDUCE(&calc_time, &max_time, 1, 0, MDMP_MAX);
+
     if (rank == 0) {
-        std::cout << "MDMP Declarative SpMV completed in " << (end_time - start_time) << " seconds.\n";
+        std::cout << "MDMP Declarative SpMV completed in " << max_time << " seconds.\n";
     }
 
     MDMP_COMM_FINAL();

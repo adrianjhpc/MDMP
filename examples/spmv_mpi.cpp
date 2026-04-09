@@ -132,8 +132,13 @@ int main(int argc, char** argv) {
 
     double end_time = MPI_Wtime();
 
+    double calc_time = (end_time - start_time);
+    double max_time = 0.0;
+    MPI_Reduce(&calc_time, &max_time, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+
+
     if (rank == 0) {
-        std::cout << "Standard MPI SpMV completed in " << (end_time - start_time) << " seconds.\n";
+        std::cout << "Standard MPI SpMV completed in " << max_time << " seconds.\n";
     }
 
     MPI_Finalize();
