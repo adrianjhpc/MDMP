@@ -27,7 +27,6 @@ int main() {
         data[i] = static_cast<double>(i);
     }
 
-    MDMP_COMMREGION_BEGIN();
     MDMP_SEND(data.data(), size, 0, 1, 0); // Rank 0 sends to Rank 1
     MDMP_RECV(result.data(), size, 1, 0, 0); // Rank 1 recvs from Rank 0
     MDMP_SEND(result.data(), size, 1, 0, 0); // Rank 1 sends to Rank 0
@@ -36,7 +35,6 @@ int main() {
     for (int i = 0; i < size; ++i) {
         result[i] = result[i] * result[i] * result[i];
     }
-    MDMP_COMMREGION_END();
 
     MDMP_COMM_SYNC();
 
