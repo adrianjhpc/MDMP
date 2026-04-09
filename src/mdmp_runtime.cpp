@@ -861,6 +861,9 @@ void mdmp_wait_unlocked(int req_id) {
 
 
 void mdmp_wait(int req_id) {
+
+  mdmp_log("Calling mdmp_wait on %d\n", global_my_rank);
+  
   // Lock Bypass Fast Path
   if (mdmp_runtime_active.load(std::memory_order_relaxed)) {
     std::lock_guard<std::mutex> lock(mdmp_mpi_mutex);
@@ -1112,6 +1115,8 @@ int mdmp_send(void* buf, size_t count, int type, size_t bytes, int sender, int d
   int actual_count = mdmp_actual_count(count, type, bytes);
   uint64_t actual_bytes = mdmp_actual_bytes(count, type, bytes);
 
+  mdmp_log("[MDMP Runtime] Calling mdmp_send on %d sending from %d to %d with tag %d\n", global_my_rank, sender, dest, tag);
+  
   mdmp_check_mpi(
 		 MPI_Isend(buf, actual_count, get_mpi_type(type),
 			   dest, tag, mdmp_comm, &mdmp_request_pool[id]),
@@ -1146,6 +1151,8 @@ int mdmp_recv(void* buf, size_t count, int type, size_t bytes, int receiver, int
   int actual_count = mdmp_actual_count(count, type, bytes);
   uint64_t actual_bytes = mdmp_actual_bytes(count, type, bytes);
 
+  mdmp_log("[MDMP Runtime] Calling mdmp_recv on %d receiving from %d from %d with tag %d\n", global_my_rank, receiver, src, tag);
+  
   mdmp_check_mpi(
 		 MPI_Irecv(buf, actual_count, get_mpi_type(type),
 			   src, tag, mdmp_comm, &mdmp_request_pool[id]),
