@@ -16,7 +16,7 @@ if [[ ! -f "${PLUGIN_PATH}" ]]; then
   exit 1
 fi
 
-PLUGIN_ARGS=( "-fpass-plugin=${PLUGIN_PATH}" )
+PLUGIN_ARGS=( "-flto" "-fpass-plugin=${PLUGIN_PATH}" )
 INCLUDE_ARGS=( "-I${SRC_DIR}" )
 LINK_ARGS=( "-L${RUNTIME_DIR}" "-Wl,-rpath,${RUNTIME_DIR}" "-lmdmp_runtime" )
 
@@ -25,11 +25,16 @@ preprocess_only=0
 assemble_only=0
 has_source=0
 saw_opt=0
+show_cmd=0  # NEW: Toggle for printing the command
 
 USER_ARGS=()
 
 for arg in "$@"; do
   case "${arg}" in
+    --mdmp-show)
+      # Intercept our custom flag, set the toggle, and do NOT add it to USER_ARGS
+      show_cmd=1
+      ;;
     -c)
       compile_only=1
       USER_ARGS+=( "${arg}" )
@@ -64,17 +69,27 @@ if (( ! saw_opt )); then
   USER_ARGS=( "-O1" "${USER_ARGS[@]}" )
 fi
 
+# NEW: Helper function to print and execute
+execute() {
+  if (( show_cmd )); then
+    echo -e "\033[1;36m[mdmpc++]\033[0m Executing:" >&2
+    printf '%q ' "$@" >&2
+    echo >&2
+  fi
+  exec "$@"
+}
+
+# Updated to route through the execute helper
 if (( preprocess_only )); then
-  exec "${CXX_BIN}" "${INCLUDE_ARGS[@]}" "${USER_ARGS[@]}"
+  execute "${CXX_BIN}" "${INCLUDE_ARGS[@]}" "${USER_ARGS[@]}"
 fi
 
 if (( compile_only || assemble_only )); then
-  exec "${CXX_BIN}" "${PLUGIN_ARGS[@]}" "${INCLUDE_ARGS[@]}" "${USER_ARGS[@]}"
+  execute "${CXX_BIN}" "${PLUGIN_ARGS[@]}" "${INCLUDE_ARGS[@]}" "${USER_ARGS[@]}"
 fi
 
 if (( has_source )); then
-  exec "${CXX_BIN}" "${PLUGIN_ARGS[@]}" "${INCLUDE_ARGS[@]}" "${USER_ARGS[@]}" "${LINK_ARGS[@]}"
+  execute "${CXX_BIN}" "${PLUGIN_ARGS[@]}" "${INCLUDE_ARGS[@]}" "${USER_ARGS[@]}" "${LINK_ARGS[@]}"
 fi
 
-exec "${CXX_BIN}" "${USER_ARGS[@]}" "${LINK_ARGS[@]}"
-
+execute "${CXX_BIN}" "${USER_ARGS[@]}" "${LINK_ARGS[@]}"
