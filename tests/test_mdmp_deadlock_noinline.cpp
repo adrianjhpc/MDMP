@@ -6,11 +6,11 @@
 #include "mdmp_interface.h"
 
 // force inlining to guarantee the pass sees the whole picture
-inline __attribute__((always_inline)) void do_mdmp_send(double* buf, int count, int actor, int peer, int tag) {
+void do_mdmp_send(double* buf, int count, int actor, int peer, int tag) {
     MDMP_SEND(buf, count, actor, peer, tag);
 }
 
-inline __attribute__((always_inline)) void do_mdmp_recv(double* buf, int count, int actor, int peer, int tag) {
+void do_mdmp_recv(double* buf, int count, int actor, int peer, int tag) {
     MDMP_RECV(buf, count, actor, peer, tag);
 }
 

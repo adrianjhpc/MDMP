@@ -15,14 +15,24 @@ find_package(MPI REQUIRED)
 # We define how many ranks CTest should use to run your test suite
 set(TEST_NUM_RANKS 7)
 
-function(add_mdmp_test TEST_NAME SOURCE_FILE)
+# CHANGED: Removed SOURCE_FILE from the signature. 
+# Everything after TEST_NAME goes into ${ARGN}.
+function(add_mdmp_test TEST_NAME)
+    
+    # 1. Collect all source files and make their paths absolute
+    set(ABSOLUTE_SOURCES "")
+    foreach(src_file IN LISTS ARGN)
+        list(APPEND ABSOLUTE_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/${src_file}")
+    endforeach()
+
     add_custom_command(
         OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${TEST_NAME}
-        COMMAND ${MDMPCXX} ${CMAKE_CURRENT_SOURCE_DIR}/${SOURCE_FILE}
+        # 2. Pass the entire list of source files to mdmpc++
+        COMMAND ${MDMPCXX} ${ABSOLUTE_SOURCES}
                 ${MPI_INC_FLAGS} ${MPI_LIBRARIES}
                 -o ${CMAKE_CURRENT_BINARY_DIR}/${TEST_NAME}
-        # Rebuild if the source file, the pass, or the runtime changes!
-        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/${SOURCE_FILE} mdmp_compiler_pass mdmp_runtime
+        # 3. Depend on ALL source files, so any edit triggers a rebuild
+        DEPENDS ${ABSOLUTE_SOURCES} mdmp_compiler_pass mdmp_runtime
         COMMENT "Compiling ${TEST_NAME} using mdmpc++ harness..."
     )
 
@@ -32,12 +42,12 @@ function(add_mdmp_test TEST_NAME SOURCE_FILE)
     )
 
     # Register the executable with CTest, wrapping it in mpiexec/mpirun
-    add_test(NAME ${TEST_NAME} 
+    add_test(NAME ${TEST_NAME}
              COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${TEST_NUM_RANKS} ${CMAKE_CURRENT_BINARY_DIR}/${TEST_NAME}
     )
 
     # Inject the LD_LIBRARY_PATH so CTest can find your custom runtime during execution
-    set_tests_properties(${TEST_NAME} PROPERTIES 
+    set_tests_properties(${TEST_NAME} PROPERTIES
         ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}/src:/usr/lib64/mpich/lib:$ENV{LD_LIBRARY_PATH}"
     )
 endfunction()
@@ -51,6 +61,8 @@ add_mdmp_test(mdmp_test_out_of_bounds_rank_selection test_out_of_bounds_rank_sel
 add_mdmp_test(mdmp_test test_mdmp.cpp)
 add_mdmp_test(mdmp_test_interprocedural test_mdmp_interprocedural.cpp)
 add_mdmp_test(mdmp_test_deadlock test_mdmp_deadlock.cpp)
+add_mdmp_test(mdmp_test_deadlock_noinline test_mdmp_deadlock_noinline.cpp)
+add_mdmp_test(mdmp_test_deadlock_lto test_mdmp_deadlock_lto_procedures.cpp test_mdmp_deadlock_lto.cpp)
 add_mdmp_test(mdmp_test_regcom test_mdmp_regcom.cpp)
 add_mdmp_test(mdmp_test_periodic_boundaries test_periodic_mdmp.cpp)
 add_mdmp_test(mdmp_test_periodic_boundaries_regcom test_periodic_mdmp_regcom.cpp)
