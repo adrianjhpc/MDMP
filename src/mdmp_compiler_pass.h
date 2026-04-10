@@ -143,62 +143,37 @@ namespace llvm {
 
     LocationSize derivePreciseSpan(Value *CountV, Value *TypeCodeV, Value *BytesV);
 
-    TrackedBuffer makePreciseTrackedBuffer(Value *Ptr, Value *CountV, Value *TypeCodeV,
-					   Value *BytesV, bool IsNetworkReadOnly);
+    TrackedBuffer makePreciseTrackedBuffer(Value *Ptr, Value *CountV, Value *TypeCodeV, Value *BytesV, bool IsNetworkReadOnly);
 
     TrackedBuffer makeUnknownTrackedBuffer(Value *Ptr, bool IsNetworkReadOnly);
 
     std::optional<uint64_t> getPreciseSizeBytes(LocationSize S);
+
+    bool areDefinitelyDisjoint(const MemoryLocation &A, const MemoryLocation &B, const DataLayout &DL);
+
+    bool locationsMayOverlap(const MemoryLocation &A, const MemoryLocation &B, AAResults &AA, const DataLayout &DL);
     
-    bool areDefinitelyDisjoint(const MemoryLocation &A,
-			       const MemoryLocation &B,
-			       const DataLayout &DL);
-
-    bool locationsMayOverlap(const MemoryLocation &A,
-			     const MemoryLocation &B,
-			     AAResults &AA,
-			     const DataLayout &DL);
-
     bool isHardMotionBarrier(Instruction *I);
     
-    bool operandsAvailableBefore(CallInst *CI,
-				 Instruction *InsertBefore,
-				 DominatorTree &DT);
+    bool operandsAvailableBefore(CallInst *CI, Instruction *InsertBefore, DominatorTree &DT);
 
-    bool instructionConflictsWithTrackedBuffer(Instruction *I,
-					       const TrackedBuffer &Buf,
-					       AAResults &AA,
-					       const DataLayout &DL);
+    bool instructionConflictsWithTrackedBuffer(Instruction *I, const TrackedBuffer &Buf, AAResults &AA, const DataLayout &DL);
 
-    bool instructionConflictsWithAnyTrackedBuffer(Instruction *I,
-						  ArrayRef<TrackedBuffer> Buffers,
-						  AAResults &AA,
-						  const DataLayout &DL);
+    bool instructionConflictsWithAnyTrackedBuffer(Instruction *I, ArrayRef<TrackedBuffer> Buffers, AAResults &AA, const DataLayout &DL);
     
     BasicBlock *getLinearPredecessor(BasicBlock *BB);
 
-    std::vector<TrackedBuffer> buildSendRecvBuffers(Value *Buf, Value *Count,
-						    Value *Type, Value *Bytes,
-						    bool IsSend);
+    std::vector<TrackedBuffer> buildSendRecvBuffers(Value *Buf, Value *Count, Value *Type, Value *Bytes, bool IsSend);
 
-    std::vector<TrackedBuffer> buildReduceBuffers(Value *SendBuf, Value *RecvBuf,
-						  Value *Count, Value *Type,
-						  Value *Bytes);
+    std::vector<TrackedBuffer> buildReduceBuffers(Value *SendBuf, Value *RecvBuf, Value *Count, Value *Type, Value *Bytes);
 
-    std::vector<TrackedBuffer> buildGatherBuffers(Value *SendBuf, Value *SendCount,
-						  Value *RecvBuf, Value *Type,
-						  Value *Bytes);
+    std::vector<TrackedBuffer> buildGatherBuffers(Value *SendBuf, Value *SendCount, Value *RecvBuf, Value *Type, Value *Bytes);
 
-    std::vector<TrackedBuffer> buildAllreduceBuffers(Value *SendBuf, Value *RecvBuf,
-						     Value *Count, Value *Type,
-						     Value *Bytes);
+    std::vector<TrackedBuffer> buildAllreduceBuffers(Value *SendBuf, Value *RecvBuf, Value *Count, Value *Type, Value *Bytes);
 
-    std::vector<TrackedBuffer> buildAllgatherBuffers(Value *SendBuf, Value *Count,
-						     Value *RecvBuf, Value *Type,
-						     Value *Bytes);
+    std::vector<TrackedBuffer> buildAllgatherBuffers(Value *SendBuf, Value *Count, Value *RecvBuf, Value *Type, Value *Bytes);
 
-    std::vector<TrackedBuffer> buildBcastBuffers(Value *Buf, Value *Count,
-						 Value *Type, Value *Bytes);
+    std::vector<TrackedBuffer> buildBcastBuffers(Value *Buf, Value *Count, Value *Type, Value *Bytes);
 
     // Core function processor requiring Alias, Dominator, and Loop analyses
     bool runOnFunction(Function &F, AAResults &AA, DominatorTree &DT, LoopInfo &LI);

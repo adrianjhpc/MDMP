@@ -230,7 +230,6 @@ bool MDMPPass::instructionTouchesAnyTrackedBufferPhase2(Instruction *I, ArrayRef
 }
 
 Instruction *MDMPPass::findFirstTrueConflictInBlock(BasicBlock *BB, BasicBlock::iterator StartIt, Instruction *RegionEnd, ArrayRef<TrackedBuffer> Buffers, AAResults &AA, MemorySSA &MSSA, const DataLayout &DL) {
-                                                 
   for (auto It = StartIt; It != BB->end(); ++It) {
     Instruction *Inst = &*It;
 
@@ -243,8 +242,43 @@ Instruction *MDMPPass::findFirstTrueConflictInBlock(BasicBlock *BB, BasicBlock::
     if (isHardBarrierInstForWaitPlacement(Inst))
       return Inst;
 
-    if (isAsyncMDMPInstForWaitPlacement(Inst))
-      continue;
+    if (auto *Call = dyn_cast<CallInst>(Inst)) {
+      if (Function *F = Call->getCalledFunction()) {
+	if (F->getName().starts_with("__mdmp_marker_")) {
+            // These are MDMP placeholders. We guarantee they do not 
+            // implicitly clobber unrelated memory buffers.
+	  continue; 
+	}
+      }
+    }
+    
+    // Check if this async call uses our tracked buffers
+    if (isAsyncMDMPInstForWaitPlacement(Inst)) {
+      bool overlaps = false;
+      if (auto *CB = dyn_cast<CallBase>(Inst)) {
+        for (Value *Arg : CB->args()) {
+          // Check every pointer argument passed to this async call
+          if (Arg->getType()->isPointerTy()) {
+            // We use an unknown size, letting underlying object analysis 
+            // determine if it's the same array.
+            MemoryLocation ArgLoc(Arg, LocationSize::beforeOrAfterPointer());
+            for (const TrackedBuffer &Buf : Buffers) {
+              if (locationsMayOverlap(ArgLoc, Buf.Loc, AA, DL)) {
+                overlaps = true;
+                break;
+              }
+            }
+          }
+          if (overlaps) break;
+        }
+      }
+      
+      if (overlaps) 
+        return Inst; // It uses the same buffer! Force a Wait here.
+        
+      continue; // Safe to overlap, it uses different buffers.
+    }
+    // --------------------------------------------------------------------
 
     if (instructionTouchesAnyTrackedBufferPhase2(Inst, Buffers, AA, MSSA, DL))
       return Inst;
@@ -252,7 +286,6 @@ Instruction *MDMPPass::findFirstTrueConflictInBlock(BasicBlock *BB, BasicBlock::
 
   return nullptr;
 }
-
 
 bool MDMPPass::isIgnorableIntrinsicForMDMP(Instruction *I) {
   auto *II = dyn_cast<IntrinsicInst>(I);
@@ -467,12 +500,8 @@ bool MDMPPass::requestWindowSuggestsLoopProgressRelaxed(const RequestWindowInfo 
 }
 
 
-
-bool MDMPPass::loopMayConflictWithTrackedBuffers(Loop *L,
-                                                 ArrayRef<TrackedBuffer> Buffers,
-                                                 AAResults &AA,
-                                                 MemorySSA &MSSA,
-                                                 const DataLayout &DL) {
+bool MDMPPass::loopMayConflictWithTrackedBuffers(Loop *L, ArrayRef<TrackedBuffer> Buffers, AAResults &AA, MemorySSA &MSSA, const DataLayout &DL) {
+                                                 
   if (!L)
     return true;
 
@@ -486,14 +515,32 @@ bool MDMPPass::loopMayConflictWithTrackedBuffers(Loop *L,
       if (isIgnorableIntrinsicForMDMP(Inst))
         continue;
 
-      // Other async MDMP ops do not, by themselves, force this request to stop.
-      if (isAsyncMDMPInstForWaitPlacement(Inst))
-        continue;
-
       // Any hard barrier inside the loop means we should not carry the request
       // around the backedge.
       if (isHardBarrierInstForWaitPlacement(Inst))
         return true;
+
+      // --- NEW LOGIC: Check if async calls in the loop touch our buffers ---
+      if (isAsyncMDMPInstForWaitPlacement(Inst)) {
+        bool overlaps = false;
+        if (auto *CB = dyn_cast<CallBase>(Inst)) {
+          for (Value *Arg : CB->args()) {
+            if (Arg->getType()->isPointerTy()) {
+              MemoryLocation ArgLoc(Arg, LocationSize::beforeOrAfterPointer());
+              for (const TrackedBuffer &Buf : Buffers) {
+                if (locationsMayOverlap(ArgLoc, Buf.Loc, AA, DL)) {
+                  overlaps = true;
+                  break;
+                }
+              }
+            }
+            if (overlaps) break;
+          }
+        }
+        if (overlaps) return true; // Conflicting async call in loop body
+        continue;
+      }
+      // ---------------------------------------------------------------------
 
       if (instructionTouchesAnyTrackedBufferPhase2(Inst, Buffers, AA, MSSA, DL))
         return true;
@@ -503,12 +550,8 @@ bool MDMPPass::loopMayConflictWithTrackedBuffers(Loop *L,
   return false;
 }
 
-bool MDMPPass::shouldForceWaitAtLoopBackedge(Loop *EdgeLoop,
-                                             Loop *ReqLoop,
-                                             ArrayRef<TrackedBuffer> Buffers,
-                                             AAResults &AA,
-                                             MemorySSA &MSSA,
-                                             const DataLayout &DL) {
+bool MDMPPass::shouldForceWaitAtLoopBackedge(Loop *EdgeLoop, Loop *ReqLoop, ArrayRef<TrackedBuffer> Buffers, AAResults &AA, MemorySSA &MSSA, const DataLayout &DL) {
+                                             
   if (!EdgeLoop)
     return false;
 
@@ -647,8 +690,7 @@ LocationSize MDMPPass::derivePreciseSpan(Value *CountV, Value *TypeCodeV, Value 
   return LocationSize::beforeOrAfterPointer();
 }
 
-MDMPPass::TrackedBuffer MDMPPass::makePreciseTrackedBuffer(Value *Ptr, Value *CountV, Value *TypeCodeV,
-							   Value *BytesV, bool IsNetworkReadOnly) {
+MDMPPass::TrackedBuffer MDMPPass::makePreciseTrackedBuffer(Value *Ptr, Value *CountV, Value *TypeCodeV, Value *BytesV, bool IsNetworkReadOnly) {
   return { MemoryLocation(Ptr, derivePreciseSpan(CountV, TypeCodeV, BytesV)),
     IsNetworkReadOnly };
 }
@@ -667,9 +709,8 @@ std::optional<uint64_t> MDMPPass::getPreciseSizeBytes(LocationSize S) {
   return S.getValue();
 }
 
-bool MDMPPass::areDefinitelyDisjoint(const MemoryLocation &A,
-				     const MemoryLocation &B,
-				     const DataLayout &DL) {
+bool MDMPPass::areDefinitelyDisjoint(const MemoryLocation &A, const MemoryLocation &B, const DataLayout &DL) {
+				     
   int64_t OffA = 0, OffB = 0;
   const Value *BaseA = GetPointerBaseWithConstantOffset(A.Ptr, OffA, DL);
   const Value *BaseB = GetPointerBaseWithConstantOffset(B.Ptr, OffB, DL);
@@ -702,10 +743,7 @@ bool MDMPPass::areDefinitelyDisjoint(const MemoryLocation &A,
   return false;
 }
 
-bool MDMPPass::locationsMayOverlap(const MemoryLocation &A,
-				   const MemoryLocation &B,
-				   AAResults &AA,
-				   const DataLayout &DL) {
+bool MDMPPass::locationsMayOverlap(const MemoryLocation &A, const MemoryLocation &B, AAResults &AA, const DataLayout &DL) {
   if (areDefinitelyDisjoint(A, B, DL))
     return false;
 
@@ -751,9 +789,8 @@ bool MDMPPass::isHardMotionBarrier(Instruction *I) {
   return false;
 }
 
-bool MDMPPass::operandsAvailableBefore(CallInst *CI,
-				       Instruction *InsertBefore,
-				       DominatorTree &DT) {
+bool MDMPPass::operandsAvailableBefore(CallInst *CI, Instruction *InsertBefore, DominatorTree &DT) {
+
   for (Use &U : CI->args()) {
     if (auto *OpI = dyn_cast<Instruction>(U.get())) {
       if (OpI == InsertBefore)
@@ -765,10 +802,8 @@ bool MDMPPass::operandsAvailableBefore(CallInst *CI,
   return true;
 }
 
-bool MDMPPass::instructionConflictsWithTrackedBuffer(Instruction *I,
-						     const TrackedBuffer &Buf,
-						     AAResults &AA,
-						     const DataLayout &DL) {
+bool MDMPPass::instructionConflictsWithTrackedBuffer(Instruction *I, const TrackedBuffer &Buf, AAResults &AA, const DataLayout &DL) {
+						     
   if (auto *LI = dyn_cast<LoadInst>(I)) {
     // Local reads are okay while a send is in flight.
     if (Buf.isNetworkReadOnly)
@@ -787,10 +822,8 @@ bool MDMPPass::instructionConflictsWithTrackedBuffer(Instruction *I,
   return isModOrRefSet(MR);
 }
 
-bool MDMPPass::instructionConflictsWithAnyTrackedBuffer(Instruction *I,
-							ArrayRef<TrackedBuffer> Buffers,
-							AAResults &AA,
-							const DataLayout &DL) {
+bool MDMPPass::instructionConflictsWithAnyTrackedBuffer(Instruction *I, ArrayRef<TrackedBuffer> Buffers, AAResults &AA, const DataLayout &DL) {
+							
   for (const TrackedBuffer &Buf : Buffers) {
     if (instructionConflictsWithTrackedBuffer(I, Buf, AA, DL))
       return true;
@@ -805,24 +838,18 @@ BasicBlock *MDMPPass::getLinearPredecessor(BasicBlock *BB) {
   return Pred;
 }
 
-std::vector<MDMPPass::TrackedBuffer> MDMPPass::buildSendRecvBuffers(Value *Buf, Value *Count,
-								    Value *Type, Value *Bytes,
-								    bool IsSend) {
+std::vector<MDMPPass::TrackedBuffer> MDMPPass::buildSendRecvBuffers(Value *Buf, Value *Count, Value *Type, Value *Bytes, bool IsSend) {
   return { makePreciseTrackedBuffer(Buf, Count, Type, Bytes, IsSend) };
 }
 
-std::vector<MDMPPass::TrackedBuffer> MDMPPass::buildReduceBuffers(Value *SendBuf, Value *RecvBuf,
-								  Value *Count, Value *Type,
-								  Value *Bytes) {
+std::vector<MDMPPass::TrackedBuffer> MDMPPass::buildReduceBuffers(Value *SendBuf, Value *RecvBuf, Value *Count, Value *Type, Value *Bytes) {
   return {
     makePreciseTrackedBuffer(RecvBuf, Count, Type, Bytes, false),
     makePreciseTrackedBuffer(SendBuf, Count, Type, Bytes, true)
   };
 }
 
-std::vector<MDMPPass::TrackedBuffer> MDMPPass::buildGatherBuffers(Value *SendBuf, Value *SendCount,
-								  Value *RecvBuf, Value *Type,
-								  Value *Bytes) {
+std::vector<MDMPPass::TrackedBuffer> MDMPPass::buildGatherBuffers(Value *SendBuf, Value *SendCount, Value *RecvBuf, Value *Type, Value *Bytes) {
   // Send side is exact. Receive side depends on root/global_size, so keep
   // conservative unless your frontend can pass total recv-buffer bytes.
   return {
@@ -831,26 +858,22 @@ std::vector<MDMPPass::TrackedBuffer> MDMPPass::buildGatherBuffers(Value *SendBuf
   };
 }
 
-std::vector<MDMPPass::TrackedBuffer> MDMPPass::buildAllreduceBuffers(Value *SendBuf, Value *RecvBuf,
-								     Value *Count, Value *Type,
-								     Value *Bytes) {
+std::vector<MDMPPass::TrackedBuffer> MDMPPass::buildAllreduceBuffers(Value *SendBuf, Value *RecvBuf, Value *Count, Value *Type, Value *Bytes) {
   return {
     makePreciseTrackedBuffer(RecvBuf, Count, Type, Bytes, false),
     makePreciseTrackedBuffer(SendBuf, Count, Type, Bytes, true)
   };
 }
 
-std::vector<MDMPPass::TrackedBuffer> MDMPPass::buildAllgatherBuffers(Value *SendBuf, Value *Count,
-								     Value *RecvBuf, Value *Type,
-								     Value *Bytes) {
+std::vector<MDMPPass::TrackedBuffer> MDMPPass::buildAllgatherBuffers(Value *SendBuf, Value *Count, Value *RecvBuf, Value *Type, Value *Bytes) {
   return {
     makeUnknownTrackedBuffer(RecvBuf, false),
     makePreciseTrackedBuffer(SendBuf, Count, Type, Bytes, true)
   };
 }
 
-std::vector<MDMPPass::TrackedBuffer> MDMPPass::buildBcastBuffers(Value *Buf, Value *Count,
-								 Value *Type, Value *Bytes) {
+std::vector<MDMPPass::TrackedBuffer> MDMPPass::buildBcastBuffers(Value *Buf, Value *Count, Value *Type, Value *Bytes) {
+								 
   // Conservatively treat as recv-like because non-root ranks get writes.
   return {
     makePreciseTrackedBuffer(Buf, Count, Type, Bytes, false)
@@ -2066,37 +2089,46 @@ static void addMDMPWithCleanupPipeline(ModulePassManager &MPM) {
 
 extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo llvmGetPassPluginInfo() {
   return {
-    LLVM_PLUGIN_API_VERSION, "MDMP", "v0.3",
+    LLVM_PLUGIN_API_VERSION, "MDMP", "v0.4",
     [](PassBuilder &PB) {
       PB.registerPipelineParsingCallback(
-					 [](StringRef Name,
-					    ModulePassManager &MPM,
-					    ArrayRef<PassBuilder::PipelineElement>) {
-					   if (Name == "mdmp") {
-					     addMDMPWithCleanupPipeline(MPM);
-					     return true;
-					   }
-					   if (Name == "mdmp-raw") {
-					     MPM.addPass(MDMPPass());
-					     return true;
-					   }
-					   return false;
-					 });
+          [](StringRef Name,
+             ModulePassManager &MPM,
+             ArrayRef<PassBuilder::PipelineElement>) {
+            if (Name == "mdmp") {
+              addMDMPWithCleanupPipeline(MPM);
+              return true;
+            }
+            if (Name == "mdmp-raw") {
+              MPM.addPass(MDMPPass());
+              return true;
+            }
+            return false;
+          });
 
       PB.registerOptimizerLastEPCallback(
-					 [](ModulePassManager &MPM,
-					    OptimizationLevel Level,
-					    ThinOrFullLTOPhase Phase) {
-					   addMDMPWithCleanupPipeline(MPM);
-					 });
+          [](ModulePassManager &MPM,
+             OptimizationLevel Level,
+             ThinOrFullLTOPhase Phase) {
+            
+            // If we are compiling with LTO, do not run the pass during the 
+            // isolated Pre-Link phase. Wait until the files are merged.
+            if (Phase == ThinOrFullLTOPhase::ThinLTOPreLink || 
+                Phase == ThinOrFullLTOPhase::FullLTOPreLink) {
+                return; 
+            }
+            // -------------------
+
+            addMDMPWithCleanupPipeline(MPM);
+          });
 
       PB.registerFullLinkTimeOptimizationLastEPCallback(
-							[](ModulePassManager &MPM,
-							   OptimizationLevel Level) {
-							  addMDMPWithCleanupPipeline(MPM);
-							});
+          [](ModulePassManager &MPM,
+             OptimizationLevel Level) {
+            // This natively runs during the final LTO link phase, 
+            // so it is safe to execute here.
+            addMDMPWithCleanupPipeline(MPM);
+          });
     }
   };
 }
-
-

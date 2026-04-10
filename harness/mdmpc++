@@ -16,7 +16,7 @@ if [[ ! -f "${PLUGIN_PATH}" ]]; then
   exit 1
 fi
 
-PLUGIN_ARGS=( "-flto" "-fpass-plugin=${PLUGIN_PATH}" )
+PLUGIN_ARGS=( "-fpass-plugin=${PLUGIN_PATH}" )
 INCLUDE_ARGS=( "-I${SRC_DIR}" )
 LINK_ARGS=( "-L${RUNTIME_DIR}" "-Wl,-rpath,${RUNTIME_DIR}" "-lmdmp_runtime" )
 
@@ -53,11 +53,11 @@ for arg in "$@"; do
       ;;
     -O0)
       saw_opt=1
-      USER_ARGS+=( "-O1" )
+      USER_ARGS+=( "-O1" "-flto" )
       ;;
     -O|-O1|-O2|-O3|-Ofast|-Og|-Os|-Oz)
       saw_opt=1
-      USER_ARGS+=( "${arg}" )
+      USER_ARGS+=( "${arg}" "-flto" )
       ;;
     *)
       USER_ARGS+=( "${arg}" )
@@ -66,10 +66,18 @@ for arg in "$@"; do
 done
 
 if (( ! saw_opt )); then
-  USER_ARGS=( "-O1" "${USER_ARGS[@]}" )
+  USER_ARGS=( "-O1" "-flto" "${USER_ARGS[@]}" )
 fi
 
-# NEW: Helper function to print and execute
+LTO_LINK_ARGS=()
+for arg in "${USER_ARGS[@]}"; do
+  if [[ "${arg}" == "-flto"* ]]; then
+    LTO_LINK_ARGS=( "-fuse-ld=lld" "-Wl,--load-pass-plugin=${PLUGIN_PATH}" )
+    break
+  fi
+done
+
+# Helper function to print and execute
 execute() {
   if (( show_cmd )); then
     echo -e "\033[1;36m[mdmpc++]\033[0m Executing:" >&2
@@ -79,17 +87,20 @@ execute() {
   exec "$@"
 }
 
-# Updated to route through the execute helper
+# Preprocess only
 if (( preprocess_only )); then
   execute "${CXX_BIN}" "${INCLUDE_ARGS[@]}" "${USER_ARGS[@]}"
 fi
 
+# Compile-only or assembly-only
 if (( compile_only || assemble_only )); then
   execute "${CXX_BIN}" "${PLUGIN_ARGS[@]}" "${INCLUDE_ARGS[@]}" "${USER_ARGS[@]}"
 fi
 
+# Compile + Link in one step
 if (( has_source )); then
-  execute "${CXX_BIN}" "${PLUGIN_ARGS[@]}" "${INCLUDE_ARGS[@]}" "${USER_ARGS[@]}" "${LINK_ARGS[@]}"
+  execute "${CXX_BIN}" "${PLUGIN_ARGS[@]}" "${INCLUDE_ARGS[@]}" "${USER_ARGS[@]}" "${LINK_ARGS[@]}" "${LTO_LINK_ARGS[@]}"
 fi
 
-execute "${CXX_BIN}" "${USER_ARGS[@]}" "${LINK_ARGS[@]}"
+# Link-only step
+execute "${CXX_BIN}" "${PLUGIN_ARGS[@]}" "${USER_ARGS[@]}" "${LINK_ARGS[@]}" "${LTO_LINK_ARGS[@]}"
