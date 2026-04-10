@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <assert.h>
-#include <mpi.h>
+
 #include "mdmp_interface.h"
 
 int main(int argc, char** argv) {
@@ -14,7 +14,7 @@ int main(int argc, char** argv) {
 
     // Execute Declarative Allreduce
     MDMP_COMMREGION_BEGIN();
-    MDMP_REGISTER_ALLREDUCE(&send_val, &recv_val, 1, MPI_MIN);
+    MDMP_REGISTER_ALLREDUCE(&send_val, &recv_val, 1, MDMP_MIN);
     MDMP_COMMIT();
     MDMP_COMMREGION_END();
 

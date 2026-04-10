@@ -10,6 +10,8 @@ int main() {
     double my_value = (double)(rank + 1); // Ranks 0,1,2,3 -> Values 1,2,3,4
     double total_sum = 0.0;
 
+    std::cout << "My value is " << my_value << "\n";
+
     MDMP_COMMREGION_BEGIN();
     
     // Reduce everyone's 'my_value' into Rank 0's 'total_sum'

@@ -1,7 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <vector>
-#include <mpi.h>
+
 #include "mdmp_interface.h"
 
 int main(int argc, char** argv) {

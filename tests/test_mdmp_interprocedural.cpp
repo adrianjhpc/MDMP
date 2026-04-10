@@ -3,9 +3,7 @@
 #include <vector>
 #include <iomanip>
 
-// Include the interface (for the macros) and the runtime (for linking)
 #include "mdmp_interface.h"
-#include "mdmp_runtime.h"
 
 // ---------------------------------------------------------
 // Wrapper Functions

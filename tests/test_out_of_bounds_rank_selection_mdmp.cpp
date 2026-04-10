@@ -1,7 +1,6 @@
 #include <iostream>
 #include <vector>
 #include "mdmp_interface.h"
-#include "mdmp_runtime.h"
 
 int main() {
     MDMP_COMM_INIT();

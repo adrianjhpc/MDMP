@@ -3,7 +3,6 @@
 #include <iomanip>
 
 #include "mdmp_interface.h"
-#include "mdmp_runtime.h"
 
 int main() {
     int mdmp_rank, mdmp_size;
