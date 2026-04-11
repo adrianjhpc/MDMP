@@ -245,25 +245,34 @@ Instruction *MDMPPass::findFirstTrueConflictInBlock(BasicBlock *BB, BasicBlock::
     if (auto *Call = dyn_cast<CallInst>(Inst)) {
       if (Function *F = Call->getCalledFunction()) {
 	if (F->getName().starts_with("__mdmp_marker_")) {
-            // These are MDMP placeholders. We guarantee they do not 
-            // implicitly clobber unrelated memory buffers.
+	  // These are MDMP placeholders. We guarantee they do not 
+	  // implicitly clobber unrelated memory buffers.
 	  continue; 
 	}
       }
     }
-    
+
     // Check if this async call uses our tracked buffers
     if (isAsyncMDMPInstForWaitPlacement(Inst)) {
       bool overlaps = false;
       if (auto *CB = dyn_cast<CallBase>(Inst)) {
         for (Value *Arg : CB->args()) {
-          // Check every pointer argument passed to this async call
           if (Arg->getType()->isPointerTy()) {
-            // We use an unknown size, letting underlying object analysis 
-            // determine if it's the same array.
+            // Extract the base origin of the pointer
+            const Value *ArgObj = getUnderlyingObject(Arg);
             MemoryLocation ArgLoc(Arg, LocationSize::beforeOrAfterPointer());
+            
             for (const TrackedBuffer &Buf : Buffers) {
-              if (locationsMayOverlap(ArgLoc, Buf.Loc, AA, DL)) {
+              const Value *BufObj = getUnderlyingObject(Buf.Loc.Ptr);
+              
+              // If they share the exact same underlying base pointer, they overlap.
+              if (ArgObj == BufObj) {
+                overlaps = true; 
+                break;
+              }
+              
+              // If Alias Analysis mathematically guarantees they are the same memory.
+              if (AA.alias(ArgLoc, Buf.Loc) == AliasResult::MustAlias) {
                 overlaps = true;
                 break;
               }
@@ -278,7 +287,7 @@ Instruction *MDMPPass::findFirstTrueConflictInBlock(BasicBlock *BB, BasicBlock::
         
       continue; // Safe to overlap, it uses different buffers.
     }
-    // --------------------------------------------------------------------
+
 
     if (instructionTouchesAnyTrackedBufferPhase2(Inst, Buffers, AA, MSSA, DL))
       return Inst;
@@ -520,27 +529,41 @@ bool MDMPPass::loopMayConflictWithTrackedBuffers(Loop *L, ArrayRef<TrackedBuffer
       if (isHardBarrierInstForWaitPlacement(Inst))
         return true;
 
-      // --- NEW LOGIC: Check if async calls in the loop touch our buffers ---
+      // Check if this async call uses our tracked buffers
       if (isAsyncMDMPInstForWaitPlacement(Inst)) {
-        bool overlaps = false;
-        if (auto *CB = dyn_cast<CallBase>(Inst)) {
-          for (Value *Arg : CB->args()) {
-            if (Arg->getType()->isPointerTy()) {
-              MemoryLocation ArgLoc(Arg, LocationSize::beforeOrAfterPointer());
-              for (const TrackedBuffer &Buf : Buffers) {
-                if (locationsMayOverlap(ArgLoc, Buf.Loc, AA, DL)) {
-                  overlaps = true;
-                  break;
-                }
-              }
-            }
-            if (overlaps) break;
-          }
-        }
-        if (overlaps) return true; // Conflicting async call in loop body
-        continue;
+	bool overlaps = false;
+	if (auto *CB = dyn_cast<CallBase>(Inst)) {
+	  for (Value *Arg : CB->args()) {
+	    if (Arg->getType()->isPointerTy()) {
+	      // Extract the base origin of the pointer
+	      const Value *ArgObj = getUnderlyingObject(Arg);
+	      MemoryLocation ArgLoc(Arg, LocationSize::beforeOrAfterPointer());
+                    
+	      for (const TrackedBuffer &Buf : Buffers) {
+		const Value *BufObj = getUnderlyingObject(Buf.Loc.Ptr);
+                      
+		// If they share the exact same underlying base pointer, they overlap.
+		if (ArgObj == BufObj) {
+		  overlaps = true; 
+		  break;
+		}
+                      
+		// If Alias Analysis mathematically guarantees they are the same memory.
+		if (AA.alias(ArgLoc, Buf.Loc) == AliasResult::MustAlias) {
+		  overlaps = true;
+		  break;
+		}
+	      }
+	    }
+	    if (overlaps) break;
+	  }
+	}
+              
+	if (overlaps) 
+	  return Inst; // It uses the same buffer! Force a Wait here.
+                
+	continue; // Safe to overlap, it uses different buffers.
       }
-      // ---------------------------------------------------------------------
 
       if (instructionTouchesAnyTrackedBufferPhase2(Inst, Buffers, AA, MSSA, DL))
         return true;
@@ -880,6 +903,63 @@ std::vector<MDMPPass::TrackedBuffer> MDMPPass::buildBcastBuffers(Value *Buf, Val
   };
 }
 
+bool MDMPPass::inlineThinMDMPWrappers(Module &M) {
+  bool Changed = false;
+  InlineFunctionInfo IFI;
+  bool LocalChanged;
+
+  // Repeat until no more inlining occurs (handles nested wrappers like A -> B -> mdmp_send)
+  do {
+    LocalChanged = false;
+    std::vector<CallBase *> CallsToInline;
+
+    for (Function &F : M) {
+      if (F.isDeclaration()) continue;
+      for (BasicBlock &BB : F) {
+        for (Instruction &I : BB) {
+          if (auto *CB = dyn_cast<CallBase>(&I)) {
+            Function *Callee = CB->getCalledFunction();
+            // Ignore external functions, declarations, and recursive calls
+            if (!Callee || Callee->isDeclaration() || Callee == &F) 
+              continue;
+
+            unsigned InstCount = 0;
+            bool HasMDMPCall = false;
+
+            // Scan the callee to see if it's an MDMP wrapper
+            for (BasicBlock &CBB : *Callee) {
+              for (Instruction &CI : CBB) {
+                InstCount++;
+                if (auto *CCB = dyn_cast<CallBase>(&CI)) {
+                  if (Function *Target = CCB->getCalledFunction()) {
+                    if (isAsyncMDMPOpName(Target->getName())) {
+                      HasMDMPCall = true;
+                    }
+                  }
+                }
+              }
+            }
+
+            if (HasMDMPCall) {
+              CallsToInline.push_back(CB);
+            }
+          }
+        }
+      }
+    }
+
+    // Perform the actual LLVM inlining
+    for (CallBase *CB : CallsToInline) {
+      InlineResult IR = InlineFunction(*CB, IFI);
+      if (IR.isSuccess()) {
+        LocalChanged = true;
+        Changed = true;
+      }
+    }
+  } while (LocalChanged);
+
+  return Changed;
+}
 
 PreservedAnalyses MDMPPass::run(Module &M, ModuleAnalysisManager &MAM) {
   bool changed = false;
@@ -887,8 +967,12 @@ PreservedAnalyses MDMPPass::run(Module &M, ModuleAnalysisManager &MAM) {
 
   NextProgressSiteID = 0;
   
+  // Programmatically erase interprocedural wrapper boundaries! ---
+  changed |= inlineThinMDMPWrappers(M);
+
   for (auto &F : M) {
     if (!F.isDeclaration()) {
+      // Re-fetch analyses (in case our inlining invalidated previous IR state)
       AAResults &AA = FAM.getResult<AAManager>(F);
       DominatorTree &DT = FAM.getResult<DominatorTreeAnalysis>(F);
       LoopInfo &LI = FAM.getResult<LoopAnalysis>(F);
@@ -896,7 +980,6 @@ PreservedAnalyses MDMPPass::run(Module &M, ModuleAnalysisManager &MAM) {
       changed |= runOnFunction(F, AA, DT, LI);
     }
   }
-  
   
   return changed ? PreservedAnalyses::none() : PreservedAnalyses::all();
 }
@@ -1044,7 +1127,27 @@ bool MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
   };
   
   std::vector<DeclarativePendingOp> ActiveDeclarativeLocs;
- 
+
+  auto registerAsyncRequest = [&](CallInst *NewCall, std::vector<TrackedBuffer> BuffersToTrack) {
+      AsyncRequest Req;
+      Req.WaitTokenValue = NewCall;
+      Req.StartPoint = NewCall;
+      Req.Buffers = std::move(BuffersToTrack);
+
+      // Create an Alloca in the Entry Block initialized to -1 (MDMP_PROCESS_NOT_INVOLVED)
+      BasicBlock &EntryBB = F.getEntryBlock();
+      IRBuilder<> EntryBuilder(&*EntryBB.getFirstInsertionPt());
+      AllocaInst *Alloc = EntryBuilder.CreateAlloca(Type::getInt32Ty(Ctx), nullptr, "mdmp_req_token");
+      EntryBuilder.CreateStore(ConstantInt::getSigned(Type::getInt32Ty(Ctx), -1), Alloc);
+
+      // Store the true token immediately after the async call
+      Instruction *NextI = mdmpInstructionAfter(NewCall);
+      IRBuilder<> StoreBuilder(NextI);
+      StoreBuilder.CreateStore(NewCall, Alloc);
+
+      Req.WaitTokenAlloc = Alloc;
+      PendingRequests.push_back(std::move(Req));
+  };
   
   for (auto &BB : F) {
     for (auto &I : BB) {
@@ -1078,12 +1181,9 @@ bool MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
 
 	CI->replaceAllUsesWith(NewCall);
 	hoistInitiation(NewCall, TrackedLocs, AA, DT);
-	
-	AsyncRequest Req;
-	Req.WaitTokenValue = NewCall;
-	Req.StartPoint = NewCall;
-	Req.Buffers = TrackedLocs;
-	PendingRequests.push_back(std::move(Req));
+
+	registerAsyncRequest(NewCall, TrackedLocs);
+
         toDelete.push_back(CI);
       } 
       else if (Name == "__mdmp_marker_register_send" || Name == "__mdmp_marker_register_recv") {
@@ -1159,19 +1259,12 @@ bool MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
                                Op.Buffers.begin(), Op.Buffers.end());
         }
 
-        // Safely hoist commit again: this is now safe because hoistInitiation
-        // reasons over the per-buffer send/recv directionality.
         if (!CommitBuffers.empty()) {
           hoistInitiation(NewCommit, CommitBuffers, AA, DT);
         }
-
-        // Declarative mode now uses one async request per commit/batch.
+       
         if (!CommitBuffers.empty()) {
-          AsyncRequest BatchReq;
-          BatchReq.WaitTokenValue = NewCommit;  // commit returns batch token
-          BatchReq.StartPoint = NewCommit;
-          BatchReq.Buffers = std::move(CommitBuffers);
-          PendingRequests.push_back(std::move(BatchReq));
+	  registerAsyncRequest(NewCommit, CommitBuffers);
         }
 
         ActiveDeclarativeLocs.clear();
@@ -1192,12 +1285,8 @@ bool MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
 	hoistInitiation(NewCall, Locs, AA, DT);
 
 	CI->replaceAllUsesWith(NewCall);
-	AsyncRequest Req;
-	Req.WaitTokenValue = NewCall;
-	Req.StartPoint = NewCall;
-	Req.Buffers = Locs;
-	PendingRequests.push_back(std::move(Req));
-
+	registerAsyncRequest(NewCall, Locs);
+	
         toDelete.push_back(CI);
       }
       else if (Name == "__mdmp_marker_gather") {
@@ -1214,11 +1303,7 @@ bool MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
 	hoistInitiation(NewCall, Locs, AA, DT);
 
 	CI->replaceAllUsesWith(NewCall);
-	AsyncRequest Req;
-	Req.WaitTokenValue = NewCall;
-	Req.StartPoint = NewCall;
-	Req.Buffers = Locs;
-	PendingRequests.push_back(std::move(Req));
+	registerAsyncRequest(NewCall, Locs);
 
         toDelete.push_back(CI);
       }
@@ -1239,11 +1324,7 @@ bool MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
 
         if (Name == "__mdmp_marker_allreduce") {
           hoistInitiation(NewCall, Locs, AA, DT);
-          AsyncRequest Req;
-          Req.WaitTokenValue = NewCall;
-          Req.StartPoint = NewCall;
-          Req.Buffers = Locs;
-          PendingRequests.push_back(std::move(Req));
+	  registerAsyncRequest(NewCall, Locs);
         } else {
           ActiveDeclarativeLocs.push_back({Locs});
         }
@@ -1267,11 +1348,7 @@ bool MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
 
         if (Name == "__mdmp_marker_allgather") {
           hoistInitiation(NewCall, Locs, AA, DT);
-          AsyncRequest Req;
-          Req.WaitTokenValue = NewCall;
-          Req.StartPoint = NewCall;
-          Req.Buffers = Locs;
-          PendingRequests.push_back(std::move(Req));
+	  registerAsyncRequest(NewCall, Locs);
         } else {
           ActiveDeclarativeLocs.push_back({Locs});
         }
@@ -1295,11 +1372,7 @@ bool MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
 
         if (Name == "__mdmp_marker_bcast") {
           hoistInitiation(NewCall, Locs, AA, DT);
-          AsyncRequest Req;
-          Req.WaitTokenValue = NewCall;
-          Req.StartPoint = NewCall;
-          Req.Buffers = Locs;
-          PendingRequests.push_back(std::move(Req));
+	  registerAsyncRequest(NewCall, Locs);
         } else {
           ActiveDeclarativeLocs.push_back({Locs});
         }
@@ -1423,40 +1496,12 @@ void MDMPPass::injectWaitsForRegion(ArrayRef<AsyncRequest> Requests, Instruction
     for (Instruction *RawPt : Info.WaitPoints) {
       Instruction *InsertPt = RawPt;
       
-      // Declarative-region fix:
       // if the chosen stop point is exactly mdmp_commregion_end,
       // insert the wait *after* the end call, not before it.
       if (RegionEnd && RawPt == RegionEnd) {
 	InsertPt = mdmpInstructionAfter(RawPt);
       }
       
-      if (!DT.dominates(Info.Req->StartPoint, InsertPt)) {
-	InsertPt = Info.Req->StartPoint->getParent()->getTerminator();
-      }
-
-      /*
-      // ------------------------------------------------------------
-      // Preserve precise in-loop waits.
-      //
-      // If the first true consumer/clobber is a normal instruction inside a loop,
-      // do NOT hoist the wait to the loop preheader. Hoisting in this case destroys
-      // overlap for kernels like heat/stencil, because the interior loop body could
-      // have run before the boundary-dependent use.
-      //
-      // We only keep the exact in-loop placement for non-terminator instructions.
-      // Coarse fallback wait points (latch terminators, function exits, etc.) still
-      // use the existing preheader-hoisting logic below.
-      // ------------------------------------------------------------
-      Loop *InsertLoop = LI.getLoopFor(InsertPt->getParent());
-      bool IsPreciseInLoopWait =
-      (InsertLoop != nullptr &&
-      InsertPt != InsertPt->getParent()->getTerminator());
-
-      if (IsPreciseInLoopWait) {
-      UniqueWaitPoints.insert(InsertPt);
-      continue;
-      }
-      */
       Instruction *HoistPt = InsertPt;
       Loop *L = LI.getLoopFor(HoistPt->getParent());
       Loop *ReqLoop = LI.getLoopFor(Info.Req->StartPoint->getParent());
@@ -2089,44 +2134,32 @@ static void addMDMPWithCleanupPipeline(ModulePassManager &MPM) {
 
 extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo llvmGetPassPluginInfo() {
   return {
-    LLVM_PLUGIN_API_VERSION, "MDMP", "v0.4",
+    LLVM_PLUGIN_API_VERSION, "MDMP", "v0.5",
     [](PassBuilder &PB) {
       PB.registerPipelineParsingCallback(
-          [](StringRef Name,
-             ModulePassManager &MPM,
-             ArrayRef<PassBuilder::PipelineElement>) {
+          [](StringRef Name, ModulePassManager &MPM, ArrayRef<PassBuilder::PipelineElement>) {
             if (Name == "mdmp") {
               addMDMPWithCleanupPipeline(MPM);
-              return true;
-            }
-            if (Name == "mdmp-raw") {
-              MPM.addPass(MDMPPass());
               return true;
             }
             return false;
           });
 
-      PB.registerOptimizerLastEPCallback(
-          [](ModulePassManager &MPM,
-             OptimizationLevel Level,
-             ThinOrFullLTOPhase Phase) {
-            
-            // If we are compiling with LTO, do not run the pass during the 
-            // isolated Pre-Link phase. Wait until the files are merged.
+      // Standard compilation: Run as early as possible, but skip PreLink 
+      // so our programmatic inliner has access to all merged files.
+      PB.registerOptimizerEarlyEPCallback(
+          [](ModulePassManager &MPM, OptimizationLevel Level, ThinOrFullLTOPhase Phase) {
             if (Phase == ThinOrFullLTOPhase::ThinLTOPreLink || 
                 Phase == ThinOrFullLTOPhase::FullLTOPreLink) {
                 return; 
             }
-            // -------------------
-
             addMDMPWithCleanupPipeline(MPM);
           });
 
-      PB.registerFullLinkTimeOptimizationLastEPCallback(
-          [](ModulePassManager &MPM,
-             OptimizationLevel Level) {
-            // This natively runs during the final LTO link phase, 
-            // so it is safe to execute here.
+      // LTO Link Phase: Run early, before SimplifyCFG does tail merging, which can cause MDMP functions
+      // to be moved incorrectly.
+      PB.registerFullLinkTimeOptimizationEarlyEPCallback(
+          [](ModulePassManager &MPM, OptimizationLevel Level) {
             addMDMPWithCleanupPipeline(MPM);
           });
     }

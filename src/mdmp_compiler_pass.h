@@ -21,13 +21,13 @@
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
+#include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/Transforms/InstCombine/InstCombine.h"
 #include "llvm/Transforms/Scalar/SROA.h"
 #include "llvm/Transforms/Scalar/EarlyCSE.h"
 #include "llvm/Transforms/Scalar/SimplifyCFG.h"
 #include "llvm/Transforms/Scalar/DCE.h"
 #include "llvm/Transforms/IPO/GlobalDCE.h"
-
 
 #if LLVM_VERSION_GE(23, 0)
 #include "llvm/Plugins/PassPlugin.h"
@@ -175,6 +175,8 @@ namespace llvm {
 
     std::vector<TrackedBuffer> buildBcastBuffers(Value *Buf, Value *Count, Value *Type, Value *Bytes);
 
+    bool inlineThinMDMPWrappers(Module &M);
+    
     // Core function processor requiring Alias, Dominator, and Loop analyses
     bool runOnFunction(Function &F, AAResults &AA, DominatorTree &DT, LoopInfo &LI);
 		       

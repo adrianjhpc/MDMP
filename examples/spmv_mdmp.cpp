@@ -130,7 +130,7 @@ int main(int argc, char** argv) {
 
     if (rank == 0) {
         std::cout << "SpMV example run on " << size << " processes\n";
-        std::cout << "MDMP Imperative SpMV completed in " << max_time << " seconds.\n";
+        std::cout << "MDMP Imperative SpMV completed. Elapsed time: " << max_time << " seconds.\n";
     }
 
     MDMP_COMM_FINAL();

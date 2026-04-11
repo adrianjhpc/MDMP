@@ -18,7 +18,7 @@ fi
 
 PLUGIN_ARGS=( "-fpass-plugin=${PLUGIN_PATH}" )
 INCLUDE_ARGS=( "-I${SRC_DIR}" )
-LINK_ARGS=( "-L${RUNTIME_DIR}" "-Wl,-rpath,${RUNTIME_DIR}" "-lmdmp_runtime" )
+LINK_ARGS=( "-Wl,--no-as-needed" "-L${RUNTIME_DIR}" "-Wl,-rpath,${RUNTIME_DIR}" "-lmdmp_runtime" )
 
 compile_only=0
 preprocess_only=0

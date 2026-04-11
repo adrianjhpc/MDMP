@@ -2163,8 +2163,7 @@ int mdmp_commit() {
 
 // ---------------------------------------------------------
 // Dummy function interfaces
-// We use inline assembly with read/write operands ("+r") and 
-// memory clobbers ("memory") to completely blind LTO. The 
+// We use inline assembly to completely blind LTO. The 
 // compiler cannot prove what these functions do, so it must
 // leave them intact for the LLVM pass to find and replace.
 // ---------------------------------------------------------
