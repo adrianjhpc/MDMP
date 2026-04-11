@@ -320,7 +320,7 @@ double *update ( int id, int p, int n_global, int n_local, int nsteps,
       }
     }
 //
-//  Exchange data with "left-hand" neighbor. 
+//  Exchange data with "left-hand" neighbour. 
 //
     if ( 0 < id ) 
     {
@@ -335,7 +335,7 @@ double *update ( int id, int p, int n_global, int n_local, int nsteps,
       u2_local[i_local_lo] = exact ( x, t );
     }
 //
-//  Exchange data with "right-hand" neighbor.
+//  Exchange data with "right-hand" neighbour.
 //
     if ( id < p - 1 ) 
     {

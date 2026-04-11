@@ -150,16 +150,16 @@ double *update ( int id, int p, int n_global, int n_local, int nsteps,
       }
     }
 
-    int left_neighbor  = (id > 0) ? id - 1 : MDMP_IGNORE;
-    int right_neighbor = (id < p - 1) ? id + 1 : MDMP_IGNORE;
+    int left_neighbour  = (id > 0) ? id - 1 : MDMP_IGNORE;
+    int right_neighbour = (id < p - 1) ? id + 1 : MDMP_IGNORE;
 
     MDMP_COMMREGION_BEGIN();
     
     // Register the four boundary operations (ghost cell exchange)
-    MDMP_REGISTER_SEND ( &u2_local[i_local_lo+1], 1, id, left_neighbor, rtol );
-    MDMP_REGISTER_RECV ( &u2_local[i_local_lo],   1, id, left_neighbor, ltor );
-    MDMP_REGISTER_SEND ( &u2_local[i_local_hi-1], 1, id, right_neighbor, ltor );
-    MDMP_REGISTER_RECV ( &u2_local[i_local_hi],   1, id, right_neighbor, rtol );
+    MDMP_REGISTER_SEND ( &u2_local[i_local_lo+1], 1, id, left_neighbour, rtol );
+    MDMP_REGISTER_RECV ( &u2_local[i_local_lo],   1, id, left_neighbour, ltor );
+    MDMP_REGISTER_SEND ( &u2_local[i_local_hi-1], 1, id, right_neighbour, ltor );
+    MDMP_REGISTER_RECV ( &u2_local[i_local_hi],   1, id, right_neighbour, rtol );
 
     // Commit the batch
     MDMP_COMMIT();

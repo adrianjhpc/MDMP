@@ -191,23 +191,19 @@ double *update ( int id, int p, int n_global, int n_local, int nsteps,
     }
 
 // 4. Converted Boundary Exchange to MDMP Abstractions
-    int left_neighbor  = (id > 0) ? id - 1 : MDMP_IGNORE;
-    int right_neighbor = (id < p - 1) ? id + 1 : MDMP_IGNORE;
+    int left_neighbour  = (id > 0) ? id - 1 : MDMP_IGNORE;
+    int right_neighbour = (id < p - 1) ? id + 1 : MDMP_IGNORE;
 
-    MDMP_COMMREGION_BEGIN();
-    
-    MDMP_RECV ( &u2_local[i_local_lo],   1, id, left_neighbor, ltor );
-    MDMP_RECV ( &u2_local[i_local_hi],   1, id, right_neighbor, rtol );
+    MDMP_RECV ( &u2_local[i_local_lo],   1, id, left_neighbour, ltor );
+    MDMP_RECV ( &u2_local[i_local_hi],   1, id, right_neighbour, rtol );
 
-    MDMP_SEND ( &u2_local[i_local_hi-1], 1, id, right_neighbor, ltor );
-    MDMP_SEND ( &u2_local[i_local_lo+1], 1, id, left_neighbor, rtol );
+    MDMP_SEND ( &u2_local[i_local_hi-1], 1, id, right_neighbour, ltor );
+    MDMP_SEND ( &u2_local[i_local_lo+1], 1, id, left_neighbour, rtol );
 
     // Because MDMP isolates the network delay, we can compute the exact 
     // physics boundaries LOCALLY while the messages are in flight!
     if ( id == 0 ) u2_local[i_local_lo] = exact ( 0.0, t );
     if ( id == p - 1 ) u2_local[i_local_hi] = exact ( 1.0, t );
-
-     MDMP_COMMREGION_END();
 
     for ( i_local = i_local_lo; i_local <= i_local_hi; i_local++ )
     {
@@ -261,16 +257,12 @@ void collect ( int id, int p, int n_global, int n_local, int nsteps,
     for ( i = 1; i < p; i++ ) 
     {
 // 5. Converted Manual Point-to-Point Collection
-//      MDMP_COMMREGION_BEGIN();
       MDMP_RECV ( buffer, 2, 0, i, collect1 );
-      //      MDMP_COMMREGION_END();
 
       i_global_lo = buffer[0];
       n_local2 = buffer[1];
 
-      //      MDMP_COMMREGION_BEGIN();
       MDMP_RECV ( &u_global[i_global_lo], n_local2, 0, i, collect2 );
-      //      MDMP_COMMREGION_END();
     }
 
     t = dt * ( double ) nsteps;
@@ -297,10 +289,8 @@ void collect ( int id, int p, int n_global, int n_local, int nsteps,
     buffer[1] = n_local;
     
     // Workers push both messages into a single region!
-    //    MDMP_COMMREGION_BEGIN();
     MDMP_SEND ( buffer, 2, id, 0, collect1 );
     MDMP_SEND ( u_local, n_local, id, 0, collect2 );
-    //    MDMP_COMMREGION_END();
   }
 }
 
