@@ -47,6 +47,7 @@ int main ( int argc, char *argv[] )
     cout << "  Using " << p << " processes.\n";
     cout << "  Using a total of " << n_global << " points.\n";
     cout << "  Using " << nsteps << " time steps.\n";
+    cout << "  Computing final solution at time " << dt * nsteps << "\n";
   }
 
   wtime = MDMP_WTIME();
@@ -228,13 +229,21 @@ void collect ( int id, int p, int n_global, int n_local, int nsteps,
 
     // Print out final result for Rank 0
     t = dt * (double)nsteps;
-    cout << "\n    I      X     F(X)   Exact\n";
-    i_global = n_global - 1;
-    x = (double)(i_global) / (double)(n_global - 1);
-    cout << "  " << setw(3) << i_global << "  " << fixed << setprecision(3) 
-         << setw(6) << x << "  " << setw(6) << u_global[i_global]
-         << "  " << setw(6) << exact ( x, t ) << "\n";
-
+    cout << "\n";
+    cout << "    I      X     F(X)   Exact\n";
+    cout << "\n";
+    for ( i_global = 0; i_global < n_global; i_global++) 
+    {
+      x = ( double ) ( i_global ) / ( double ) ( n_global - 1 );
+      // Only print out the last element so that printing does not slow down any timings
+      if ( i_global == n_global - 1 ) {
+        cout << "  " << setw(3) << i_global
+             << "  " << setprecision(3) << setw(6) << x
+             << "  " << setprecision(3) << setw(6) << u_global[i_global]
+             << "  " << setprecision(3) << setw(6) << exact ( x, t ) << "\n";
+        }
+    }
+    
     delete [] u_global;
   }
   else
