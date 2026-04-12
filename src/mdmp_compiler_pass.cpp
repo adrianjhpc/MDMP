@@ -57,9 +57,8 @@ Instruction *MDMPPass::mdmpInstructionAfter(Instruction *I) {
   return &*It;
 }
 
-bool MDMPPass::requestWindowSuggestsCallSiteProgressRelaxed(const RequestWindowInfo &Info,
-                                                            Instruction *Inst,
-                                                            DominatorTree &DT) {
+bool MDMPPass::requestWindowSuggestsCallSiteProgressRelaxed(const RequestWindowInfo &Info, Instruction *Inst, DominatorTree &DT) {                                                            
+                                                            
   if (!DT.dominates(Info.Req->StartPoint, Inst))
     return false;
 
@@ -258,21 +257,16 @@ Instruction *MDMPPass::findFirstTrueConflictInBlock(BasicBlock *BB, BasicBlock::
       if (auto *CB = dyn_cast<CallBase>(Inst)) {
         for (Value *Arg : CB->args()) {
           if (Arg->getType()->isPointerTy()) {
-            // Extract the base origin of the pointer
-            const Value *ArgObj = getUnderlyingObject(Arg);
             MemoryLocation ArgLoc(Arg, LocationSize::beforeOrAfterPointer());
             
             for (const TrackedBuffer &Buf : Buffers) {
-              const Value *BufObj = getUnderlyingObject(Buf.Loc.Ptr);
+              AliasResult AR = AA.alias(ArgLoc, Buf.Loc);
               
-              // If they share the exact same underlying base pointer, they overlap.
-              if (ArgObj == BufObj) {
-                overlaps = true; 
-                break;
-              }
-              
-              // If Alias Analysis mathematically guarantees they are the same memory.
-              if (AA.alias(ArgLoc, Buf.Loc) == AliasResult::MustAlias) {
+              // Only block pipelining of async network calls if LLVM mathematically 
+              // guarantees they are touching the exact same bytes.
+              // We safely ignore MayAlias to allow concurrent halo exchanges on 
+              // different indices of the same large array.
+              if (AR == AliasResult::MustAlias) {
                 overlaps = true;
                 break;
               }
@@ -283,11 +277,10 @@ Instruction *MDMPPass::findFirstTrueConflictInBlock(BasicBlock *BB, BasicBlock::
       }
       
       if (overlaps) 
-        return Inst; // It uses the same buffer! Force a Wait here.
+        return Inst; // They write to the exact same bytes! Force a Wait here.
         
-      continue; // Safe to overlap, it uses different buffers.
+      continue; // Safe to pipeline, they use different indices or buffers.
     }
-
 
     if (instructionTouchesAnyTrackedBufferPhase2(Inst, Buffers, AA, MSSA, DL))
       return Inst;
@@ -723,9 +716,6 @@ MDMPPass::TrackedBuffer MDMPPass::makeUnknownTrackedBuffer(Value *Ptr, bool IsNe
     IsNetworkReadOnly };
 }
 
-// Note: if your LLVM version's LocationSize::getValue() returns TypeSize,
-// replace "return S.getValue();" with:
-//   return S.getValue().getKnownMinValue();
 std::optional<uint64_t> MDMPPass::getPreciseSizeBytes(LocationSize S) {
   if (!S.hasValue() || !S.isPrecise())
     return std::nullopt;
@@ -967,7 +957,7 @@ PreservedAnalyses MDMPPass::run(Module &M, ModuleAnalysisManager &MAM) {
 
   NextProgressSiteID = 0;
   
-  // Programmatically erase interprocedural wrapper boundaries! ---
+  // Programmatically erase interprocedural wrapper boundaries
   changed |= inlineThinMDMPWrappers(M);
 
   for (auto &F : M) {
@@ -1016,7 +1006,6 @@ bool MDMPPass::runOnFunction(Function &F, AAResults &AA, DominatorTree &DT, Loop
     injectWaitsForRegion(PendingRequests, nullptr, AA, LI, Ctx, M, DT, WaitMSSA);
   }
 
-  // IMPORTANT:
   // Rebuild MemorySSA after wait insertion. Wait calls are real memory-affecting
   // barriers, so progress placement must see the post-wait IR, not the stale one.
   MemorySSA ProgressMSSA(F, &AA, &DT);
@@ -1129,24 +1118,24 @@ bool MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
   std::vector<DeclarativePendingOp> ActiveDeclarativeLocs;
 
   auto registerAsyncRequest = [&](CallInst *NewCall, std::vector<TrackedBuffer> BuffersToTrack) {
-      AsyncRequest Req;
-      Req.WaitTokenValue = NewCall;
-      Req.StartPoint = NewCall;
-      Req.Buffers = std::move(BuffersToTrack);
+    AsyncRequest Req;
+    Req.WaitTokenValue = NewCall;
+    Req.StartPoint = NewCall;
+    Req.Buffers = std::move(BuffersToTrack);
 
-      // Create an Alloca in the Entry Block initialized to -1 (MDMP_PROCESS_NOT_INVOLVED)
-      BasicBlock &EntryBB = F.getEntryBlock();
-      IRBuilder<> EntryBuilder(&*EntryBB.getFirstInsertionPt());
-      AllocaInst *Alloc = EntryBuilder.CreateAlloca(Type::getInt32Ty(Ctx), nullptr, "mdmp_req_token");
-      EntryBuilder.CreateStore(ConstantInt::getSigned(Type::getInt32Ty(Ctx), -1), Alloc);
+    // Create an Alloca in the Entry Block initialized to -1 (MDMP_PROCESS_NOT_INVOLVED)
+    BasicBlock &EntryBB = F.getEntryBlock();
+    IRBuilder<> EntryBuilder(&*EntryBB.getFirstInsertionPt());
+    AllocaInst *Alloc = EntryBuilder.CreateAlloca(Type::getInt32Ty(Ctx), nullptr, "mdmp_req_token");
+    EntryBuilder.CreateStore(ConstantInt::getSigned(Type::getInt32Ty(Ctx), -1), Alloc);
 
-      // Store the true token immediately after the async call
-      Instruction *NextI = mdmpInstructionAfter(NewCall);
-      IRBuilder<> StoreBuilder(NextI);
-      StoreBuilder.CreateStore(NewCall, Alloc);
+    // Store the true token immediately after the async call
+    Instruction *NextI = mdmpInstructionAfter(NewCall);
+    IRBuilder<> StoreBuilder(NextI);
+    StoreBuilder.CreateStore(NewCall, Alloc);
 
-      Req.WaitTokenAlloc = Alloc;
-      PendingRequests.push_back(std::move(Req));
+    Req.WaitTokenAlloc = Alloc;
+    PendingRequests.push_back(std::move(Req));
   };
   
   for (auto &BB : F) {
@@ -1552,7 +1541,7 @@ void MDMPPass::injectWaitsForRegion(ArrayRef<AsyncRequest> Requests, Instruction
   for (auto &KV : GroupedWaits) {
     Instruction *InsertPt = KV.first;
 
-    // Optional dedup by token source.
+    // Dedup by token source.
     SmallVector<const AsyncRequest *, 8> UniqueReqs;
     SmallPtrSet<Value *, 8> SeenTokenSources;
 
@@ -1968,7 +1957,6 @@ void MDMPPass::injectThrottledProgress(ArrayRef<AsyncRequest> Requests,
         if (!CallsiteBlocksUsed.insert(CallI->getParent()).second)
           continue;
 
-        // IMPORTANT:
         // Callsite fallback is intentionally unthrottled. These sites are sparse
         // and are the only practical progress points in many irregular kernels.
         InsertDirectProgressBefore(CallI, "callsite");
@@ -2137,31 +2125,31 @@ extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo llvmGetPassPluginIn
     LLVM_PLUGIN_API_VERSION, "MDMP", "v0.5",
     [](PassBuilder &PB) {
       PB.registerPipelineParsingCallback(
-          [](StringRef Name, ModulePassManager &MPM, ArrayRef<PassBuilder::PipelineElement>) {
-            if (Name == "mdmp") {
-              addMDMPWithCleanupPipeline(MPM);
-              return true;
-            }
-            return false;
-          });
+					 [](StringRef Name, ModulePassManager &MPM, ArrayRef<PassBuilder::PipelineElement>) {
+					   if (Name == "mdmp") {
+					     addMDMPWithCleanupPipeline(MPM);
+					     return true;
+					   }
+					   return false;
+					 });
 
       // Standard compilation: Run as early as possible, but skip PreLink 
       // so our programmatic inliner has access to all merged files.
       PB.registerOptimizerEarlyEPCallback(
-          [](ModulePassManager &MPM, OptimizationLevel Level, ThinOrFullLTOPhase Phase) {
-            if (Phase == ThinOrFullLTOPhase::ThinLTOPreLink || 
-                Phase == ThinOrFullLTOPhase::FullLTOPreLink) {
-                return; 
-            }
-            addMDMPWithCleanupPipeline(MPM);
-          });
+					  [](ModulePassManager &MPM, OptimizationLevel Level, ThinOrFullLTOPhase Phase) {
+					    if (Phase == ThinOrFullLTOPhase::ThinLTOPreLink || 
+						Phase == ThinOrFullLTOPhase::FullLTOPreLink) {
+					      return; 
+					    }
+					    addMDMPWithCleanupPipeline(MPM);
+					  });
 
       // LTO Link Phase: Run early, before SimplifyCFG does tail merging, which can cause MDMP functions
       // to be moved incorrectly.
       PB.registerFullLinkTimeOptimizationEarlyEPCallback(
-          [](ModulePassManager &MPM, OptimizationLevel Level) {
-            addMDMPWithCleanupPipeline(MPM);
-          });
+							 [](ModulePassManager &MPM, OptimizationLevel Level) {
+							   addMDMPWithCleanupPipeline(MPM);
+							 });
     }
   };
 }
