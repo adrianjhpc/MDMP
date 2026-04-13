@@ -22,16 +22,15 @@ int main(int argc, char** argv) {
         grid[(local_Ny / 2 + 1) * Nx + (Nx / 2)] = 1000.0;
     }
 
-    // Pointers to the Halos
-    double* top_halo_recv = &grid[0];                     // Row 0
-    double* top_halo_send = &grid[1 * Nx];                // Row 1
-    double* bot_halo_send = &grid[local_Ny * Nx];         // Row local_Ny
-    double* bot_halo_recv = &grid[(local_Ny + 1) * Nx];   // Row local_Ny + 1
-
     MDMP_COMM_SYNC();
     double start_time = MDMP_WTIME();
 
     for (int iter = 0; iter < iterations; ++iter) {
+
+        double* top_halo_recv = &grid[0];                 
+        double* top_halo_send = &grid[1 * Nx];            
+        double* bot_halo_send = &grid[local_Ny * Nx];     
+        double* bot_halo_recv = &grid[(local_Ny + 1) * Nx];
         
         // ====================================================================
         // PHASE 1: NAIVE COMMUNICATION (No Requests, No Waits!)

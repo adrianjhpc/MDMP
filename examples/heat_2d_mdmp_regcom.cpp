@@ -21,15 +21,15 @@ int main(int argc, char** argv) {
         grid[(local_Ny / 2 + 1) * Nx + (Nx / 2)] = 1000.0;
     }
 
-    double* top_halo_recv = &grid[0];                     
-    double* top_halo_send = &grid[1 * Nx];                
-    double* bot_halo_send = &grid[local_Ny * Nx];         
-    double* bot_halo_recv = &grid[(local_Ny + 1) * Nx];   
-
     MDMP_COMM_SYNC();
     double start_time = MDMP_WTIME();
 
     for (int iter = 0; iter < iterations; ++iter) {
+
+        double* top_halo_recv = &grid[0];                 
+        double* top_halo_send = &grid[1 * Nx];            
+        double* bot_halo_send = &grid[local_Ny * Nx];     
+        double* bot_halo_recv = &grid[(local_Ny + 1) * Nx];
         
         MDMP_COMMREGION_BEGIN();
         

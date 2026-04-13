@@ -34,6 +34,11 @@ int main(int argc, char** argv) {
     double start_time = MPI_Wtime();
 
     for (int iter = 0; iter < iterations; ++iter) {
+
+        double* top_halo_recv = &grid[0];                     // Row 0
+        double* top_halo_send = &grid[1 * Nx];                // Row 1
+        double* bot_halo_send = &grid[local_Ny * Nx];         // Row local_Ny
+        double* bot_halo_recv = &grid[(local_Ny + 1) * Nx];   // Row local_Ny + 1
         
         if (rank > 0) {
             MPI_Sendrecv(top_halo_send, Nx, MPI_DOUBLE, rank - 1, 0,
