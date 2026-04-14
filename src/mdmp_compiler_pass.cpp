@@ -177,6 +177,21 @@ bool MDMPPass::instructionIsTrueConsumerOrClobber(Instruction *I, const TrackedB
   if (isIgnorableIntrinsicForMDMP(I))
     return false;
 
+  // TEMPORARY HACK. DO NOT KEEP AS IS NOT GENERALISABLE
+  if (auto *CB = dyn_cast<CallBase>(I)) {
+    // If this is an indirect call (function pointer / virtual call)...
+    if (CB->isIndirectCall()) {
+      if (CB->getType()->isPointerTy() && CB->arg_size() == 2) {
+	if (CB->getArgOperand(0)->getType()->isPointerTy() && 
+	    CB->getArgOperand(1)->getType()->isIntegerTy(32)) {
+	  // It is just calculating an array offset, It does not nuke the heap.
+	  // Safely ignore it.
+	  return false; 
+	}
+      }
+    }
+  }
+    
   if (auto *LI = dyn_cast<LoadInst>(I)) {
     // For send-like buffers, local CPU reads are okay.
     if (Buf.isNetworkReadOnly)
@@ -282,8 +297,17 @@ Instruction *MDMPPass::findFirstTrueConflictInBlock(BasicBlock *BB, BasicBlock::
       continue; // Safe to pipeline, they use different indices or buffers.
     }
 
-    if (instructionTouchesAnyTrackedBufferPhase2(Inst, Buffers, AA, MSSA, DL))
+    if (instructionTouchesAnyTrackedBufferPhase2(Inst, Buffers, AA, MSSA, DL)) {
+      errs() << "[MDMP DEBUG] Conflict detected!\n";
+      errs() << "    Instruction: " << *Inst << "\n";
+      if (Inst->getParent()) {
+          errs() << "    In Block:    " << Inst->getParent()->getName() << "\n";
+          if (Inst->getFunction()) {
+              errs() << "    In Function: " << Inst->getFunction()->getName() << "\n";
+          }
+      }
       return Inst;
+    }
   }
 
   return nullptr;
@@ -723,7 +747,6 @@ std::optional<uint64_t> MDMPPass::getPreciseSizeBytes(LocationSize S) {
 }
 
 bool MDMPPass::areDefinitelyDisjoint(const MemoryLocation &A, const MemoryLocation &B, const DataLayout &DL) {
-				     
   int64_t OffA = 0, OffB = 0;
   const Value *BaseA = GetPointerBaseWithConstantOffset(A.Ptr, OffA, DL);
   const Value *BaseB = GetPointerBaseWithConstantOffset(B.Ptr, OffB, DL);
@@ -734,9 +757,25 @@ bool MDMPPass::areDefinitelyDisjoint(const MemoryLocation &A, const MemoryLocati
   const Value *UA = getUnderlyingObject(BaseA);
   const Value *UB = getUnderlyingObject(BaseB);
 
-  // Different identified objects => cannot alias.
   if (UA != UB && isIdentifiedObject(UA) && isIdentifiedObject(UB))
     return true;
+
+  if (UA != UB) {
+    // Stack vs Non-Stack: A local stack variable (Alloca) can ever
+    // mathematically overlap with a Heap pointer or Argument pointer.
+    // This stops the pass from panicking over its own injected tracking tokens.
+    if ((isa<AllocaInst>(UA) && !isa<AllocaInst>(UB)) ||
+        (!isa<AllocaInst>(UA) && isa<AllocaInst>(UB))) {
+        return true;
+    }
+
+    // Object-Oriented Loads: If both are loaded from distinct class members
+    if ((isa<LoadInst>(UA) || isa<Argument>(UA)) && 
+        (isa<LoadInst>(UB) || isa<Argument>(UB))) {
+        return true;
+    }
+  }
+  // ---------------------------------------------
 
   // Same underlying object with exact byte intervals.
   if (UA == UB) {
@@ -1496,19 +1535,26 @@ void MDMPPass::injectWaitsForRegion(ArrayRef<AsyncRequest> Requests, Instruction
       Loop *ReqLoop = LI.getLoopFor(Info.Req->StartPoint->getParent());
 
       while (L && L != ReqLoop) {
-	BasicBlock *Latch = L->getLoopLatch();
-	if (Latch && DT.dominates(HoistPt->getParent(), Latch)) {
-	  BasicBlock *Preheader = L->getLoopPreheader();
-	  if (Preheader) {
-	    Instruction *PotentialHoistPt = Preheader->getTerminator();
-	    if (DT.dominates(Info.Req->StartPoint, PotentialHoistPt)) {
-	      HoistPt = PotentialHoistPt;
-	      L = LI.getLoopFor(HoistPt->getParent());
-	      continue;
-	    }
-	  }
-	}
-	break;
+        BasicBlock *HoistTarget = L->getLoopPreheader();
+        
+        // If the loop isn't simplified yet (no preheader), reliably fall back 
+        // to the Immediate Dominator of the loop header
+        if (!HoistTarget) {
+          if (auto *DomNode = DT.getNode(L->getHeader())->getIDom()) {
+            HoistTarget = DomNode->getBlock();
+          }
+        }
+
+        if (HoistTarget) {
+          Instruction *PotentialHoistPt = HoistTarget->getTerminator();
+          // Verify we don't accidentally hoist the wait above the async request
+          if (DT.dominates(Info.Req->StartPoint, PotentialHoistPt)) {
+            HoistPt = PotentialHoistPt;
+            L = LI.getLoopFor(HoistPt->getParent());
+            continue;
+          }
+        }
+        break; // Stop if we can't safely hoist any further
       }
 
       UniqueWaitPoints.insert(HoistPt);
@@ -1604,7 +1650,40 @@ void MDMPPass::injectThrottledProgress(ArrayRef<AsyncRequest> Requests,
   unsigned AggressiveMinBytes = mdmpEnvUnsigned("MDMP_PROGRESS_AGGR_MIN_BYTES", 131072);
   unsigned AggressiveUnknownMinReqs = mdmpEnvUnsigned("MDMP_PROGRESS_AGGR_UNKNOWN_MIN_REQS", 8);
 
+  auto isPureComputeLoop = [](Loop *L) {
+    for (BasicBlock *BB : L->getBlocksVector()) {
+      for (Instruction &I : *BB) {
+        if (auto *CB = dyn_cast<CallBase>(&I)) {
+          // Intrinsics (like llvm.sqrt or lifetime markers) are fine
+          if (isa<IntrinsicInst>(CB)) continue;
+          
+          // Pure math/read-only functions explicitly marked by the compiler are fine
+          if (CB->doesNotAccessMemory() || CB->onlyReadsMemory()) continue;
 
+          // Check specific named functions that we know are harmless
+          if (Function *F = CB->getCalledFunction()) {
+            StringRef Name = F->getName();
+            
+            // Allow specific math functions
+            //if (Name == "exact" || Name == "dudt" || Name == "sin" || Name == "cos") {
+            //  continue;
+            //}
+            
+            // Allow C++ std::vector accessors (LLVM mangled names)
+            if (Name.contains("vector") || Name.contains("St6vector")) {
+              continue;
+            }
+          }
+
+          // If it survived all those checks, it's a real side-effecting function.
+          // Break the shield
+          return false; 
+        }
+      }
+    }
+    return true;
+  };
+  
   LLVMContext &Ctx = M->getContext();
   IntegerType *I32Ty = Type::getInt32Ty(Ctx);
 
@@ -1782,6 +1861,9 @@ void MDMPPass::injectThrottledProgress(ArrayRef<AsyncRequest> Requests,
   // Stage 1: leaf-loop progress sites
   // ------------------------------------------------------------
   for (Loop *L : LeafLoops) {
+    if (isPureComputeLoop(L)) {
+      continue; 
+    }
     BasicBlock *Header = L->getHeader();
     if (InstrumentedHeaders.contains(Header))
       continue;
@@ -2016,6 +2098,11 @@ void MDMPPass::injectThrottledProgress(ArrayRef<AsyncRequest> Requests,
     SmallVector<DeepLoopCandidate, 16> DeepCandidates;
 
     for (Loop *L : LeafLoops) {
+
+      if (isPureComputeLoop(L)) {
+	continue; 
+      }
+
       BasicBlock *Header = L->getHeader();
       if (InstrumentedHeaders.contains(Header))
 	continue;
