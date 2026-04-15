@@ -28,7 +28,7 @@ export MDMP_PROGRESS_DEBUG=1
  - 0 → disabled
  - 1 → enabled
 
-##`MDMP_PROGRESS_RELAXED`
+## `MDMP_PROGRESS_RELAXED`
 
 Enable relaxed progress insertion heuristics beyond the most conservative exact loop-window matching.
 Example
@@ -112,7 +112,7 @@ If some communicated sizes are not statically known, this sets the minimum numbe
 export MDMP_PROGRESS_AGGR_UNKNOWN_MIN_REQS=12
 ```
 
-2. Recommended tuning profiles
+# 2. Recommended tuning profiles
 
 ## Conservative profile
 
@@ -190,7 +190,7 @@ This will print compiler-side diagnostics such as:
       - callsite fallback
       -  forced deep-leaf fallback
 
-3. How to use these profiles
+# 3. How to use these profiles
 
 Because these variables affect the compiler pass, set them before compiling the application.
 Example: compiling a small stencil benchmark conservatively
@@ -206,7 +206,7 @@ export MDMP_PROGRESS_AGGR_UNKNOWN_MIN_REQS=999999
 make clean
 make
 ```
-### Example: compiling GADGET with aggressive fallback enabled
+### Example: compiling application with aggressive fallback enabled
 ```bash
 export MDMP_PROGRESS_RELAXED=1
 export MDMP_PROGRESS_PERIOD=64
@@ -219,7 +219,7 @@ export MDMP_PROGRESS_AGGR_UNKNOWN_MIN_REQS=12
 make clean
 make
 ```
-4. Runtime variables are different
+# 4. Runtime variables are different
 
 Do not confuse the compile-time pass controls above with runtime-only MDMP variables.
 
@@ -239,7 +239,7 @@ srun ./my_mdmp_application
 
 These do not change the generated code. They only affect runtime diagnostics or profiling.
 
-5. Practical guidance
+# 5. Practical guidance
 
 ## If a simple benchmark slows down
 Try the conservative profile first.
