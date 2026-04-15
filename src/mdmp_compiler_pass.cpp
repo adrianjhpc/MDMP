@@ -191,35 +191,36 @@ bool MDMPPass::instructionIsTrueConsumerOrClobber(Instruction *I, const TrackedB
       }
       
       // Safe Getters
-      // These ask the runtime for an integer/double and never touch heap memory.
       if (Name == "mdmp_get_rank" || Name == "mdmp_get_size" || Name == "mdmp_wtime" ||
           Name == "MPI_Comm_rank" || Name == "MPI_Comm_size") {
         return false;
       }
 
-      // I/O, Error Paths, and Mangled C++ Streams
-      if (Name.contains("printf") || Name.contains("puts") || 
-          Name.contains("ostream") || Name.contains("cout") || Name.contains("ZSt4cout") || Name.contains("ZNSolsEi") || 
+      // Specific C-style I/O (fflush, system, fread, fwrite)
+      if (Name.contains("printf") || Name.contains("puts") || Name.contains("fprintf") ||
+          Name == "fflush" || Name == "system" || Name == "fopen" || Name == "fclose" ||
+          Name == "fread" || Name == "fwrite" || Name.contains("ostream") || 
           Name.contains("exit") || Name.contains("abort") || Name.contains("Abort")) {
         return false;
       }
 
+      // Applies to Math, C-Utilities (qsort), and other functions
       if (Name.contains("sqrt") || Name.contains("cbrt") || Name.contains("fabs") || 
           Name.contains("sin") || Name.contains("cos") || Name.contains("pow") ||
-          Name.contains("max") || Name.contains("min")) {
+          Name.contains("max") || Name.contains("min") || 
+          Name == "qsort" || Name == "bsearch" || 
+          Name.contains("evaluate") || Name.contains("factor") || Name.contains("distribute")) {
         
         bool pointerOverlaps = false;
         
-        // Iterate through every argument passed to the math function
+        // Check every argument. If the function takes pointers 
+        // this loop skips, and we deem it safe
         for (Value *Arg : CB->args()) {
-          // If it's a pass-by-value argument, we don't care. If it's a pointer, we investigate.
           if (Arg->getType()->isPointerTy()) {
             MemoryLocation ArgLoc(Arg, LocationSize::beforeOrAfterPointer());
             
-            // Try our powerful heuristic
             if (areDefinitelyDisjoint(ArgLoc, Buf.Loc, DL)) continue;
             
-            // Fallback to LLVM's standard Alias Analysis
             if (AA.alias(ArgLoc, Buf.Loc) != AliasResult::NoAlias) {
               pointerOverlaps = true;
               break;
@@ -227,17 +228,13 @@ bool MDMPPass::instructionIsTrueConsumerOrClobber(Instruction *I, const TrackedB
           }
         }
         
-        // If the math function takes no pointers, or its pointers definitively 
-        // do not touch the active network buffer, it is 100% safe to ignore
         if (!pointerOverlaps) {
-          return false;
+          return false; // Safely bypass the Black Box!
         }
-        
       }
-      // --------------------------------------
     }
 
-    // Indirect Call Bypass (Pointer-to-member offsets)
+    // Indirect Call Bypass
     if (CB->isIndirectCall()) {
       if (CB->getType()->isPointerTy() && CB->arg_size() == 2) {
         if (CB->getArgOperand(0)->getType()->isPointerTy() && 
@@ -841,7 +838,8 @@ bool MDMPPass::areDefinitelyDisjoint(const MemoryLocation &A, const MemoryLocati
 
     auto isDynamicBase = [](const Value *V) {
         return isa<LoadInst>(V) || isa<Argument>(V) || 
-               isa<PHINode>(V)  || isa<CallBase>(V);
+               isa<PHINode>(V)  || isa<CallBase>(V) ||
+               isa<GlobalValue>(V);
     };
 
     if (isDynamicBase(UA) && isDynamicBase(UB)) {
@@ -1011,7 +1009,7 @@ bool MDMPPass::inlineThinMDMPWrappers(Module &M) {
   
   // Prevent infinite recursive flattening in deep codebases
   unsigned IterationCount = 0;
-  const unsigned MaxIterations = 2; 
+  const unsigned MaxIterations = 6; 
 
   do {
     LocalChanged = false;
@@ -1023,7 +1021,7 @@ bool MDMPPass::inlineThinMDMPWrappers(Module &M) {
       // Do not inline into a function that is already massive.
       // (F.getInstructionCount() is available in newer LLVMs, otherwise 
       // just counting the basic blocks is a great fast proxy).
-      if (F.getInstructionCount() > 5000) continue; 
+      //if (F.getInstructionCount() > 10000) continue; 
 
       for (BasicBlock &BB : F) {
         for (Instruction &I : BB) {
@@ -1048,8 +1046,7 @@ bool MDMPPass::inlineThinMDMPWrappers(Module &M) {
               }
             }
 
-            // Callee Size Cap (The original safety valve)
-            if (HasMDMPCall && InstCount < 2000) {
+            if (HasMDMPCall) {
               CallsToInline.push_back(CB);
             }
           }
@@ -1800,7 +1797,6 @@ void MDMPPass::injectThrottledProgress(ArrayRef<AsyncRequest> Requests,
           if (isa<IntrinsicInst>(CB)) continue;
           if (CB->doesNotAccessMemory() || CB->onlyReadsMemory()) continue;
 
-          // Check named math functions
           if (Function *F = CB->getCalledFunction()) {
             StringRef Name = F->getName();
             if (Name.contains("vector") || Name.contains("St6vector")) continue;
