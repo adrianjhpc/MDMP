@@ -179,15 +179,71 @@ bool MDMPPass::instructionIsTrueConsumerOrClobber(Instruction *I, const TrackedB
 
   // TEMPORARY HACK. DO NOT KEEP AS IS NOT GENERALISABLE
   if (auto *CB = dyn_cast<CallBase>(I)) {
-    // If this is an indirect call (function pointer / virtual call)...
+    if (Function *F = CB->getCalledFunction()) {
+      StringRef Name = F->getName();
+      
+      // Memory Allocations
+      if (Name.contains("malloc") || Name.contains("calloc") || Name.contains("realloc") || 
+          Name.contains("free") || Name.contains("Znwm") || Name.contains("Znam") || 
+          Name.contains("ZdlPv") || Name.contains("ZdaPv") || 
+          Name.contains("Allocate") || Name.contains("Release")) { 
+        return false;
+      }
+      
+      // Safe Getters
+      // These ask the runtime for an integer/double and never touch heap memory.
+      if (Name == "mdmp_get_rank" || Name == "mdmp_get_size" || Name == "mdmp_wtime" ||
+          Name == "MPI_Comm_rank" || Name == "MPI_Comm_size") {
+        return false;
+      }
+
+      // I/O, Error Paths, and Mangled C++ Streams
+      if (Name.contains("printf") || Name.contains("puts") || 
+          Name.contains("ostream") || Name.contains("cout") || Name.contains("ZSt4cout") || Name.contains("ZNSolsEi") || 
+          Name.contains("exit") || Name.contains("abort") || Name.contains("Abort")) {
+        return false;
+      }
+
+      if (Name.contains("sqrt") || Name.contains("cbrt") || Name.contains("fabs") || 
+          Name.contains("sin") || Name.contains("cos") || Name.contains("pow") ||
+          Name.contains("max") || Name.contains("min")) {
+        
+        bool pointerOverlaps = false;
+        
+        // Iterate through every argument passed to the math function
+        for (Value *Arg : CB->args()) {
+          // If it's a pass-by-value argument, we don't care. If it's a pointer, we investigate.
+          if (Arg->getType()->isPointerTy()) {
+            MemoryLocation ArgLoc(Arg, LocationSize::beforeOrAfterPointer());
+            
+            // Try our powerful heuristic
+            if (areDefinitelyDisjoint(ArgLoc, Buf.Loc, DL)) continue;
+            
+            // Fallback to LLVM's standard Alias Analysis
+            if (AA.alias(ArgLoc, Buf.Loc) != AliasResult::NoAlias) {
+              pointerOverlaps = true;
+              break;
+            }
+          }
+        }
+        
+        // If the math function takes no pointers, or its pointers definitively 
+        // do not touch the active network buffer, it is 100% safe to ignore
+        if (!pointerOverlaps) {
+          return false;
+        }
+        
+      }
+      // --------------------------------------
+    }
+
+    // Indirect Call Bypass (Pointer-to-member offsets)
     if (CB->isIndirectCall()) {
       if (CB->getType()->isPointerTy() && CB->arg_size() == 2) {
-	if (CB->getArgOperand(0)->getType()->isPointerTy() && 
-	    CB->getArgOperand(1)->getType()->isIntegerTy(32)) {
-	  // It is just calculating an array offset, It does not nuke the heap.
-	  // Safely ignore it.
-	  return false; 
-	}
+        if (CB->getArgOperand(0)->getType()->isPointerTy() && 
+            CB->getArgOperand(1)->getType()->isIntegerTy()) { 
+          return false; 
+        }
       }
     }
   }
@@ -258,11 +314,12 @@ Instruction *MDMPPass::findFirstTrueConflictInBlock(BasicBlock *BB, BasicBlock::
 
     if (auto *Call = dyn_cast<CallInst>(Inst)) {
       if (Function *F = Call->getCalledFunction()) {
-	if (F->getName().starts_with("__mdmp_marker_")) {
+	if (F->getName().starts_with("__mdmp_marker_") || F->getName() == "mdmp_get_rank" ||
+	    F->getName() == "mdmp_get_size" || F->getName() == "mdmp_wtime") {
 	  // These are MDMP placeholders. We guarantee they do not 
 	  // implicitly clobber unrelated memory buffers.
 	  continue; 
-	}
+	}	
       }
     }
 
@@ -434,9 +491,7 @@ bool MDMPPass::isHardBarrierCallName(StringRef Name) {
      Name == "mdmp_wait"  ||
      Name == "mdmp_wait_many" ||
      Name == "mdmp_commregion_end" ||
-     Name == "__mdmp_marker_commregion_end" ||
-     // Keep this conservative until multi-batch declarative commits are fully supported.
-     Name == "mdmp_commit" || Name == "__mdmp_marker_commit");
+     Name == "__mdmp_marker_commregion_end");
 
   bool isMPIBarrier =
     Name.starts_with("MPI_Wait") ||
@@ -757,32 +812,48 @@ bool MDMPPass::areDefinitelyDisjoint(const MemoryLocation &A, const MemoryLocati
   const Value *UA = getUnderlyingObject(BaseA);
   const Value *UB = getUnderlyingObject(BaseB);
 
+  // If the IR contains two different load instructions that load from the 
+  // exact same struct field (e.g., domain.commDataRecv), they represent the 
+  // exact same underlying heap array. We must unify them here!
+  if (UA != UB) {
+    if (auto *LA = dyn_cast<LoadInst>(UA)) {
+      if (auto *LB = dyn_cast<LoadInst>(UB)) {
+        int64_t OffsetA = 0, OffsetB = 0;
+        const Value *BasePtrA = GetPointerBaseWithConstantOffset(LA->getPointerOperand(), OffsetA, DL);
+        const Value *BasePtrB = GetPointerBaseWithConstantOffset(LB->getPointerOperand(), OffsetB, DL);
+        
+        if (BasePtrA && BasePtrB && BasePtrA == BasePtrB && OffsetA == OffsetB) {
+          UB = UA; // Treat them as the exact same object
+        }
+      }
+    }
+  }
+
   if (UA != UB && isIdentifiedObject(UA) && isIdentifiedObject(UB))
     return true;
 
   if (UA != UB) {
-    // Stack vs Non-Stack: A local stack variable (Alloca) can ever
-    // mathematically overlap with a Heap pointer or Argument pointer.
-    // This stops the pass from panicking over its own injected tracking tokens.
+    // Stack vs Non-Stack
     if ((isa<AllocaInst>(UA) && !isa<AllocaInst>(UB)) ||
         (!isa<AllocaInst>(UA) && isa<AllocaInst>(UB))) {
         return true;
     }
 
-    // Object-Oriented Loads: If both are loaded from distinct class members
-    if ((isa<LoadInst>(UA) || isa<Argument>(UA)) && 
-        (isa<LoadInst>(UB) || isa<Argument>(UB))) {
+    auto isDynamicBase = [](const Value *V) {
+        return isa<LoadInst>(V) || isa<Argument>(V) || 
+               isa<PHINode>(V)  || isa<CallBase>(V);
+    };
+
+    if (isDynamicBase(UA) && isDynamicBase(UB)) {
         return true;
     }
   }
-  // ---------------------------------------------
 
-  // Same underlying object with exact byte intervals.
   if (UA == UB) {
     auto SA = getPreciseSizeBytes(A.Size);
     auto SB = getPreciseSizeBytes(B.Size);
     if (!SA || !SB)
-      return false;
+      return false; // Falls through to Alias Analysis
 
     int64_t AStart = OffA;
     int64_t AEnd   = OffA + static_cast<int64_t>(*SA);
@@ -932,6 +1003,75 @@ std::vector<MDMPPass::TrackedBuffer> MDMPPass::buildBcastBuffers(Value *Buf, Val
   };
 }
 
+
+bool MDMPPass::inlineThinMDMPWrappers(Module &M) {
+  bool Changed = false;
+  InlineFunctionInfo IFI;
+  bool LocalChanged;
+  
+  // Prevent infinite recursive flattening in deep codebases
+  unsigned IterationCount = 0;
+  const unsigned MaxIterations = 2; 
+
+  do {
+    LocalChanged = false;
+    std::vector<CallBase *> CallsToInline;
+
+    for (Function &F : M) {
+      if (F.isDeclaration()) continue;
+
+      // Do not inline into a function that is already massive.
+      // (F.getInstructionCount() is available in newer LLVMs, otherwise 
+      // just counting the basic blocks is a great fast proxy).
+      if (F.getInstructionCount() > 5000) continue; 
+
+      for (BasicBlock &BB : F) {
+        for (Instruction &I : BB) {
+          if (auto *CB = dyn_cast<CallBase>(&I)) {
+            Function *Callee = CB->getCalledFunction();
+            if (!Callee || Callee->isDeclaration() || Callee == &F) 
+              continue;
+
+            unsigned InstCount = 0;
+            bool HasMDMPCall = false;
+
+            for (BasicBlock &CBB : *Callee) {
+              for (Instruction &CI : CBB) {
+                InstCount++;
+                if (auto *CCB = dyn_cast<CallBase>(&CI)) {
+                  if (Function *Target = CCB->getCalledFunction()) {
+                    if (isAsyncMDMPOpName(Target->getName())) {
+                      HasMDMPCall = true;
+                    }
+                  }
+                }
+              }
+            }
+
+            // Callee Size Cap (The original safety valve)
+            if (HasMDMPCall && InstCount < 2000) {
+              CallsToInline.push_back(CB);
+            }
+          }
+        }
+      }
+    }
+
+    // Perform the actual LLVM inlining
+    for (CallBase *CB : CallsToInline) {
+      InlineResult IR = InlineFunction(*CB, IFI);
+      if (IR.isSuccess()) {
+        LocalChanged = true;
+        Changed = true;
+      }
+    }
+    
+    IterationCount++;
+  } while (LocalChanged && IterationCount < MaxIterations);
+
+  return Changed;
+}
+/*
 bool MDMPPass::inlineThinMDMPWrappers(Module &M) {
   bool Changed = false;
   InlineFunctionInfo IFI;
@@ -989,7 +1129,7 @@ bool MDMPPass::inlineThinMDMPWrappers(Module &M) {
 
   return Changed;
 }
-
+*/
 PreservedAnalyses MDMPPass::run(Module &M, ModuleAnalysisManager &MAM) {
   bool changed = false;
   auto &FAM = MAM.getResult<FunctionAnalysisManagerModuleProxy>(M).getManager();
@@ -1176,9 +1316,11 @@ bool MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
     Req.WaitTokenAlloc = Alloc;
     PendingRequests.push_back(std::move(Req));
   };
-  
-  for (auto &BB : F) {
-    for (auto &I : BB) {
+ 
+  ReversePostOrderTraversal<Function*> RPOT(&F);
+  for (BasicBlock *BB : RPOT) { 
+  //for (auto &BB : F) {
+    for (auto &I : *BB) {
       auto *CI = dyn_cast<CallInst>(&I);
       if (!CI || !CI->getCalledFunction()) continue;
             
@@ -1654,29 +1796,28 @@ void MDMPPass::injectThrottledProgress(ArrayRef<AsyncRequest> Requests,
     for (BasicBlock *BB : L->getBlocksVector()) {
       for (Instruction &I : *BB) {
         if (auto *CB = dyn_cast<CallBase>(&I)) {
-          // Intrinsics (like llvm.sqrt or lifetime markers) are fine
+          // Intrinsics and explicitly pure functions are fine
           if (isa<IntrinsicInst>(CB)) continue;
-          
-          // Pure math/read-only functions explicitly marked by the compiler are fine
           if (CB->doesNotAccessMemory() || CB->onlyReadsMemory()) continue;
 
-          // Check specific named functions that we know are harmless
+          // Check named math functions
           if (Function *F = CB->getCalledFunction()) {
             StringRef Name = F->getName();
-            
-            // Allow specific math functions
-            //if (Name == "exact" || Name == "dudt" || Name == "sin" || Name == "cos") {
-            //  continue;
-            //}
-            
-            // Allow C++ std::vector accessors (LLVM mangled names)
-            if (Name.contains("vector") || Name.contains("St6vector")) {
-              continue;
+            if (Name.contains("vector") || Name.contains("St6vector")) continue;
+          } else {
+            // If the function has no name, it's an indirect call (domain.*src).
+            // We know these array accessors are pure compute.
+            if (CB->isIndirectCall()) {
+              if (CB->getType()->isPointerTy() && CB->arg_size() == 2) {
+                if (CB->getArgOperand(0)->getType()->isPointerTy() && 
+                    CB->getArgOperand(1)->getType()->isIntegerTy()) {
+                  continue; // Safe. Do not break the shield.
+                }
+              }
             }
           }
 
-          // If it survived all those checks, it's a real side-effecting function.
-          // Break the shield
+          // If it survived all checks, it's a real side-effecting function. Break shield.
           return false; 
         }
       }
