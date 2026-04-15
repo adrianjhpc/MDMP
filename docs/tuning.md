@@ -28,7 +28,7 @@ export MDMP_PROGRESS_DEBUG=1
  - 0 → disabled
  - 1 → enabled
 
-##`MDMP_PROGRESS_RELAXED`
+## `MDMP_PROGRESS_RELAXED`
 
 Enable relaxed progress insertion heuristics beyond the most conservative exact loop-window matching.
 Example
@@ -206,7 +206,7 @@ export MDMP_PROGRESS_AGGR_UNKNOWN_MIN_REQS=999999
 make clean
 make
 ```
-### Example: compiling GADGET with aggressive fallback enabled
+### Example: compiling application with aggressive fallback enabled
 ```bash
 export MDMP_PROGRESS_RELAXED=1
 export MDMP_PROGRESS_PERIOD=64
