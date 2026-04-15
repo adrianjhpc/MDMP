@@ -73,6 +73,7 @@ int main() {
     // and materialise the mdmp_wait() call right before this loop.
     for (int i = 0; i < size; ++i) {
         result[i] = result[i] * result[i] * result[i] + unrelated_work;
+        result2[i] = result2[i] * result2[i] * result2[i] + unrelated_work;
     }
     }
 
@@ -85,7 +86,7 @@ int main() {
     int errors = 0;
     for (int i = 0; i < size; ++i) {
         double expected = (static_cast<double>(i) * i * i) + unrelated_work;
-        double expected2 = (static_cast<double>(i+20000) * i * i) + unrelated_work;
+        double expected2 = (static_cast<double>(i+20000) * (i+20000) * (i+20000)) + unrelated_work;
         // Floating point comparison with a small epsilon
         if (std::abs(result[i] - expected) > 1e-5) {
             errors++;
