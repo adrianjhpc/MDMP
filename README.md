@@ -14,10 +14,10 @@ MDMP is not designed to replace MPI entirely, indeed its functionality is built 
 ## Key Features
 
 * **LLVM Compiler Pass (JIT Optimisation):** Utilizes strict Alias Analysis, Dominance Trees, and Loop Information to automatically hoist network initiation instructions and push synchronisation (`wait`) calls as far down the control flow as physically safe.
-* **Declarative Inspector-Executor API:** Replaces the classic "Compute-Then-Communicate" bottleneck. Users can register thousands of network intent calls (`mdmp_register_send`, `mdmp_register_gather`) and execute them concurrently via a single `mdmp_commit()`.
+* **Declarative Inspector-Executor API:** Replaces the classic "Compute-Then-Communicate" bottleneck. Users can register thousands of network intent calls (`MDMP_REGISTER_SEND`, `MDMP_REGISTER_GATHER`) and execute them concurrently via a single `MDMP_COMMIT()`.
 * **Automated Batching:** The runtime automatically sorts and coalesces concurrent messages to identical peers using `MPI_Type_create_hindexed`, drastically reducing network hardware contention.
 * **Background Progress Engine:** A thread-safe, mutex-guarded `std::thread` continuously polls `MPI_Iprobe` to pump the network while the main CPU cores are locked in heavy compute loops.
-* **Legacy Compatibility:** Drop-in imperative wrappers (`mdmp_send`, `mdmp_recv`) allow for immediate performance gains on legacy codebases (like Gadget-2) without algorithmic rewrites.
+* **Compatibility:** Drop-in imperative wrappers (`MDMP_SEND`, `MDMP_RECV`) allow for immediate performance gains on codebases without algorithmic rewrites.
 
 ---
 
