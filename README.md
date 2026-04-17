@@ -71,21 +71,21 @@ clang -fpass-plugin=/path/to/MDMPPass.so -mllvm -mdmp-progress -O3 -c my_app.c
 ```
 
 3. API Examples
-Imperative (Legacy Integration)
+Imperative
 Provides immediate asynchronous overlap by allowing the compiler to slide the implicit wait state down the block.
 
 ```c
 #include "mdmp_interface.h"
 
 // The LLVM pass will automatically hoist this send and delay the wait
-mdmp_send(send_buf, 100, MDMP_FLOAT, sizeof(float)*100, my_rank, dest_rank, 0);
+MDMP_SEND(send_buf, 100, MDMP_FLOAT, sizeof(float)*100, my_rank, dest_rank, 0);
 
 heavy_local_computation(); // <--- Network transfers during this work
 
-// LLVM automatically injects mdmp_wait() here, right before buffer reuse
+// LLVM automatically injects waits here, right before buffer reuse
 ```
 
-Declarative (Modern Stencils / Mesh Refinement)
+Declarative
 Perfect for halo exchanges. Eliminates ID tracking and loop-leakage by pushing the entire batch to the runtime.
 
 ```c
@@ -93,10 +93,10 @@ Perfect for halo exchanges. Eliminates ID tracking and loop-leakage by pushing t
 
 MDMP_COMMREGION_BEGIN();
 for (int dir = 0; dir < 6; dir++) {
-    mdmp_register_send(halos[dir], ...);
-    mdmp_register_recv(halos[dir], ...);
+    MDMP_REGISTER_SEND(halos[dir], ...);
+    MDMP_REGISTER_RECV(halos[dir], ...);
 }
-mdmp_commit(); // Fires all requests optimally, coalescing identical targets
+MDMP_COMMIT(); // Fires all requests optimally, coalescing identical targets
 
 heavy_inner_cell_math();
 
