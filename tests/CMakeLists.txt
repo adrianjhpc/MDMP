@@ -6,7 +6,7 @@ set(MDMPCXX "${CMAKE_CURRENT_SOURCE_DIR}/../harness/mdmpc++")
 # Fortran Testing Setup
 # ==========================================
 # Point to a new Fortran harness script
-set(MDMPF90 "${CMAKE_CURRENT_SOURCE_DIR}/../harness/mdmpf90")
+set(MDMPF90 "${CMAKE_CURRENT_SOURCE_DIR}/../harness/mdmpfortran")
 
 function(add_mdmp_fortran_test TEST_NAME)
     # Only create the test if Fortran support is enabled at the top level
@@ -29,7 +29,7 @@ function(add_mdmp_fortran_test TEST_NAME)
                 -o ${CMAKE_CURRENT_BINARY_DIR}/${TEST_NAME}
         # Depend on both the C and Fortran runtimes
         DEPENDS ${ABSOLUTE_SOURCES} mdmp_compiler_pass mdmp_runtime mdmp_runtime_f
-        COMMENT "Compiling ${TEST_NAME} using mdmpf90 harness..."
+        COMMENT "Compiling ${TEST_NAME} using mdmpfortran harness..."
     )
 
     add_custom_target(${TEST_NAME}_target ALL
