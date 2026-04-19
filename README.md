@@ -14,10 +14,10 @@ MDMP is not designed to replace MPI entirely, indeed its functionality is built 
 ## Key Features
 
 * **LLVM Compiler Pass (JIT Optimisation):** Utilizes strict Alias Analysis, Dominance Trees, and Loop Information to automatically hoist network initiation instructions and push synchronisation (`wait`) calls as far down the control flow as physically safe.
-* **Declarative Inspector-Executor API:** Replaces the classic "Compute-Then-Communicate" bottleneck. Users can register thousands of network intent calls (`mdmp_register_send`, `mdmp_register_gather`) and execute them concurrently via a single `mdmp_commit()`.
+* **Declarative Inspector-Executor API:** Replaces the classic "Compute-Then-Communicate" bottleneck. Users can register thousands of network intent calls (`MDMP_REGISTER_SEND`, `MDMP_REGISTER_GATHER`) and execute them concurrently via a single `MDMP_COMMIT()`.
 * **Automated Batching:** The runtime automatically sorts and coalesces concurrent messages to identical peers using `MPI_Type_create_hindexed`, drastically reducing network hardware contention.
 * **Background Progress Engine:** A thread-safe, mutex-guarded `std::thread` continuously polls `MPI_Iprobe` to pump the network while the main CPU cores are locked in heavy compute loops.
-* **Legacy Compatibility:** Drop-in imperative wrappers (`mdmp_send`, `mdmp_recv`) allow for immediate performance gains on legacy codebases (like Gadget-2) without algorithmic rewrites.
+* **Compatibility:** Drop-in imperative wrappers (`MDMP_SEND`, `MDMP_RECV`) allow for immediate performance gains on codebases without algorithmic rewrites.
 
 ---
 
@@ -71,21 +71,21 @@ clang -fpass-plugin=/path/to/MDMPPass.so -mllvm -mdmp-progress -O3 -c my_app.c
 ```
 
 3. API Examples
-Imperative (Legacy Integration)
+Imperative
 Provides immediate asynchronous overlap by allowing the compiler to slide the implicit wait state down the block.
 
 ```c
 #include "mdmp_interface.h"
 
 // The LLVM pass will automatically hoist this send and delay the wait
-mdmp_send(send_buf, 100, MDMP_FLOAT, sizeof(float)*100, my_rank, dest_rank, 0);
+MDMP_SEND(send_buf, 100, MDMP_FLOAT, sizeof(float)*100, my_rank, dest_rank, 0);
 
 heavy_local_computation(); // <--- Network transfers during this work
 
-// LLVM automatically injects mdmp_wait() here, right before buffer reuse
+// LLVM automatically injects waits here, right before buffer reuse
 ```
 
-Declarative (Modern Stencils / Mesh Refinement)
+Declarative
 Perfect for halo exchanges. Eliminates ID tracking and loop-leakage by pushing the entire batch to the runtime.
 
 ```c
@@ -93,10 +93,10 @@ Perfect for halo exchanges. Eliminates ID tracking and loop-leakage by pushing t
 
 MDMP_COMMREGION_BEGIN();
 for (int dir = 0; dir < 6; dir++) {
-    mdmp_register_send(halos[dir], ...);
-    mdmp_register_recv(halos[dir], ...);
+    MDMP_REGISTER_SEND(halos[dir], ...);
+    MDMP_REGISTER_RECV(halos[dir], ...);
 }
-mdmp_commit(); // Fires all requests optimally, coalescing identical targets
+MDMP_COMMIT(); // Fires all requests optimally, coalescing identical targets
 
 heavy_inner_cell_math();
 
