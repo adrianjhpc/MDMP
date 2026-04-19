@@ -53,7 +53,21 @@ This will produce the runtime library (`libmdmp_runtime.so`) and the LLVM plugin
 
 ### Usage & Integration
 1. The Compiler Wrapper
-To compile your application with MDMP, use the provided compiler wrapper or pass the plugin directly to Clang:
+To compile your application with MDMP, use the provided compiler wrapper for C, C++, and Fortran:
+
+```bash
+mdmpc -O3 -c my_app.c
+```
+
+```bash
+mdmpc++ -O3 -c my_app.cxx
+```
+
+```bash
+mdmpfortran -O3 -c my_app.f90
+```
+
+Or pass the plugin directly to Clang/Clang++/Flang, i.e.:
 
 ```bash
 clang -fpass-plugin=/path/to/MDMPPass.so -O3 -c my_app.c
