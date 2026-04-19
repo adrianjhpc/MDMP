@@ -32,6 +32,10 @@ MDMP operates in two phases:
 
 ---
 
+## Language support
+
+MDMP has interfaces/support for C, C++, and Fortran, although all of this has only been tested on clang-22, clang++-22, and flang-22. We have also only tested on MPICH (5.0) and Cray's implementation MPICH so far.
+
 ## Building MDMP
 
 ### Prerequisites
