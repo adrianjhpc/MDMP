@@ -15,6 +15,13 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
+option(MDMP_ENABLE_FORTRAN "Build the Fortran interface (requires a Fortran compiler)" ON)
+
+if(MDMP_ENABLE_FORTRAN)
+    enable_language(Fortran)
+    message(STATUS "Fortran support enabled. Using compiler: ${CMAKE_Fortran_COMPILER}")
+endif()
+
 # Find required packages
 find_package(LLVM REQUIRED CONFIG)
 find_package(MLIR REQUIRED CONFIG)
