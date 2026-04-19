@@ -72,4 +72,36 @@ target_link_libraries(mdmp_runtime PRIVATE ${MPI_LIBRARIES})
 install(TARGETS mdmp_runtime
     LIBRARY DESTINATION lib
     COMPONENT mdmp_runtime
-)
+}
+
+if(MDMP_ENABLE_FORTRAN)
+    # Tell CMake where to output the compiled .mod file
+    set(CMAKE_Fortran_MODULE_DIRECTORY ${CMAKE_BINARY_DIR}/include/mdmp_fortran)
+
+    # Create the dedicated Fortran library
+    add_library(mdmp_runtime_f SHARED
+        mdmp_interface.f90
+    )
+
+    # Link the Fortran interface to your base C/C++ runtime
+    target_link_libraries(mdmp_runtime_f PRIVATE mdmp_runtime)
+
+    # Install the Fortran shared library
+    install(TARGETS mdmp_runtime_f
+        LIBRARY DESTINATION lib
+        COMPONENT mdmp_runtime
+    )
+
+    # Install the generated .mod file so user code can "use mdmp_interface"
+    install(DIRECTORY ${CMAKE_Fortran_MODULE_DIRECTORY}/
+        DESTINATION include
+        COMPONENT Headers
+    )
+    
+    # Optionally install the raw .f90 file just in case users want to 
+    # compile it directly into their own source tree instead of linking
+    install(FILES mdmp_interface.f90
+        DESTINATION include
+        COMPONENT Headers
+    )
+endif()

@@ -14,6 +14,8 @@
     template<> struct MDMPTypeTraits<double> { static const int type = 1; };
     template<> struct MDMPTypeTraits<float>  { static const int type = 2; };
     template<> struct MDMPTypeTraits<char>   { static const int type = 3; };
+    template<> struct MDMPTypeTraits<int64_t> { static const int type = 5; };
+    template<> struct MDMPTypeTraits<long long> { static const int type = 5; }; 
 
     #define MDMP_DEDUCE_TYPE(ptr) MDMPTypeTraits<typename std::remove_reference<decltype(*(ptr))>::type>::type
 
@@ -26,6 +28,8 @@
         double: 1, \
         float: 2, \
         char: 3, \
+        int64_t: 5, \
+        long long: 5, \
         default: 4 \
     )
 
@@ -52,16 +56,16 @@
 
     int __mdmp_marker_bcast(void* buffer, size_t count, int type, size_t byte_size, int root) MDMP_NOEXCEPT;
       
-    void __mdmp_marker_register_send(void* buffer, size_t count, int type, size_t byte_size, int sender, int dest, int tag) MDMP_NOEXCEPT;
-    void __mdmp_marker_register_recv(void* buffer, size_t count, int type, size_t byte_size, int receiver, int src, int tag) MDMP_NOEXCEPT;
+    int __mdmp_marker_register_send(void* buffer, size_t count, int type, size_t byte_size, int sender, int dest, int tag) MDMP_NOEXCEPT;
+    int __mdmp_marker_register_recv(void* buffer, size_t count, int type, size_t byte_size, int receiver, int src, int tag) MDMP_NOEXCEPT;
 
-    void __mdmp_marker_register_reduce(void* in_buf, void* out_buf, size_t count, int type, size_t byte_size, int root, int op) MDMP_NOEXCEPT;
-    void __mdmp_marker_register_gather(void* send_buf, size_t send_count, void* recv_buf, int type, size_t byte_size, int root) MDMP_NOEXCEPT;
+    int __mdmp_marker_register_reduce(void* in_buf, void* out_buf, size_t count, int type, size_t byte_size, int root, int op) MDMP_NOEXCEPT;
+    int __mdmp_marker_register_gather(void* send_buf, size_t send_count, void* recv_buf, int type, size_t byte_size, int root) MDMP_NOEXCEPT;
 
-    void __mdmp_marker_register_allreduce(void* in_buf, void* out_buf, size_t count, int type, size_t byte_size, int op) MDMP_NOEXCEPT;
-    void __mdmp_marker_register_allgather(void* in_buf, size_t count, void* out_buf, int type, size_t byte_size) MDMP_NOEXCEPT;
+    int __mdmp_marker_register_allreduce(void* in_buf, void* out_buf, size_t count, int type, size_t byte_size, int op) MDMP_NOEXCEPT;
+    int __mdmp_marker_register_allgather(void* in_buf, size_t count, void* out_buf, int type, size_t byte_size) MDMP_NOEXCEPT;
 
-    void __mdmp_marker_register_bcast(void* buffer, size_t count, int type, size_t byte_size, int root) MDMP_NOEXCEPT;
+    int __mdmp_marker_register_bcast(void* buffer, size_t count, int type, size_t byte_size, int root) MDMP_NOEXCEPT;
       
     int __mdmp_marker_commit() MDMP_NOEXCEPT;
 

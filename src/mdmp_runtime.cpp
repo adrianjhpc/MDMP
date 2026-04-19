@@ -483,11 +483,15 @@ void mdmp_profile_report() {
 
 }
 
-inline MPI_Datatype get_mpi_type(int type_code) {
-  switch(type_code) {
-  case 0: return MPI_INT; case 1: return MPI_DOUBLE; case 2: return MPI_FLOAT;
-  case 3: return MPI_CHAR; case 4: return MPI_BYTE; default: return MPI_BYTE;
-  }
+inline MPI_Datatype mdmp_to_mpi_type(int mdmp_type) {
+    switch (mdmp_type) {
+        case 0: return MPI_INT;
+        case 1: return MPI_DOUBLE;
+        case 2: return MPI_FLOAT;      
+        case 3: return MPI_CHAR;
+        case 5: return MPI_INT64_T;
+        default: return MPI_BYTE;
+    }
 }
 
 inline MPI_Op get_mpi_op(int op_code) {
@@ -2170,13 +2174,23 @@ int mdmp_commit() {
 #define MDMP_DUMMY __attribute__((weak, noinline))
 
 extern "C" {
+
+[[noreturn]] static void mdmp_marker_stub_hit(const char *name) {
+  fprintf(stderr,
+          "[MDMP FATAL] Executed marker stub '%s'. "
+          "The MDMP compiler pass was not applied.\n",
+          name);
+  fflush(stderr);
+  std::abort();
+}
+
     // Basic setup and teardown
-    MDMP_DUMMY void __mdmp_marker_init() {}
+    MDMP_DUMMY void __mdmp_marker_init() { mdmp_marker_stub_hit("__mdmp_marker_init"); }
     MDMP_DUMMY void __mdmp_marker_final() {}
     MDMP_DUMMY void __mdmp_marker_sync() {}
     MDMP_DUMMY void __mdmp_marker_commregion_begin() {}
     MDMP_DUMMY void __mdmp_marker_commregion_end() {}
-    MDMP_DUMMY void __mdmp_marker_commit() {}
+    MDMP_DUMMY int __mdmp_marker_commit() {}
     
     // Utilities (The compiler is told the assembly modifies 'ret')
     MDMP_DUMMY int  __mdmp_marker_get_rank() { 
@@ -2195,21 +2209,21 @@ extern "C" {
     MDMP_DUMMY void __mdmp_marker_abort(int) {}
 
     // Point-to-Point Dummies
-    MDMP_DUMMY void __mdmp_marker_send(void*, int, int, int, int, int, int) {}
-    MDMP_DUMMY void __mdmp_marker_recv(void*, int, int, int, int, int, int) {}
-    MDMP_DUMMY void __mdmp_marker_register_send(void*, int, int, int, int, int, int) {}
-    MDMP_DUMMY void __mdmp_marker_register_recv(void*, int, int, int, int, int, int) {}
+    MDMP_DUMMY int __mdmp_marker_send(void*, int, int, int, int, int, int) {}
+    MDMP_DUMMY int __mdmp_marker_recv(void*, int, int, int, int, int, int) {}
+    MDMP_DUMMY int __mdmp_marker_register_send(void*, int, int, int, int, int, int) {}
+    MDMP_DUMMY int __mdmp_marker_register_recv(void*, int, int, int, int, int, int) {}
 
     // Collective Dummies 
-    MDMP_DUMMY void __mdmp_marker_reduce(void*, void*, int, int, int, int, int) {}
-    MDMP_DUMMY void __mdmp_marker_allreduce(void*, void*, int, int, int, int) {}
-    MDMP_DUMMY void __mdmp_marker_gather(void*, int, void*, int, int, int) {}
-    MDMP_DUMMY void __mdmp_marker_allgather(void*, int, void*, int, int) {}
-    MDMP_DUMMY void __mdmp_marker_bcast(void*, int, int, int, int) {}
+    MDMP_DUMMY int __mdmp_marker_reduce(void*, void*, int, int, int, int, int) {}
+    MDMP_DUMMY int __mdmp_marker_allreduce(void*, void*, int, int, int, int) {}
+    MDMP_DUMMY int __mdmp_marker_gather(void*, int, void*, int, int, int) {}
+    MDMP_DUMMY int __mdmp_marker_allgather(void*, int, void*, int, int) {}
+    MDMP_DUMMY int __mdmp_marker_bcast(void*, int, int, int, int) {}
 
-    MDMP_DUMMY void __mdmp_marker_register_reduce(void*, void*, int, int, int, int, int) {}
-    MDMP_DUMMY void __mdmp_marker_register_allreduce(void*, void*, int, int, int, int) {}
-    MDMP_DUMMY void __mdmp_marker_register_gather(void*, int, void*, int, int, int) {}
-    MDMP_DUMMY void __mdmp_marker_register_allgather(void*, int, void*, int, int) {}
-    MDMP_DUMMY void __mdmp_marker_register_bcast(void*, int, int, int, int) {}
+    MDMP_DUMMY int __mdmp_marker_register_reduce(void*, void*, int, int, int, int, int) {}
+    MDMP_DUMMY int __mdmp_marker_register_allreduce(void*, void*, int, int, int, int) {}
+    MDMP_DUMMY int __mdmp_marker_register_gather(void*, int, void*, int, int, int) {}
+    MDMP_DUMMY int __mdmp_marker_register_allgather(void*, int, void*, int, int) {}
+    MDMP_DUMMY int __mdmp_marker_register_bcast(void*, int, int, int, int) {}
 }

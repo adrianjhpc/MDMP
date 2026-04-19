@@ -172,7 +172,7 @@ bool MDMPPass::isAsyncMDMPInstForWaitPlacement(Instruction *Inst) {
   return false;
 }
 
-bool MDMPPass::instructionIsTrueConsumerOrClobber(Instruction *I, const TrackedBuffer &Buf, AAResults &AA, MemorySSA &MSSA, const DataLayout &DL) {
+ bool MDMPPass::instructionIsTrueConsumerOrClobber(Instruction *I, const TrackedBuffer &Buf, AAResults &AA, MemorySSA &MSSA, const DataLayout &DL) {
 
   if (isIgnorableIntrinsicForMDMP(I))
     return false;
@@ -1009,7 +1009,7 @@ bool MDMPPass::inlineThinMDMPWrappers(Module &M) {
   
   // Prevent infinite recursive flattening in deep codebases
   unsigned IterationCount = 0;
-  const unsigned MaxIterations = 6; 
+  const unsigned MaxIterations = 4; 
 
   do {
     LocalChanged = false;
