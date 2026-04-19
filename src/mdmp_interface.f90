@@ -39,94 +39,162 @@ module mdmp_interface
   ! ------------------------------------------------------------------
   ! Direct C-Bindings to the backend runtime (__mdmp_marker_*)
   ! ------------------------------------------------------------------
+  ! ------------------------------------------------------------------
+  ! Direct C-Bindings to the backend runtime (__mdmp_marker_*)
+  ! ------------------------------------------------------------------
   interface
     subroutine c_mdmp_init() bind(C, name="__mdmp_marker_init")
     end subroutine
+    
     subroutine c_mdmp_final() bind(C, name="__mdmp_marker_final")
     end subroutine
-    integer(c_int) function c_mdmp_get_size() bind(C, name="__mdmp_marker_get_size")
+    
+    function c_mdmp_get_size() bind(C, name="__mdmp_marker_get_size")
+      import :: c_int
+      integer(c_int) :: c_mdmp_get_size
     end function
-    integer(c_int) function c_mdmp_get_rank() bind(C, name="__mdmp_marker_get_rank")
+    
+    function c_mdmp_get_rank() bind(C, name="__mdmp_marker_get_rank")
+      import :: c_int
+      integer(c_int) :: c_mdmp_get_rank
     end function
+    
     subroutine c_mdmp_commregion_begin() bind(C, name="__mdmp_marker_commregion_begin")
     end subroutine
+    
     subroutine c_mdmp_commregion_end() bind(C, name="__mdmp_marker_commregion_end")
     end subroutine
+    
     subroutine c_mdmp_sync() bind(C, name="__mdmp_marker_sync")
     end subroutine
-    real(c_double) function c_mdmp_wtime() bind(C, name="__mdmp_marker_wtime")
+    
+    function c_mdmp_wtime() bind(C, name="__mdmp_marker_wtime")
+      import :: c_double
+      real(c_double) :: c_mdmp_wtime
     end function
+    
     subroutine c_mdmp_set_debug(enable) bind(C, name="__mdmp_marker_set_debug")
       import :: c_int
       integer(c_int), value :: enable
     end subroutine
+    
     subroutine c_mdmp_abort(err_code) bind(C, name="__mdmp_marker_abort")
       import :: c_int
       integer(c_int), value :: err_code
     end subroutine
-    integer(c_int) function c_mdmp_commit() bind(C, name="__mdmp_marker_commit")
+    
+    function c_mdmp_commit() bind(C, name="__mdmp_marker_commit")
+      import :: c_int
+      integer(c_int) :: c_mdmp_commit
     end function
 
     ! --- Imperative Ops ---
-    integer(c_int) function c_mdmp_send(buf, count, dtype, byte_size, sender, dest, tag) bind(C, name="__mdmp_marker_send")
-      import :: c_int, c_size_t; type(*), dimension(*) :: buf
-      integer(c_size_t), value :: count, byte_size; integer(c_int), value :: dtype, sender, dest, tag
+    function c_mdmp_send(buf, count, dtype, byte_size, sender, dest, tag) bind(C, name="__mdmp_marker_send")
+      import :: c_int, c_size_t
+      type(*), dimension(*) :: buf
+      integer(c_size_t), value :: count, byte_size
+      integer(c_int), value :: dtype, sender, dest, tag
+      integer(c_int) :: c_mdmp_send
     end function
-    integer(c_int) function c_mdmp_recv(buf, count, dtype, byte_size, receiver, src, tag) bind(C, name="__mdmp_marker_recv")
-      import :: c_int, c_size_t; type(*), dimension(*) :: buf
-      integer(c_size_t), value :: count, byte_size; integer(c_int), value :: dtype, receiver, src, tag
+    
+    function c_mdmp_recv(buf, count, dtype, byte_size, receiver, src, tag) bind(C, name="__mdmp_marker_recv")
+      import :: c_int, c_size_t
+      type(*), dimension(*) :: buf
+      integer(c_size_t), value :: count, byte_size
+      integer(c_int), value :: dtype, receiver, src, tag
+      integer(c_int) :: c_mdmp_recv
     end function
-    integer(c_int) function c_mdmp_reduce(in_buf, out_buf, count, dtype, byte_size, root, op) bind(C, name="__mdmp_marker_reduce")
-      import :: c_int, c_size_t; type(*), dimension(*) :: in_buf, out_buf
-      integer(c_size_t), value :: count, byte_size; integer(c_int), value :: dtype, root, op
+    
+    function c_mdmp_reduce(in_buf, out_buf, count, dtype, byte_size, root, op) bind(C, name="__mdmp_marker_reduce")
+      import :: c_int, c_size_t
+      type(*), dimension(*) :: in_buf, out_buf
+      integer(c_size_t), value :: count, byte_size
+      integer(c_int), value :: dtype, root, op
+      integer(c_int) :: c_mdmp_reduce
     end function
-    integer(c_int) function c_mdmp_gather(send_buf, send_count, recv_buf, dtype, byte_size, root) bind(C, name="__mdmp_marker_gather")
-      import :: c_int, c_size_t; type(*), dimension(*) :: send_buf, recv_buf
-      integer(c_size_t), value :: send_count, byte_size; integer(c_int), value :: dtype, root
+    
+    function c_mdmp_gather(send_buf, send_count, recv_buf, dtype, byte_size, root) bind(C, name="__mdmp_marker_gather")
+      import :: c_int, c_size_t
+      type(*), dimension(*) :: send_buf, recv_buf
+      integer(c_size_t), value :: send_count, byte_size
+      integer(c_int), value :: dtype, root
+      integer(c_int) :: c_mdmp_gather
     end function
-    integer(c_int) function c_mdmp_allreduce(in_buf, out_buf, count, dtype, byte_size, op) bind(C, name="__mdmp_marker_allreduce")
-      import :: c_int, c_size_t; type(*), dimension(*) :: in_buf, out_buf
-      integer(c_size_t), value :: count, byte_size; integer(c_int), value :: dtype, op
+    
+    function c_mdmp_allreduce(in_buf, out_buf, count, dtype, byte_size, op) bind(C, name="__mdmp_marker_allreduce")
+      import :: c_int, c_size_t
+      type(*), dimension(*) :: in_buf, out_buf
+      integer(c_size_t), value :: count, byte_size
+      integer(c_int), value :: dtype, op
+      integer(c_int) :: c_mdmp_allreduce
     end function
-    integer(c_int) function c_mdmp_allgather(in_buf, count, out_buf, dtype, byte_size) bind(C, name="__mdmp_marker_allgather")
-      import :: c_int, c_size_t; type(*), dimension(*) :: in_buf, out_buf
-      integer(c_size_t), value :: count, byte_size; integer(c_int), value :: dtype
+    
+    function c_mdmp_allgather(in_buf, count, out_buf, dtype, byte_size) bind(C, name="__mdmp_marker_allgather")
+      import :: c_int, c_size_t
+      type(*), dimension(*) :: in_buf, out_buf
+      integer(c_size_t), value :: count, byte_size
+      integer(c_int), value :: dtype
+      integer(c_int) :: c_mdmp_allgather
     end function
-    integer(c_int) function c_mdmp_bcast(buf, count, dtype, byte_size, root) bind(C, name="__mdmp_marker_bcast")
-      import :: c_int, c_size_t; type(*), dimension(*) :: buf
-      integer(c_size_t), value :: count, byte_size; integer(c_int), value :: dtype, root
+    
+    function c_mdmp_bcast(buf, count, dtype, byte_size, root) bind(C, name="__mdmp_marker_bcast")
+      import :: c_int, c_size_t
+      type(*), dimension(*) :: buf
+      integer(c_size_t), value :: count, byte_size
+      integer(c_int), value :: dtype, root
+      integer(c_int) :: c_mdmp_bcast
     end function
 
     ! --- Declarative Ops ---
     subroutine c_mdmp_register_send(buf, count, dtype, byte_size, sender, dest, tag) bind(C, name="__mdmp_marker_register_send")
-      import :: c_int, c_size_t; type(*), dimension(*) :: buf
-      integer(c_size_t), value :: count, byte_size; integer(c_int), value :: dtype, sender, dest, tag
+      import :: c_int, c_size_t
+      type(*), dimension(*) :: buf
+      integer(c_size_t), value :: count, byte_size
+      integer(c_int), value :: dtype, sender, dest, tag
     end subroutine
+    
     subroutine c_mdmp_register_recv(buf, count, dtype, byte_size, receiver, src, tag) bind(C, name="__mdmp_marker_register_recv")
-      import :: c_int, c_size_t; type(*), dimension(*) :: buf
-      integer(c_size_t), value :: count, byte_size; integer(c_int), value :: dtype, receiver, src, tag
+      import :: c_int, c_size_t
+      type(*), dimension(*) :: buf
+      integer(c_size_t), value :: count, byte_size
+      integer(c_int), value :: dtype, receiver, src, tag
     end subroutine
+    
     subroutine c_mdmp_register_reduce(in_buf, out_buf, count, dtype, byte_size, root, op) bind(C, name="__mdmp_marker_register_reduce")
-      import :: c_int, c_size_t; type(*), dimension(*) :: in_buf, out_buf
-      integer(c_size_t), value :: count, byte_size; integer(c_int), value :: dtype, root, op
+      import :: c_int, c_size_t
+      type(*), dimension(*) :: in_buf, out_buf
+      integer(c_size_t), value :: count, byte_size
+      integer(c_int), value :: dtype, root, op
     end subroutine
+    
     subroutine c_mdmp_register_gather(send_buf, send_count, recv_buf, dtype, byte_size, root) bind(C, name="__mdmp_marker_register_gather")
-      import :: c_int, c_size_t; type(*), dimension(*) :: send_buf, recv_buf
-      integer(c_size_t), value :: send_count, byte_size; integer(c_int), value :: dtype, root
+      import :: c_int, c_size_t
+      type(*), dimension(*) :: send_buf, recv_buf
+      integer(c_size_t), value :: send_count, byte_size
+      integer(c_int), value :: dtype, root
     end subroutine
+    
     subroutine c_mdmp_register_allreduce(in_buf, out_buf, count, dtype, byte_size, op) bind(C, name="__mdmp_marker_register_allreduce")
-      import :: c_int, c_size_t; type(*), dimension(*) :: in_buf, out_buf
-      integer(c_size_t), value :: count, byte_size; integer(c_int), value :: dtype, op
+      import :: c_int, c_size_t
+      type(*), dimension(*) :: in_buf, out_buf
+      integer(c_size_t), value :: count, byte_size
+      integer(c_int), value :: dtype, op
     end subroutine
+    
     subroutine c_mdmp_register_allgather(in_buf, count, out_buf, dtype, byte_size) bind(C, name="__mdmp_marker_register_allgather")
-      import :: c_int, c_size_t; type(*), dimension(*) :: in_buf, out_buf
-      integer(c_size_t), value :: count, byte_size; integer(c_int), value :: dtype
+      import :: c_int, c_size_t
+      type(*), dimension(*) :: in_buf, out_buf
+      integer(c_size_t), value :: count, byte_size
+      integer(c_int), value :: dtype
     end subroutine
+    
     subroutine c_mdmp_register_bcast(buf, count, dtype, byte_size, root) bind(C, name="__mdmp_marker_register_bcast")
-      import :: c_int, c_size_t; type(*), dimension(*) :: buf
-      integer(c_size_t), value :: count, byte_size; integer(c_int), value :: dtype, root
+      import :: c_int, c_size_t
+      type(*), dimension(*) :: buf
+      integer(c_size_t), value :: count, byte_size
+      integer(c_int), value :: dtype, root
     end subroutine
-  end interface
+  end interface  
 
   ! ------------------------------------------------------------------
   ! Generic Interfaces (Replaces C Macros for Type Deduction)

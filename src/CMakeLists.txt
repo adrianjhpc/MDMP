@@ -72,7 +72,7 @@ target_link_libraries(mdmp_runtime PRIVATE ${MPI_LIBRARIES})
 install(TARGETS mdmp_runtime
     LIBRARY DESTINATION lib
     COMPONENT mdmp_runtime
-}
+)
 
 if(MDMP_ENABLE_FORTRAN)
     # Tell CMake where to output the compiled .mod file

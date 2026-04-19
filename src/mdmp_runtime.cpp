@@ -483,7 +483,7 @@ void mdmp_profile_report() {
 
 }
 
-inline MPI_Datatype mdmp_to_mpi_type(int mdmp_type) {
+inline MPI_Datatype get_mpi_type(int mdmp_type) {
     switch (mdmp_type) {
         case 0: return MPI_INT;
         case 1: return MPI_DOUBLE;
@@ -2186,11 +2186,11 @@ extern "C" {
 
     // Basic setup and teardown
     MDMP_DUMMY void __mdmp_marker_init() { mdmp_marker_stub_hit("__mdmp_marker_init"); }
-    MDMP_DUMMY void __mdmp_marker_final() {}
-    MDMP_DUMMY void __mdmp_marker_sync() {}
-    MDMP_DUMMY void __mdmp_marker_commregion_begin() {}
-    MDMP_DUMMY void __mdmp_marker_commregion_end() {}
-    MDMP_DUMMY int __mdmp_marker_commit() {}
+    MDMP_DUMMY void __mdmp_marker_final() { mdmp_marker_stub_hit("__mdmp_marker_final"); }
+    MDMP_DUMMY void __mdmp_marker_sync() { mdmp_marker_stub_hit("__mdmp_marker_sync"); }
+    MDMP_DUMMY void __mdmp_marker_commregion_begin() { mdmp_marker_stub_hit("__mdmp_marker_commregion_begin"); }
+    MDMP_DUMMY void __mdmp_marker_commregion_end() { mdmp_marker_stub_hit("__mdmp_marker_commregion_end"); }
+    MDMP_DUMMY int __mdmp_marker_commit() { mdmp_marker_stub_hit("__mdmp_marker_commit"); }
     
     // Utilities (The compiler is told the assembly modifies 'ret')
     MDMP_DUMMY int  __mdmp_marker_get_rank() { 
@@ -2205,25 +2205,25 @@ extern "C" {
         double ret = 0.0; 
         return ret; 
     }
-    MDMP_DUMMY void __mdmp_marker_set_debug(int) {}
-    MDMP_DUMMY void __mdmp_marker_abort(int) {}
+    MDMP_DUMMY void __mdmp_marker_set_debug(int) { mdmp_marker_stub_hit("__mdmp_marker_set_debug"); }
+    MDMP_DUMMY void __mdmp_marker_abort(int) { mdmp_marker_stub_hit("__mdmp_marker_abort"); }
 
     // Point-to-Point Dummies
-    MDMP_DUMMY int __mdmp_marker_send(void*, int, int, int, int, int, int) {}
-    MDMP_DUMMY int __mdmp_marker_recv(void*, int, int, int, int, int, int) {}
-    MDMP_DUMMY int __mdmp_marker_register_send(void*, int, int, int, int, int, int) {}
-    MDMP_DUMMY int __mdmp_marker_register_recv(void*, int, int, int, int, int, int) {}
+    MDMP_DUMMY int __mdmp_marker_send(void*, int, int, int, int, int, int) { mdmp_marker_stub_hit("__mdmp_marker_send"); }
+    MDMP_DUMMY int __mdmp_marker_recv(void*, int, int, int, int, int, int) { mdmp_marker_stub_hit("__mdmp_marker_recv"); }
+    MDMP_DUMMY int __mdmp_marker_register_send(void*, int, int, int, int, int, int) { mdmp_marker_stub_hit("__mdmp_marker_register_send"); }
+    MDMP_DUMMY int __mdmp_marker_register_recv(void*, int, int, int, int, int, int) { mdmp_marker_stub_hit("__mdmp_marker_register_recv"); }
 
     // Collective Dummies 
-    MDMP_DUMMY int __mdmp_marker_reduce(void*, void*, int, int, int, int, int) {}
-    MDMP_DUMMY int __mdmp_marker_allreduce(void*, void*, int, int, int, int) {}
-    MDMP_DUMMY int __mdmp_marker_gather(void*, int, void*, int, int, int) {}
-    MDMP_DUMMY int __mdmp_marker_allgather(void*, int, void*, int, int) {}
-    MDMP_DUMMY int __mdmp_marker_bcast(void*, int, int, int, int) {}
+    MDMP_DUMMY int __mdmp_marker_reduce(void*, void*, int, int, int, int, int) { mdmp_marker_stub_hit("__mdmp_marker_reduce"); }
+    MDMP_DUMMY int __mdmp_marker_allreduce(void*, void*, int, int, int, int) { mdmp_marker_stub_hit("__mdmp_marker_allreduce"); }
+    MDMP_DUMMY int __mdmp_marker_gather(void*, int, void*, int, int, int) { mdmp_marker_stub_hit("__mdmp_marker_gather"); }
+    MDMP_DUMMY int __mdmp_marker_allgather(void*, int, void*, int, int) { mdmp_marker_stub_hit("__mdmp_marker_allgather"); }
+    MDMP_DUMMY int __mdmp_marker_bcast(void*, int, int, int, int) { mdmp_marker_stub_hit("__mdmp_marker_bcast"); }
 
-    MDMP_DUMMY int __mdmp_marker_register_reduce(void*, void*, int, int, int, int, int) {}
-    MDMP_DUMMY int __mdmp_marker_register_allreduce(void*, void*, int, int, int, int) {}
-    MDMP_DUMMY int __mdmp_marker_register_gather(void*, int, void*, int, int, int) {}
-    MDMP_DUMMY int __mdmp_marker_register_allgather(void*, int, void*, int, int) {}
-    MDMP_DUMMY int __mdmp_marker_register_bcast(void*, int, int, int, int) {}
+    MDMP_DUMMY int __mdmp_marker_register_reduce(void*, void*, int, int, int, int, int) { mdmp_marker_stub_hit("__mdmp_marker_register_reduce"); }
+    MDMP_DUMMY int __mdmp_marker_register_allreduce(void*, void*, int, int, int, int) { mdmp_marker_stub_hit("__mdmp_marker_register_allreduce"); }
+    MDMP_DUMMY int __mdmp_marker_register_gather(void*, int, void*, int, int, int) { mdmp_marker_stub_hit("__mdmp_marker_register_gather"); }
+    MDMP_DUMMY int __mdmp_marker_register_allgather(void*, int, void*, int, int) { mdmp_marker_stub_hit("__mdmp_marker_register_allgather"); }
+    MDMP_DUMMY int __mdmp_marker_register_bcast(void*, int, int, int, int) { mdmp_marker_stub_hit("__mdmp_marker_register_bcast"); }
 }

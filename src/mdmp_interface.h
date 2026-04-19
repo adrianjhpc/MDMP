@@ -2,6 +2,7 @@
 #define MDMP_INTERFACE_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
     #include <type_traits>
