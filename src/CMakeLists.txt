@@ -75,33 +75,25 @@ install(TARGETS mdmp_runtime
 )
 
 if(MDMP_ENABLE_FORTRAN)
-    # Tell CMake where to output the compiled .mod file
     set(CMAKE_Fortran_MODULE_DIRECTORY ${CMAKE_BINARY_DIR}/include/mdmp_fortran)
 
-    # Create the dedicated Fortran library
-    add_library(mdmp_runtime_f SHARED
-        mdmp_interface.f90
-    )
+    # 1. Use STATIC. Shared libraries are black boxes to LTO.
+    add_library(mdmp_runtime_f STATIC mdmp_interface.f90)
 
-    # Link the Fortran interface to your base C/C++ runtime
-    target_link_libraries(mdmp_runtime_f PRIVATE mdmp_runtime)
+    # 2. Force the compilation into LLVM Bitcode so the pass can see inside the wrappers
+    target_compile_options(mdmp_runtime_f PRIVATE -flto -O1)
 
-    # Install the Fortran shared library
+    # Install the static archive
     install(TARGETS mdmp_runtime_f
-        LIBRARY DESTINATION lib
+        ARCHIVE DESTINATION lib
         COMPONENT mdmp_runtime
     )
 
-    # Install the generated .mod file so user code can "use mdmp_interface"
+    # Install the generated .mod file
     install(DIRECTORY ${CMAKE_Fortran_MODULE_DIRECTORY}/
         DESTINATION include
         COMPONENT Headers
     )
-    
-    # Optionally install the raw .f90 file just in case users want to 
-    # compile it directly into their own source tree instead of linking
-    install(FILES mdmp_interface.f90
-        DESTINATION include
-        COMPONENT Headers
-    )
 endif()
+
+

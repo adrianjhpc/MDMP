@@ -19,17 +19,15 @@ function(add_mdmp_fortran_test TEST_NAME)
         list(APPEND ABSOLUTE_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/${src_file}")
     endforeach()
 
+
     add_custom_command(
         OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${TEST_NAME}
         COMMAND ${MDMPF90} ${ABSOLUTE_SOURCES}
                 ${MPI_INC_FLAGS} 
-                -I${CMAKE_BINARY_DIR}/include/mdmp_fortran # Location of mdmp_interface.mod
-                -L${CMAKE_BINARY_DIR}/src -lmdmp_runtime_f # Link the Fortran runtime
                 ${MPI_LIBRARIES}
                 -o ${CMAKE_CURRENT_BINARY_DIR}/${TEST_NAME}
-        # Depend on both the C and Fortran runtimes
-        DEPENDS ${ABSOLUTE_SOURCES} mdmp_compiler_pass mdmp_runtime mdmp_runtime_f
-        COMMENT "Compiling ${TEST_NAME} using mdmpfortran harness..."
+        DEPENDS ${ABSOLUTE_SOURCES} mdmp_compiler_pass mdmp_runtime 
+        COMMENT "Compiling ${TEST_NAME} using mdmpf90 harness..."
     )
 
     add_custom_target(${TEST_NAME}_target ALL
@@ -62,7 +60,7 @@ set(TEST_NUM_RANKS 7)
 # Everything after TEST_NAME goes into ${ARGN}.
 function(add_mdmp_test TEST_NAME)
     
-    # 1. Collect all source files and make their paths absolute
+    # Collect all source files and make their paths absolute
     set(ABSOLUTE_SOURCES "")
     foreach(src_file IN LISTS ARGN)
         list(APPEND ABSOLUTE_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/${src_file}")
@@ -70,11 +68,11 @@ function(add_mdmp_test TEST_NAME)
 
     add_custom_command(
         OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/${TEST_NAME}
-        # 2. Pass the entire list of source files to mdmpc++
+        # Pass the entire list of source files to mdmpc++
         COMMAND ${MDMPCXX} ${ABSOLUTE_SOURCES}
                 ${MPI_INC_FLAGS} ${MPI_LIBRARIES}
                 -o ${CMAKE_CURRENT_BINARY_DIR}/${TEST_NAME}
-        # 3. Depend on ALL source files, so any edit triggers a rebuild
+        # Depend on all source files, so any edit triggers a rebuild
         DEPENDS ${ABSOLUTE_SOURCES} mdmp_compiler_pass mdmp_runtime
         COMMENT "Compiling ${TEST_NAME} using mdmpc++ harness..."
     )
