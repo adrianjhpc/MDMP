@@ -87,10 +87,16 @@ namespace llvm {
 
     bool isAsyncMDMPInstForWaitPlacement(Instruction *Inst);
 
+    bool getDirectIdentifiedAccessInfo(const MemoryLocation &Loc, const DataLayout &DL, const Value *&Owner, int64_t &ByteOffset);
+
+    bool getLoadedFieldPointeeInfo(const MemoryLocation &Loc, const DataLayout &DL, const Value *&Owner, int64_t &FieldOffset);
+    
     Instruction *mdmpInstructionAfter(Instruction *I);
     
     bool instructionIsTrueConsumerOrClobber(Instruction *I, const TrackedBuffer &Buf, AAResults &AA, MemorySSA &MSSA, const DataLayout &DL);
 
+    bool functionContainsAsyncMDMPCall(Function &F);
+    
     bool instructionTouchesAnyTrackedBufferPhase2(Instruction *I, ArrayRef<TrackedBuffer> Buffers, AAResults &AA, MemorySSA &MSSA, const DataLayout &DL);
 
     bool functionContainsMDMPRelevantCall(Function &F);
@@ -111,6 +117,8 @@ namespace llvm {
 
     bool isHardBarrierCallName(StringRef Name);
 
+    bool isMDMPInternalAllocaAccess(Instruction *I);
+    
     void collectLeafLoops(Loop *L, SmallVectorImpl<Loop *> &Out);
 
     void collectLeafLoops(LoopInfo &LI, SmallVectorImpl<Loop *> &Out);

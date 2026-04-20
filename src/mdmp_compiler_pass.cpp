@@ -172,9 +172,59 @@ bool MDMPPass::isAsyncMDMPInstForWaitPlacement(Instruction *Inst) {
   return false;
 }
 
- bool MDMPPass::instructionIsTrueConsumerOrClobber(Instruction *I, const TrackedBuffer &Buf, AAResults &AA, MemorySSA &MSSA, const DataLayout &DL) {
+bool MDMPPass::getDirectIdentifiedAccessInfo(const MemoryLocation &Loc, const DataLayout &DL, const Value *&Owner, int64_t &ByteOffset) {
+                                          
+  int64_t Off = 0;
+  const Value *Base = GetPointerBaseWithConstantOffset(Loc.Ptr, Off, DL);
+  if (!Base)
+    return false;
+
+  const Value *U = getUnderlyingObject(Base);
+  if (!isIdentifiedObject(U))
+    return false;
+
+  // Exclude dynamic-memory-style roots.
+  if (isa<LoadInst>(U) || isa<Argument>(U) || isa<PHINode>(U) || isa<CallBase>(U))
+    return false;
+
+  Owner = U;
+  ByteOffset = Off;
+  return true;
+}
+
+bool MDMPPass::getLoadedFieldPointeeInfo(const MemoryLocation &Loc, const DataLayout &DL, const Value *&Owner, int64_t &FieldOffset) {
+                                      
+  int64_t Off = 0;
+  const Value *Base = GetPointerBaseWithConstantOffset(Loc.Ptr, Off, DL);
+  if (!Base)
+    return false;
+
+  const Value *U = getUnderlyingObject(Base);
+  auto *LI = dyn_cast<LoadInst>(U);
+  if (!LI)
+    return false;
+
+  int64_t FieldOff = 0;
+  const Value *FieldBase =
+      GetPointerBaseWithConstantOffset(LI->getPointerOperand(), FieldOff, DL);
+  if (!FieldBase)
+    return false;
+
+  const Value *FieldOwner = getUnderlyingObject(FieldBase);
+  if (!isIdentifiedObject(FieldOwner))
+    return false;
+
+  Owner = FieldOwner;
+  FieldOffset = FieldOff;
+  return true;
+}
+
+bool MDMPPass::instructionIsTrueConsumerOrClobber(Instruction *I, const TrackedBuffer &Buf, AAResults &AA, MemorySSA &MSSA, const DataLayout &DL) {
 
   if (isIgnorableIntrinsicForMDMP(I))
+    return false;
+
+  if (isMDMPInternalAllocaAccess(I))
     return false;
 
   // TEMPORARY HACK. DO NOT KEEP AS IS NOT GENERALISABLE
@@ -287,14 +337,12 @@ bool MDMPPass::isAsyncMDMPInstForWaitPlacement(Instruction *Inst) {
   return false;
 }
 
-bool MDMPPass::functionContainsMDMPRelevantCall(Function &F) {
+bool MDMPPass::functionContainsAsyncMDMPCall(Function &F) {
   for (BasicBlock &BB : F) {
     for (Instruction &I : BB) {
       if (auto *CB = dyn_cast<CallBase>(&I)) {
         if (Function *Callee = CB->getCalledFunction()) {
-          StringRef N = Callee->getName();
-          if (N.starts_with("__mdmp_marker_") ||
-              N.starts_with("mdmp_"))
+          if (isAsyncMDMPOpName(Callee->getName()))
             return true;
         }
       }
@@ -313,6 +361,52 @@ bool MDMPPass::instructionTouchesAnyTrackedBufferPhase2(Instruction *I, ArrayRef
 }
 
 Instruction *MDMPPass::findFirstTrueConflictInBlock(BasicBlock *BB, BasicBlock::iterator StartIt, Instruction *RegionEnd, ArrayRef<TrackedBuffer> Buffers, AAResults &AA, MemorySSA &MSSA, const DataLayout &DL) {
+  auto sameBasePreciseOverlap = [&](const MemoryLocation &A,
+                                    const MemoryLocation &B) -> bool {
+    int64_t OffA = 0, OffB = 0;
+    const Value *BaseA = GetPointerBaseWithConstantOffset(A.Ptr, OffA, DL);
+    const Value *BaseB = GetPointerBaseWithConstantOffset(B.Ptr, OffB, DL);
+
+    if (!BaseA || !BaseB)
+      return false;
+
+    const Value *UA = getUnderlyingObject(BaseA);
+    const Value *UB = getUnderlyingObject(BaseB);
+    if (UA != UB)
+      return false;
+
+    auto SA = getPreciseSizeBytes(A.Size);
+    auto SB = getPreciseSizeBytes(B.Size);
+    if (!SA || !SB)
+      return false;
+
+    int64_t AStart = OffA;
+    int64_t AEnd   = OffA + static_cast<int64_t>(*SA);
+    int64_t BStart = OffB;
+    int64_t BEnd   = OffB + static_cast<int64_t>(*SB);
+
+    return !(AEnd <= BStart || BEnd <= AStart);
+  };
+
+  auto asyncBufferSetsDefinitelyConflict =
+    [&](ArrayRef<TrackedBuffer> A, ArrayRef<TrackedBuffer> B) -> bool {
+      for (const TrackedBuffer &TA : A) {
+	for (const TrackedBuffer &TB : B) {
+	  if (areDefinitelyDisjoint(TA.Loc, TB.Loc, DL))
+	    continue;
+
+	  // Strong proof #1: same underlying object + precise overlapping ranges.
+	  if (sameBasePreciseOverlap(TA.Loc, TB.Loc))
+	    return true;
+
+	  // Strong proof #2: LLVM proves exact aliasing.
+	  if (AA.alias(TA.Loc, TB.Loc) == AliasResult::MustAlias)
+	    return true;
+	}
+      }
+      return false;
+    };
+
   for (auto It = StartIt; It != BB->end(); ++It) {
     Instruction *Inst = &*It;
 
@@ -322,51 +416,76 @@ Instruction *MDMPPass::findFirstTrueConflictInBlock(BasicBlock *BB, BasicBlock::
     if (!Inst->mayReadOrWriteMemory())
       continue;
 
-    
     if (isHardBarrierInstForWaitPlacement(Inst))
       return Inst;
 
-    if (auto *Call = dyn_cast<CallInst>(Inst)) {
-      if (Function *F = Call->getCalledFunction()) {
-	if (F->getName().starts_with("__mdmp_marker_") || F->getName() == "mdmp_get_rank" ||
-	    F->getName() == "mdmp_get_size" || F->getName() == "mdmp_wtime") {
-	  // These are MDMP placeholders. We guarantee they do not 
-	  // implicitly clobber unrelated memory buffers.
-	  continue; 
-	}	
+    if (auto *CB = dyn_cast<CallBase>(Inst)) {
+      if (Function *F = CB->getCalledFunction()) {
+        if (F->getName().starts_with("__mdmp_marker_") ||
+            F->getName() == "mdmp_get_rank" ||
+            F->getName() == "mdmp_get_size" ||
+            F->getName() == "mdmp_wtime") {
+          // These are MDMP placeholders. We guarantee they do not
+          // implicitly clobber unrelated memory buffers.
+          continue;
+        }
       }
     }
 
-    // Check if this async call uses our tracked buffers
+    // For later async MDMP ops, allow pipelining unless we have strong proof
+    // that they really touch the same bytes.
     if (isAsyncMDMPInstForWaitPlacement(Inst)) {
       auto *CB = dyn_cast<CallBase>(Inst);
 
-      // Be conservative only if we cannot classify the async op.
       if (!CB)
-	return Inst;
-      
+        return Inst;
+
       auto OtherBuffers = getTrackedBuffersForAsyncRuntimeCall(CB);
-      
+
       // If we cannot reconstruct the async op's buffer set (e.g. mdmp_commit),
       // stay conservative.
       if (!OtherBuffers)
-	return Inst;
-      
-      if (trackedBufferSetsMayOverlap(*OtherBuffers, Buffers, AA, DL))
-	return Inst;
-      
+        return Inst;
+
+      if (asyncBufferSetsDefinitelyConflict(*OtherBuffers, Buffers))
+        return Inst;
+
       continue;
     }
-    
+
     if (instructionTouchesAnyTrackedBufferPhase2(Inst, Buffers, AA, MSSA, DL)) {
       errs() << "[MDMP DEBUG] Conflict detected!\n";
       errs() << "    Instruction: " << *Inst << "\n";
       if (Inst->getParent()) {
-          errs() << "    In Block:    " << Inst->getParent()->getName() << "\n";
-          if (Inst->getFunction()) {
-              errs() << "    In Function: " << Inst->getFunction()->getName() << "\n";
-          }
+        errs() << "    In Block:    " << Inst->getParent()->getName() << "\n";
+        if (Inst->getFunction()) {
+          errs() << "    In Function: " << Inst->getFunction()->getName() << "\n";
+        }
       }
+      if (auto *LI = dyn_cast<LoadInst>(Inst)) {
+	errs() << "    Load Ptr:    " << *LI->getPointerOperand() << "\n";
+	errs() << "    Underlying:  "
+	       << *getUnderlyingObject(LI->getPointerOperand()) << "\n";
+	if (const DebugLoc &Dbg = LI->getDebugLoc()) {
+	  errs() << "    Debug Loc:   " << Dbg.getLine() << ":" << Dbg.getCol() << "\n";
+	}
+      }
+
+      if (auto *SI = dyn_cast<StoreInst>(Inst)) {
+	errs() << "    Store Ptr:   " << *SI->getPointerOperand() << "\n";
+	errs() << "    Underlying:  "
+	       << *getUnderlyingObject(SI->getPointerOperand()) << "\n";
+	if (const DebugLoc &Dbg = SI->getDebugLoc()) {
+	  errs() << "    Debug Loc:   " << Dbg.getLine() << ":" << Dbg.getCol() << "\n";
+	}
+      }
+
+      for (const TrackedBuffer &Buf : Buffers) {
+	errs() << "    Tracked Ptr: " << *Buf.Loc.Ptr << "\n";
+	errs() << "    Buf Underlying: "
+	       << *getUnderlyingObject(Buf.Loc.Ptr) << "\n";
+      }
+
       return Inst;
     }
   }
@@ -394,6 +513,9 @@ bool MDMPPass::isIgnorableIntrinsicForMDMP(Instruction *I) {
 bool MDMPPass::instructionConflictsWithTrackedBufferMSSA(Instruction *I, const TrackedBuffer &Buf, AAResults &AA, MemorySSA &MSSA, const DataLayout &DL) {
                                                       
   if (isIgnorableIntrinsicForMDMP(I))
+    return false;
+
+  if (isMDMPInternalAllocaAccess(I))
     return false;
 
   if (auto *LI = dyn_cast<LoadInst>(I)) {
@@ -433,7 +555,10 @@ bool MDMPPass::instructionConflictsWithTrackedBufferMSSA(Instruction *I, const T
 }
 
 bool MDMPPass::instructionConflictsWithAnyTrackedBufferMSSA(Instruction *I, ArrayRef<TrackedBuffer> Buffers, AAResults &AA, MemorySSA &MSSA, const DataLayout &DL) {
-    
+
+  if (isMDMPInternalAllocaAccess(I))
+    return false;
+  
   for (const TrackedBuffer &Buf : Buffers) {
     if (instructionConflictsWithTrackedBufferMSSA(I, Buf, AA, MSSA, DL))
       return true;
@@ -521,6 +646,27 @@ bool MDMPPass::isHardBarrierCallName(StringRef Name) {
   return isMDMPBarrier || isMPIBarrier || isMPIP2P || isMPITopology;
 }
 
+bool MDMPPass::isMDMPInternalAllocaAccess(Instruction *I) {
+  Value *Ptr = nullptr;
+
+  if (auto *LI = dyn_cast<LoadInst>(I))
+    Ptr = LI->getPointerOperand();
+  else if (auto *SI = dyn_cast<StoreInst>(I))
+    Ptr = SI->getPointerOperand();
+  else
+    return false;
+
+  const Value *Obj = getUnderlyingObject(Ptr);
+  auto *AI = dyn_cast<AllocaInst>(Obj);
+  if (!AI)
+    return false;
+
+  StringRef N = AI->getName();
+  return N == "mdmp_req_token" ||
+    N == "mdmp_wait_ids_scratch" ||
+    N == "mdmp_progress_counter";
+}
+
 void MDMPPass::collectLeafLoops(Loop *L, SmallVectorImpl<Loop *> &Out) {
   if (L->getSubLoops().empty()) {
     Out.push_back(L);
@@ -584,11 +730,55 @@ bool MDMPPass::requestWindowSuggestsLoopProgressRelaxed(const RequestWindowInfo 
   return false;
 }
 
-
-bool MDMPPass::loopMayConflictWithTrackedBuffers(Loop *L, ArrayRef<TrackedBuffer> Buffers, AAResults &AA, MemorySSA &MSSA, const DataLayout &DL) {
-                                                 
+bool MDMPPass::loopMayConflictWithTrackedBuffers(Loop *L, ArrayRef<TrackedBuffer> Buffers, AAResults &AA, MemorySSA &MSSA, const DataLayout &DL) {                                                                                                                                       
   if (!L)
     return true;
+
+  auto sameBasePreciseOverlap = [&](const MemoryLocation &A,
+                                    const MemoryLocation &B) -> bool {
+    int64_t OffA = 0, OffB = 0;
+    const Value *BaseA = GetPointerBaseWithConstantOffset(A.Ptr, OffA, DL);
+    const Value *BaseB = GetPointerBaseWithConstantOffset(B.Ptr, OffB, DL);
+
+    if (!BaseA || !BaseB)
+      return false;
+
+    const Value *UA = getUnderlyingObject(BaseA);
+    const Value *UB = getUnderlyingObject(BaseB);
+    if (UA != UB)
+      return false;
+
+    auto SA = getPreciseSizeBytes(A.Size);
+    auto SB = getPreciseSizeBytes(B.Size);
+    if (!SA || !SB)
+      return false;
+
+    int64_t AStart = OffA;
+    int64_t AEnd   = OffA + static_cast<int64_t>(*SA);
+    int64_t BStart = OffB;
+    int64_t BEnd   = OffB + static_cast<int64_t>(*SB);
+
+    return !(AEnd <= BStart || BEnd <= AStart);
+  };
+
+  auto asyncBufferSetsDefinitelyConflict =
+    [&](ArrayRef<TrackedBuffer> A, ArrayRef<TrackedBuffer> B) -> bool {
+      for (const TrackedBuffer &TA : A) {
+	for (const TrackedBuffer &TB : B) {
+	  if (areDefinitelyDisjoint(TA.Loc, TB.Loc, DL))
+	    continue;
+
+	  // Strong proof #1: same underlying object + precise overlapping ranges.
+	  if (sameBasePreciseOverlap(TA.Loc, TB.Loc))
+	    return true;
+
+	  // Strong proof #2: LLVM proves exact aliasing.
+	  if (AA.alias(TA.Loc, TB.Loc) == AliasResult::MustAlias)
+	    return true;
+	}
+      }
+      return false;
+    };
 
   for (BasicBlock *LoopBB : L->getBlocksVector()) {
     for (Instruction &I : *LoopBB) {
@@ -605,40 +795,24 @@ bool MDMPPass::loopMayConflictWithTrackedBuffers(Loop *L, ArrayRef<TrackedBuffer
       if (isHardBarrierInstForWaitPlacement(Inst))
         return true;
 
-      // Check if this async call uses our tracked buffers
+      // For later async MDMP ops, allow pipelining unless we have strong proof
+      // that they really touch the same bytes.
       if (isAsyncMDMPInstForWaitPlacement(Inst)) {
-	bool overlaps = false;
-	if (auto *CB = dyn_cast<CallBase>(Inst)) {
-	  for (Value *Arg : CB->args()) {
-	    if (Arg->getType()->isPointerTy()) {
-	      // Extract the base origin of the pointer
-	      const Value *ArgObj = getUnderlyingObject(Arg);
-	      MemoryLocation ArgLoc(Arg, LocationSize::beforeOrAfterPointer());
-                    
-	      for (const TrackedBuffer &Buf : Buffers) {
-		const Value *BufObj = getUnderlyingObject(Buf.Loc.Ptr);
-                      
-		// If they share the exact same underlying base pointer, they overlap.
-		if (ArgObj == BufObj) {
-		  overlaps = true; 
-		  break;
-		}
-                      
-		// If Alias Analysis mathematically guarantees they are the same memory.
-		if (AA.alias(ArgLoc, Buf.Loc) == AliasResult::MustAlias) {
-		  overlaps = true;
-		  break;
-		}
-	      }
-	    }
-	    if (overlaps) break;
-	  }
-	}
-              
-	if (overlaps) 
-	  return Inst; // It uses the same buffer! Force a Wait here.
-                
-	continue; // Safe to overlap, it uses different buffers.
+        auto *CB = dyn_cast<CallBase>(Inst);
+        if (!CB)
+          return true;
+
+        auto OtherBuffers = getTrackedBuffersForAsyncRuntimeCall(CB);
+
+        // If we cannot reconstruct the async op's buffer set (e.g. mdmp_commit),
+        // stay conservative.
+        if (!OtherBuffers)
+          return true;
+
+        if (asyncBufferSetsDefinitelyConflict(*OtherBuffers, Buffers))
+          return true;
+
+        continue;
       }
 
       if (instructionTouchesAnyTrackedBufferPhase2(Inst, Buffers, AA, MSSA, DL))
@@ -816,6 +990,39 @@ bool MDMPPass::areDefinitelyDisjoint(const MemoryLocation &A, const MemoryLocati
   const Value *UA = getUnderlyingObject(BaseA);
   const Value *UB = getUnderlyingObject(BaseB);
 
+  const Value *DirectOwnerA = nullptr, *DirectOwnerB = nullptr;
+  const Value *FieldOwnerA = nullptr, *FieldOwnerB = nullptr;
+  int64_t DirectOffA = 0, DirectOffB = 0;
+  int64_t FieldOffA = 0, FieldOffB = 0;
+  
+  bool ADirect = getDirectIdentifiedAccessInfo(A, DL, DirectOwnerA, DirectOffA);
+  bool BDirect = getDirectIdentifiedAccessInfo(B, DL, DirectOwnerB, DirectOffB);
+  
+  bool AField = getLoadedFieldPointeeInfo(A, DL, FieldOwnerA, FieldOffA);
+  bool BField = getLoadedFieldPointeeInfo(B, DL, FieldOwnerB, FieldOffB);
+  
+  // Rule A: direct aggregate metadata vs pointee loaded from its field
+  if (ADirect && BField && DirectOwnerA == FieldOwnerB)
+    return true;
+  if (BDirect && AField && DirectOwnerB == FieldOwnerA)
+    return true;
+  
+  // Rule B: different loaded fields of same aggregate
+  if (AField && BField &&
+      FieldOwnerA == FieldOwnerB &&
+      FieldOffA != FieldOffB)
+    return true;
+  
+  // Rule C: separate local identified object vs pointee loaded from different aggregate
+  if (ADirect && BField &&
+    DirectOwnerA != FieldOwnerB &&
+    isa<AllocaInst>(DirectOwnerA))
+    return true;
+  if (BDirect && AField &&
+      DirectOwnerB != FieldOwnerA &&
+      isa<AllocaInst>(DirectOwnerB))
+    return true;
+    
   // If the IR contains two different load instructions that load from the 
   // exact same struct field (e.g., domain.commDataRecv), they represent the 
   // exact same underlying heap array. We must unify them here!
@@ -913,7 +1120,10 @@ bool MDMPPass::operandsAvailableBefore(CallInst *CI, Instruction *InsertBefore, 
 }
 
 bool MDMPPass::instructionConflictsWithTrackedBuffer(Instruction *I, const TrackedBuffer &Buf, AAResults &AA, const DataLayout &DL) {
-						     
+
+  if (isMDMPInternalAllocaAccess(I))
+    return false;
+  
   if (auto *LI = dyn_cast<LoadInst>(I)) {
     // Local reads are okay while a send is in flight.
     if (Buf.isNetworkReadOnly)
@@ -933,7 +1143,10 @@ bool MDMPPass::instructionConflictsWithTrackedBuffer(Instruction *I, const Track
 }
 
 bool MDMPPass::instructionConflictsWithAnyTrackedBuffer(Instruction *I, ArrayRef<TrackedBuffer> Buffers, AAResults &AA, const DataLayout &DL) {
-							
+
+  if (isMDMPInternalAllocaAccess(I))
+    return false;
+  
   for (const TrackedBuffer &Buf : Buffers) {
     if (instructionConflictsWithTrackedBuffer(I, Buf, AA, DL))
       return true;
@@ -1072,58 +1285,37 @@ bool MDMPPass::inlineThinMDMPWrappers(Module &M) {
   bool Changed = false;
   InlineFunctionInfo IFI;
   bool LocalChanged;
-  
-  // Prevent infinite recursive flattening in deep codebases
+
   unsigned IterationCount = 0;
-  const unsigned MaxIterations = 4; 
+  const unsigned MaxIterations = 6;
 
   do {
     LocalChanged = false;
     std::vector<CallBase *> CallsToInline;
 
     for (Function &F : M) {
-      if (F.isDeclaration()) continue;
-
-      // Do not inline into a function that is already massive.
-      // (F.getInstructionCount() is available in newer LLVMs, otherwise 
-      // just counting the basic blocks is a great fast proxy).
-      //if (F.getInstructionCount() > 10000) continue; 
+      if (F.isDeclaration())
+        continue;
 
       for (BasicBlock &BB : F) {
         for (Instruction &I : BB) {
-          if (auto *CB = dyn_cast<CallBase>(&I)) {
-            Function *Callee = CB->getCalledFunction();
-            if (!Callee || Callee->isDeclaration() || Callee == &F) 
-              continue;
+          auto *CB = dyn_cast<CallBase>(&I);
+          if (!CB)
+            continue;
 
-            unsigned InstCount = 0;
-            bool HasMDMPCall = false;
+          Function *Callee = CB->getCalledFunction();
+          if (!Callee || Callee->isDeclaration() || Callee == &F)
+            continue;
 
-            for (BasicBlock &CBB : *Callee) {
-              for (Instruction &CI : CBB) {
-                InstCount++;
-                if (auto *CCB = dyn_cast<CallBase>(&CI)) {
-                  if (Function *Target = CCB->getCalledFunction()) {
-                    if (isAsyncMDMPOpName(Target->getName())) {
-		      bool CallerIsMDMPRelevant = functionContainsMDMPRelevantCall(*Target);
-		      if (!CallerIsMDMPRelevant)
-			continue;
-                      HasMDMPCall = true;
-                    }		    
-                  }
-                }
-              }
-            }
-
-            if (HasMDMPCall) {
-              CallsToInline.push_back(CB);
-            }
-          }
+	  if (functionContainsAsyncMDMPCall(*Callee)) {
+	    errs() << "[MDMP INLINE] inlining wrapper call to " << Callee->getName()
+		   << " into " << F.getName() << "\n";
+	    CallsToInline.push_back(CB);
+	  }
         }
       }
     }
 
-    // Perform the actual LLVM inlining
     for (CallBase *CB : CallsToInline) {
       InlineResult IR = InlineFunction(*CB, IFI);
       if (IR.isSuccess()) {
@@ -1131,71 +1323,13 @@ bool MDMPPass::inlineThinMDMPWrappers(Module &M) {
         Changed = true;
       }
     }
-    
-    IterationCount++;
+
+    ++IterationCount;
   } while (LocalChanged && IterationCount < MaxIterations);
 
   return Changed;
 }
-/*
-bool MDMPPass::inlineThinMDMPWrappers(Module &M) {
-  bool Changed = false;
-  InlineFunctionInfo IFI;
-  bool LocalChanged;
 
-  // Repeat until no more inlining occurs (handles nested wrappers like A -> B -> mdmp_send)
-  do {
-    LocalChanged = false;
-    std::vector<CallBase *> CallsToInline;
-
-    for (Function &F : M) {
-      if (F.isDeclaration()) continue;
-      for (BasicBlock &BB : F) {
-        for (Instruction &I : BB) {
-          if (auto *CB = dyn_cast<CallBase>(&I)) {
-            Function *Callee = CB->getCalledFunction();
-            // Ignore external functions, declarations, and recursive calls
-            if (!Callee || Callee->isDeclaration() || Callee == &F) 
-              continue;
-
-            unsigned InstCount = 0;
-            bool HasMDMPCall = false;
-
-            // Scan the callee to see if it's an MDMP wrapper
-            for (BasicBlock &CBB : *Callee) {
-              for (Instruction &CI : CBB) {
-                InstCount++;
-                if (auto *CCB = dyn_cast<CallBase>(&CI)) {
-                  if (Function *Target = CCB->getCalledFunction()) {
-                    if (isAsyncMDMPOpName(Target->getName())) {
-                      HasMDMPCall = true;
-                    }
-                  }
-                }
-              }
-            }
-
-            if (HasMDMPCall) {
-              CallsToInline.push_back(CB);
-            }
-          }
-        }
-      }
-    }
-
-    // Perform the actual LLVM inlining
-    for (CallBase *CB : CallsToInline) {
-      InlineResult IR = InlineFunction(*CB, IFI);
-      if (IR.isSuccess()) {
-        LocalChanged = true;
-        Changed = true;
-      }
-    }
-  } while (LocalChanged);
-
-  return Changed;
-}
-*/
 PreservedAnalyses MDMPPass::run(Module &M, ModuleAnalysisManager &MAM) {
   bool changed = false;
   auto &FAM = MAM.getResult<FunctionAnalysisManagerModuleProxy>(M).getManager();
@@ -1385,7 +1519,7 @@ bool MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
  
   ReversePostOrderTraversal<Function*> RPOT(&F);
   for (BasicBlock *BB : RPOT) { 
-  //for (auto &BB : F) {
+    //for (auto &BB : F) {
     for (auto &I : *BB) {
       auto *CI = dyn_cast<CallInst>(&I);
       if (!CI || !CI->getCalledFunction()) continue;
