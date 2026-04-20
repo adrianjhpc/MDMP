@@ -76,12 +76,56 @@ namespace llvm {
       SmallVector<Instruction *, 4> WaitPoints;
       SmallPtrSet<BasicBlock *, 32> LiveBlocks;
     };        
+
+    enum class MDMPLocKind {
+      Unknown,
+      DirectObjectBytes,
+      LoadedFieldPointee,
+      InternalMDMPAlloca
+    };
+
+    struct MDMPLocationProvenance {
+      MDMPLocKind Kind = MDMPLocKind::Unknown;
+
+      // DirectObjectBytes / InternalMDMPAlloca
+      const Value *Owner = nullptr;
+      int64_t OwnerByteOffset = 0;
+
+      // LoadedFieldPointee
+      const Value *FieldOwner = nullptr;
+      int64_t FieldOffset = 0;
+      const Value *LoadedPtrInst = nullptr;
+
+      std::optional<uint64_t> PreciseSize;
+    };
     
   private:
 
     unsigned NextProgressSiteID = 0;   
     
     std::vector<CompletedRegion> CompletedRegions;    
+    
+    bool isMDMPInternalAlloca(const Value *V);
+
+    bool isMDMPInternalAllocaAccess(Instruction *I);
+    
+    void markMDMPInternalAlloca(AllocaInst *AI);
+    
+    MDMPLocationProvenance classifyMemoryLocationProvenance(const MemoryLocation &Loc, const DataLayout &DL);
+    
+    bool locationsDefinitelyDisjointByProvenance(const MemoryLocation &A, const MemoryLocation &B, const DataLayout &DL);
+    
+    bool sameStorageRootPreciseOverlap(const MemoryLocation &A, const MemoryLocation &B, const DataLayout &DL);
+    
+    LocationSize deriveTransferLength(Value *LenV);
+    
+    MemoryLocation makeTransferLocation(Value *Ptr, Value *LenV);
+    
+    bool memTransferConflictsWithTrackedBuffer(MemTransferInst *MTI, const TrackedBuffer &Buf, AAResults &AA, const DataLayout &DL);
+    
+    bool memSetConflictsWithTrackedBuffer(MemSetInst *MSI, const TrackedBuffer &Buf, AAResults &AA, const DataLayout &DL);
+
+    bool asyncTrackedBuffersDefinitelyConflict(ArrayRef<TrackedBuffer> A, ArrayRef<TrackedBuffer> B, AAResults &AA, const DataLayout &DL);
 
     bool isHardBarrierInstForWaitPlacement(Instruction *Inst);
 
@@ -116,8 +160,6 @@ namespace llvm {
     bool isAsyncMDMPOpName(StringRef FnName);
 
     bool isHardBarrierCallName(StringRef Name);
-
-    bool isMDMPInternalAllocaAccess(Instruction *I);
     
     void collectLeafLoops(Loop *L, SmallVectorImpl<Loop *> &Out);
 

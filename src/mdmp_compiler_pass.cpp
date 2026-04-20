@@ -34,6 +34,249 @@ unsigned mdmpEnvUnsigned(const char *Name, unsigned DefaultValue) {
   return static_cast<unsigned>(Parsed);
 }
 
+bool MDMPPass::isMDMPInternalAlloca(const Value *V) {
+  if (!V)
+    return false;
+
+  const Value *Obj = getUnderlyingObject(V);
+  auto *AI = dyn_cast<AllocaInst>(Obj);
+  if (!AI)
+    return false;
+
+  if (AI->getMetadata("mdmp.internal"))
+    return true;
+
+  // Fallback for older IR already relying on names.
+  StringRef N = AI->getName();
+  return N == "mdmp_req_token" ||
+         N == "mdmp_wait_ids_scratch" ||
+         N == "mdmp_progress_counter";
+}
+
+void MDMPPass::markMDMPInternalAlloca(AllocaInst *AI) {
+  if (!AI)
+    return;
+
+  AI->setMetadata("mdmp.internal", MDNode::get(AI->getContext(), {}));
+}
+
+bool MDMPPass::isMDMPInternalAllocaAccess(Instruction *I) {
+  Value *Ptr = nullptr;
+
+  if (auto *LI = dyn_cast<LoadInst>(I))
+    Ptr = LI->getPointerOperand();
+  else if (auto *SI = dyn_cast<StoreInst>(I))
+    Ptr = SI->getPointerOperand();
+  else
+    return false;
+
+  return isMDMPInternalAlloca(Ptr);
+}
+
+MDMPPass::MDMPLocationProvenance MDMPPass::classifyMemoryLocationProvenance(const MemoryLocation &Loc, const DataLayout &DL) {
+                                           
+  MDMPLocationProvenance P;
+  P.PreciseSize = getPreciseSizeBytes(Loc.Size);
+
+  const Value *Owner = nullptr;
+  int64_t ByteOffset = 0;
+  if (getDirectIdentifiedAccessInfo(Loc, DL, Owner, ByteOffset)) {
+    if (isMDMPInternalAlloca(Owner)) {
+      P.Kind = MDMPLocKind::InternalMDMPAlloca;
+      P.Owner = Owner;
+      P.OwnerByteOffset = ByteOffset;
+      return P;
+    }
+
+    P.Kind = MDMPLocKind::DirectObjectBytes;
+    P.Owner = Owner;
+    P.OwnerByteOffset = ByteOffset;
+    return P;
+  }
+
+  const Value *FieldOwner = nullptr;
+  int64_t FieldOffset = 0;
+  if (getLoadedFieldPointeeInfo(Loc, DL, FieldOwner, FieldOffset)) {
+    P.Kind = MDMPLocKind::LoadedFieldPointee;
+    P.FieldOwner = FieldOwner;
+    P.FieldOffset = FieldOffset;
+
+    int64_t Off = 0;
+    const Value *Base = GetPointerBaseWithConstantOffset(Loc.Ptr, Off, DL);
+    if (Base)
+      P.LoadedPtrInst = getUnderlyingObject(Base);
+
+    return P;
+  }
+
+  if (isMDMPInternalAlloca(Loc.Ptr)) {
+    P.Kind = MDMPLocKind::InternalMDMPAlloca;
+    P.Owner = getUnderlyingObject(Loc.Ptr);
+    return P;
+  }
+
+  return P;
+}
+
+bool MDMPPass::locationsDefinitelyDisjointByProvenance(const MemoryLocation &A, const MemoryLocation &B, const DataLayout &DL) {
+                                                       
+  MDMPLocationProvenance PA = classifyMemoryLocationProvenance(A, DL);
+  MDMPLocationProvenance PB = classifyMemoryLocationProvenance(B, DL);
+
+  // Internal MDMP scratch/token/progress allocas are never user buffers.
+  if (PA.Kind == MDMPLocKind::InternalMDMPAlloca ||
+      PB.Kind == MDMPLocKind::InternalMDMPAlloca)
+    return true;
+
+  // Rule A:
+  // direct bytes inside an identified owner object are disjoint from pointee
+  // memory loaded from one of that owner's pointer fields.
+  if (PA.Kind == MDMPLocKind::DirectObjectBytes &&
+      PB.Kind == MDMPLocKind::LoadedFieldPointee &&
+      PA.Owner == PB.FieldOwner)
+    return true;
+
+  if (PB.Kind == MDMPLocKind::DirectObjectBytes &&
+      PA.Kind == MDMPLocKind::LoadedFieldPointee &&
+      PB.Owner == PA.FieldOwner)
+    return true;
+
+  // Rule B:
+  // pointers loaded from different fields of the same aggregate are treated as
+  // distinct buffer families.
+  if (PA.Kind == MDMPLocKind::LoadedFieldPointee &&
+      PB.Kind == MDMPLocKind::LoadedFieldPointee &&
+      PA.FieldOwner == PB.FieldOwner &&
+      PA.FieldOffset != PB.FieldOffset)
+    return true;
+
+  // Rule C:
+  // direct accesses to one local identified object are disjoint from pointee
+  // memory loaded from a different owner aggregate.
+  if (PA.Kind == MDMPLocKind::DirectObjectBytes &&
+      PB.Kind == MDMPLocKind::LoadedFieldPointee &&
+      PA.Owner != PB.FieldOwner &&
+      isa<AllocaInst>(PA.Owner))
+    return true;
+
+  if (PB.Kind == MDMPLocKind::DirectObjectBytes &&
+      PA.Kind == MDMPLocKind::LoadedFieldPointee &&
+      PB.Owner != PA.FieldOwner &&
+      isa<AllocaInst>(PB.Owner))
+    return true;
+
+  return false;
+}
+
+bool MDMPPass::sameStorageRootPreciseOverlap(const MemoryLocation &A, const MemoryLocation &B, const DataLayout &DL) {
+                                             
+  if (locationsDefinitelyDisjointByProvenance(A, B, DL))
+    return false;
+
+  int64_t OffA = 0, OffB = 0;
+  const Value *BaseA = GetPointerBaseWithConstantOffset(A.Ptr, OffA, DL);
+  const Value *BaseB = GetPointerBaseWithConstantOffset(B.Ptr, OffB, DL);
+
+  if (!BaseA || !BaseB)
+    return false;
+
+  const Value *UA = getUnderlyingObject(BaseA);
+  const Value *UB = getUnderlyingObject(BaseB);
+
+  // Canonicalise repeated loads from the same field so they count as the same
+  // storage root.
+  if (UA != UB) {
+    if (auto *LA = dyn_cast<LoadInst>(UA)) {
+      if (auto *LB = dyn_cast<LoadInst>(UB)) {
+        int64_t FieldOffA = 0, FieldOffB = 0;
+        const Value *FieldBaseA =
+            GetPointerBaseWithConstantOffset(LA->getPointerOperand(), FieldOffA, DL);
+        const Value *FieldBaseB =
+            GetPointerBaseWithConstantOffset(LB->getPointerOperand(), FieldOffB, DL);
+
+        if (FieldBaseA && FieldBaseB &&
+            FieldBaseA == FieldBaseB &&
+            FieldOffA == FieldOffB) {
+          UB = UA;
+        }
+      }
+    }
+  }
+
+  if (UA != UB)
+    return false;
+
+  auto SA = getPreciseSizeBytes(A.Size);
+  auto SB = getPreciseSizeBytes(B.Size);
+  if (!SA || !SB)
+    return false;
+
+  int64_t AStart = OffA;
+  int64_t AEnd   = OffA + static_cast<int64_t>(*SA);
+  int64_t BStart = OffB;
+  int64_t BEnd   = OffB + static_cast<int64_t>(*SB);
+
+  return !(AEnd <= BStart || BEnd <= AStart);
+}
+
+LocationSize MDMPPass::deriveTransferLength(Value *LenV) {
+  if (auto Len = getConstU64(LenV))
+    return LocationSize::precise(*Len);
+
+  return LocationSize::beforeOrAfterPointer();
+}
+
+MemoryLocation MDMPPass::makeTransferLocation(Value *Ptr, Value *LenV) {
+  return MemoryLocation(Ptr, deriveTransferLength(LenV));
+}
+
+bool MDMPPass::memTransferConflictsWithTrackedBuffer(MemTransferInst *MTI, const TrackedBuffer &Buf, AAResults &AA, const DataLayout &DL) {
+                                                     
+  if (!MTI)
+    return false;
+
+  MemoryLocation Src = makeTransferLocation(MTI->getSource(), MTI->getLength());
+  MemoryLocation Dst = makeTransferLocation(MTI->getDest(),   MTI->getLength());
+
+  bool SrcOverlap = locationsMayOverlap(Src, Buf.Loc, AA, DL);
+  bool DstOverlap = locationsMayOverlap(Dst, Buf.Loc, AA, DL);
+
+  // Send-like buffers: only local writes/clobbers matter.
+  if (Buf.isNetworkReadOnly)
+    return DstOverlap;
+
+  // Recv-like buffers: both local reads and writes matter.
+  return SrcOverlap || DstOverlap;
+}
+
+bool MDMPPass::memSetConflictsWithTrackedBuffer(MemSetInst *MSI, const TrackedBuffer &Buf, AAResults &AA, const DataLayout &DL) {
+                                                
+  if (!MSI)
+    return false;
+
+  MemoryLocation Dst = makeTransferLocation(MSI->getDest(), MSI->getLength());
+  return locationsMayOverlap(Dst, Buf.Loc, AA, DL);
+}
+
+bool MDMPPass::asyncTrackedBuffersDefinitelyConflict(ArrayRef<TrackedBuffer> A, ArrayRef<TrackedBuffer> B, AAResults &AA, const DataLayout &DL) {
+                                                     
+  for (const TrackedBuffer &TA : A) {
+    for (const TrackedBuffer &TB : B) {
+      if (areDefinitelyDisjoint(TA.Loc, TB.Loc, DL))
+        continue;
+
+      // Strong proof #1: same storage root + precise overlapping ranges.
+      if (sameStorageRootPreciseOverlap(TA.Loc, TB.Loc, DL))
+        return true;
+
+      // Strong proof #2: LLVM proves exact aliasing.
+      if (AA.alias(TA.Loc, TB.Loc) == AliasResult::MustAlias)
+        return true;
+    }
+  }
+  return false;
+}
+
 void MDMPPass::collectNonLeafLoops(Loop *L, SmallVectorImpl<Loop *> &Out) {
   if (!L->getSubLoops().empty())
     Out.push_back(L);
@@ -220,83 +463,86 @@ bool MDMPPass::getLoadedFieldPointeeInfo(const MemoryLocation &Loc, const DataLa
 }
 
 bool MDMPPass::instructionIsTrueConsumerOrClobber(Instruction *I, const TrackedBuffer &Buf, AAResults &AA, MemorySSA &MSSA, const DataLayout &DL) {
-
+                                                  
   if (isIgnorableIntrinsicForMDMP(I))
     return false;
 
   if (isMDMPInternalAllocaAccess(I))
     return false;
 
-  // TEMPORARY HACK. DO NOT KEEP AS IS NOT GENERALISABLE
+  // First-class memory intrinsic handling.
+  if (auto *MTI = dyn_cast<MemTransferInst>(I))
+    return memTransferConflictsWithTrackedBuffer(MTI, Buf, AA, DL);
+
+  if (auto *MSI = dyn_cast<MemSetInst>(I))
+    return memSetConflictsWithTrackedBuffer(MSI, Buf, AA, DL);
+
+  // Temporary call classification hacks
   if (auto *CB = dyn_cast<CallBase>(I)) {
     if (Function *F = CB->getCalledFunction()) {
       StringRef Name = F->getName();
-      
-      // Memory Allocations
-      if (Name.contains("malloc") || Name.contains("calloc") || Name.contains("realloc") || 
-          Name.contains("free") || Name.contains("Znwm") || Name.contains("Znam") || 
-          Name.contains("ZdlPv") || Name.contains("ZdaPv") || 
-          Name.contains("Allocate") || Name.contains("Release")) { 
+
+      // Memory allocations
+      if (Name.contains("malloc") || Name.contains("calloc") || Name.contains("realloc") ||
+          Name.contains("free") || Name.contains("Znwm") || Name.contains("Znam") ||
+          Name.contains("ZdlPv") || Name.contains("ZdaPv") ||
+          Name.contains("Allocate") || Name.contains("Release")) {
         return false;
       }
-      
-      // Safe Getters
+
+      // Safe getters
       if (Name == "mdmp_get_rank" || Name == "mdmp_get_size" || Name == "mdmp_wtime" ||
           Name == "MPI_Comm_rank" || Name == "MPI_Comm_size") {
         return false;
       }
 
-      // Specific C-style I/O (fflush, system, fread, fwrite)
+      // C-style I/O etc
       if (Name.contains("printf") || Name.contains("puts") || Name.contains("fprintf") ||
           Name == "fflush" || Name == "system" || Name == "fopen" || Name == "fclose" ||
-          Name == "fread" || Name == "fwrite" || Name.contains("ostream") || 
+          Name == "fread" || Name == "fwrite" || Name.contains("ostream") ||
           Name.contains("exit") || Name.contains("abort") || Name.contains("Abort")) {
         return false;
       }
 
-      // Applies to Math, C-Utilities (qsort), and other functions
-      if (Name.contains("sqrt") || Name.contains("cbrt") || Name.contains("fabs") || 
+      // Math / utility calls: safe if pointer args are all disjoint.
+      if (Name.contains("sqrt") || Name.contains("cbrt") || Name.contains("fabs") ||
           Name.contains("sin") || Name.contains("cos") || Name.contains("pow") ||
-          Name.contains("max") || Name.contains("min") || 
-          Name == "qsort" || Name == "bsearch" || 
+          Name.contains("max") || Name.contains("min") ||
+          Name == "qsort" || Name == "bsearch" ||
           Name.contains("evaluate") || Name.contains("factor") || Name.contains("distribute")) {
-        
-        bool pointerOverlaps = false;
-        
-        // Check every argument. If the function takes pointers 
-        // this loop skips, and we deem it safe
+
+        bool PointerOverlaps = false;
         for (Value *Arg : CB->args()) {
-          if (Arg->getType()->isPointerTy()) {
-            MemoryLocation ArgLoc(Arg, LocationSize::beforeOrAfterPointer());
-            
-            if (areDefinitelyDisjoint(ArgLoc, Buf.Loc, DL)) continue;
-            
-            if (AA.alias(ArgLoc, Buf.Loc) != AliasResult::NoAlias) {
-              pointerOverlaps = true;
-              break;
-            }
+          if (!Arg->getType()->isPointerTy())
+            continue;
+
+          MemoryLocation ArgLoc(Arg, LocationSize::beforeOrAfterPointer());
+          if (areDefinitelyDisjoint(ArgLoc, Buf.Loc, DL))
+            continue;
+
+          if (AA.alias(ArgLoc, Buf.Loc) != AliasResult::NoAlias) {
+            PointerOverlaps = true;
+            break;
           }
         }
-        
-        if (!pointerOverlaps) {
-          return false; // Safely bypass the Black Box!
-        }
+
+        if (!PointerOverlaps)
+          return false;
       }
     }
 
-    // Indirect Call Bypass
+    // Indirect call bypass
     if (CB->isIndirectCall()) {
       if (CB->getType()->isPointerTy() && CB->arg_size() == 2) {
-        if (CB->getArgOperand(0)->getType()->isPointerTy() && 
-            CB->getArgOperand(1)->getType()->isIntegerTy()) { 
-          return false; 
+        if (CB->getArgOperand(0)->getType()->isPointerTy() &&
+            CB->getArgOperand(1)->getType()->isIntegerTy()) {
+          return false;
         }
       }
     }
   }
-    
+
   if (auto *LI = dyn_cast<LoadInst>(I)) {
-    // For send-like buffers, local CPU reads are okay.
     if (Buf.isNetworkReadOnly)
       return false;
 
@@ -304,7 +550,6 @@ bool MDMPPass::instructionIsTrueConsumerOrClobber(Instruction *I, const TrackedB
   }
 
   if (auto *SI = dyn_cast<StoreInst>(I)) {
-    // Stores always clash if overlapping.
     return locationsMayOverlap(MemoryLocation::get(SI), Buf.Loc, AA, DL);
   }
 
@@ -314,27 +559,19 @@ bool MDMPPass::instructionIsTrueConsumerOrClobber(Instruction *I, const TrackedB
 
   MemoryAccess *MA = MSSA.getMemoryAccess(I);
 
-  // Send-like network access:
-  // only local writes/clobbers matter.
+  // Send-like network access: only local writes/clobbers matter.
   if (Buf.isNetworkReadOnly) {
     if (!isModSet(MR))
       return false;
 
-    // A pure MemoryUse is read-only wrt memory state, so safe for send-like buffers.
     if (MA && isa<MemoryUse>(MA))
       return false;
 
     return true;
   }
 
-  // Recv-like network access:
-  // both local reads and writes matter.
-  if (isRefSet(MR))
-    return true;
-  if (isModSet(MR))
-    return true;
-
-  return false;
+  // Recv-like network access: both local reads and writes matter.
+  return isRefSet(MR) || isModSet(MR);
 }
 
 bool MDMPPass::functionContainsAsyncMDMPCall(Function &F) {
@@ -361,52 +598,7 @@ bool MDMPPass::instructionTouchesAnyTrackedBufferPhase2(Instruction *I, ArrayRef
 }
 
 Instruction *MDMPPass::findFirstTrueConflictInBlock(BasicBlock *BB, BasicBlock::iterator StartIt, Instruction *RegionEnd, ArrayRef<TrackedBuffer> Buffers, AAResults &AA, MemorySSA &MSSA, const DataLayout &DL) {
-  auto sameBasePreciseOverlap = [&](const MemoryLocation &A,
-                                    const MemoryLocation &B) -> bool {
-    int64_t OffA = 0, OffB = 0;
-    const Value *BaseA = GetPointerBaseWithConstantOffset(A.Ptr, OffA, DL);
-    const Value *BaseB = GetPointerBaseWithConstantOffset(B.Ptr, OffB, DL);
-
-    if (!BaseA || !BaseB)
-      return false;
-
-    const Value *UA = getUnderlyingObject(BaseA);
-    const Value *UB = getUnderlyingObject(BaseB);
-    if (UA != UB)
-      return false;
-
-    auto SA = getPreciseSizeBytes(A.Size);
-    auto SB = getPreciseSizeBytes(B.Size);
-    if (!SA || !SB)
-      return false;
-
-    int64_t AStart = OffA;
-    int64_t AEnd   = OffA + static_cast<int64_t>(*SA);
-    int64_t BStart = OffB;
-    int64_t BEnd   = OffB + static_cast<int64_t>(*SB);
-
-    return !(AEnd <= BStart || BEnd <= AStart);
-  };
-
-  auto asyncBufferSetsDefinitelyConflict =
-    [&](ArrayRef<TrackedBuffer> A, ArrayRef<TrackedBuffer> B) -> bool {
-      for (const TrackedBuffer &TA : A) {
-	for (const TrackedBuffer &TB : B) {
-	  if (areDefinitelyDisjoint(TA.Loc, TB.Loc, DL))
-	    continue;
-
-	  // Strong proof #1: same underlying object + precise overlapping ranges.
-	  if (sameBasePreciseOverlap(TA.Loc, TB.Loc))
-	    return true;
-
-	  // Strong proof #2: LLVM proves exact aliasing.
-	  if (AA.alias(TA.Loc, TB.Loc) == AliasResult::MustAlias)
-	    return true;
-	}
-      }
-      return false;
-    };
-
+                                                    
   for (auto It = StartIt; It != BB->end(); ++It) {
     Instruction *Inst = &*It;
 
@@ -425,29 +617,23 @@ Instruction *MDMPPass::findFirstTrueConflictInBlock(BasicBlock *BB, BasicBlock::
             F->getName() == "mdmp_get_rank" ||
             F->getName() == "mdmp_get_size" ||
             F->getName() == "mdmp_wtime") {
-          // These are MDMP placeholders. We guarantee they do not
-          // implicitly clobber unrelated memory buffers.
           continue;
         }
       }
     }
 
     // For later async MDMP ops, allow pipelining unless we have strong proof
-    // that they really touch the same bytes.
+    // they really touch the same bytes.
     if (isAsyncMDMPInstForWaitPlacement(Inst)) {
       auto *CB = dyn_cast<CallBase>(Inst);
-
       if (!CB)
         return Inst;
 
       auto OtherBuffers = getTrackedBuffersForAsyncRuntimeCall(CB);
-
-      // If we cannot reconstruct the async op's buffer set (e.g. mdmp_commit),
-      // stay conservative.
       if (!OtherBuffers)
         return Inst;
 
-      if (asyncBufferSetsDefinitelyConflict(*OtherBuffers, Buffers))
+      if (asyncTrackedBuffersDefinitelyConflict(*OtherBuffers, Buffers, AA, DL))
         return Inst;
 
       continue;
@@ -458,32 +644,41 @@ Instruction *MDMPPass::findFirstTrueConflictInBlock(BasicBlock *BB, BasicBlock::
       errs() << "    Instruction: " << *Inst << "\n";
       if (Inst->getParent()) {
         errs() << "    In Block:    " << Inst->getParent()->getName() << "\n";
-        if (Inst->getFunction()) {
+        if (Inst->getFunction())
           errs() << "    In Function: " << Inst->getFunction()->getName() << "\n";
-        }
       }
+
       if (auto *LI = dyn_cast<LoadInst>(Inst)) {
-	errs() << "    Load Ptr:    " << *LI->getPointerOperand() << "\n";
-	errs() << "    Underlying:  "
-	       << *getUnderlyingObject(LI->getPointerOperand()) << "\n";
-	if (const DebugLoc &Dbg = LI->getDebugLoc()) {
-	  errs() << "    Debug Loc:   " << Dbg.getLine() << ":" << Dbg.getCol() << "\n";
-	}
+        errs() << "    Load Ptr:      " << *LI->getPointerOperand() << "\n";
+        errs() << "    Underlying:    "
+               << *getUnderlyingObject(LI->getPointerOperand()) << "\n";
       }
 
       if (auto *SI = dyn_cast<StoreInst>(Inst)) {
-	errs() << "    Store Ptr:   " << *SI->getPointerOperand() << "\n";
-	errs() << "    Underlying:  "
-	       << *getUnderlyingObject(SI->getPointerOperand()) << "\n";
-	if (const DebugLoc &Dbg = SI->getDebugLoc()) {
-	  errs() << "    Debug Loc:   " << Dbg.getLine() << ":" << Dbg.getCol() << "\n";
-	}
+        errs() << "    Store Ptr:     " << *SI->getPointerOperand() << "\n";
+        errs() << "    Underlying:    "
+               << *getUnderlyingObject(SI->getPointerOperand()) << "\n";
+      }
+
+      if (auto *MTI = dyn_cast<MemTransferInst>(Inst)) {
+        errs() << "    MemTransfer Src: " << *MTI->getSource() << "\n";
+        errs() << "    MemTransfer Dst: " << *MTI->getDest() << "\n";
+        errs() << "    Src Underlying:  "
+               << *getUnderlyingObject(MTI->getSource()) << "\n";
+        errs() << "    Dst Underlying:  "
+               << *getUnderlyingObject(MTI->getDest()) << "\n";
+      }
+
+      if (auto *MSI = dyn_cast<MemSetInst>(Inst)) {
+        errs() << "    MemSet Dst:     " << *MSI->getDest() << "\n";
+        errs() << "    Dst Underlying: "
+               << *getUnderlyingObject(MSI->getDest()) << "\n";
       }
 
       for (const TrackedBuffer &Buf : Buffers) {
-	errs() << "    Tracked Ptr: " << *Buf.Loc.Ptr << "\n";
-	errs() << "    Buf Underlying: "
-	       << *getUnderlyingObject(Buf.Loc.Ptr) << "\n";
+        errs() << "    Tracked Ptr:    " << *Buf.Loc.Ptr << "\n";
+        errs() << "    Buf Underlying: "
+               << *getUnderlyingObject(Buf.Loc.Ptr) << "\n";
       }
 
       return Inst;
@@ -511,15 +706,20 @@ bool MDMPPass::isIgnorableIntrinsicForMDMP(Instruction *I) {
 }
 
 bool MDMPPass::instructionConflictsWithTrackedBufferMSSA(Instruction *I, const TrackedBuffer &Buf, AAResults &AA, MemorySSA &MSSA, const DataLayout &DL) {
-                                                      
+                                                                                                                  
   if (isIgnorableIntrinsicForMDMP(I))
     return false;
 
   if (isMDMPInternalAllocaAccess(I))
     return false;
 
+  if (auto *MTI = dyn_cast<MemTransferInst>(I))
+    return memTransferConflictsWithTrackedBuffer(MTI, Buf, AA, DL);
+
+  if (auto *MSI = dyn_cast<MemSetInst>(I))
+    return memSetConflictsWithTrackedBuffer(MSI, Buf, AA, DL);
+
   if (auto *LI = dyn_cast<LoadInst>(I)) {
-    // Local reads are okay while a send/read-only network op is in flight.
     if (Buf.isNetworkReadOnly)
       return false;
 
@@ -530,24 +730,20 @@ bool MDMPPass::instructionConflictsWithTrackedBufferMSSA(Instruction *I, const T
     return locationsMayOverlap(MemoryLocation::get(SI), Buf.Loc, AA, DL);
   }
 
-  // For non-load/store memory ops, use MemorySSA to distinguish
-  // read-only accesses from true defs/writes.
   ModRefInfo MR = AA.getModRefInfo(I, Buf.Loc);
 
   if (Buf.isNetworkReadOnly) {
-    // Send-like buffer: only local writes/clobbers matter.
     if (!isModSet(MR))
       return false;
 
     if (MemoryAccess *MA = MSSA.getMemoryAccess(I)) {
       if (isa<MemoryUse>(MA))
-        return false; // read-only op, safe for in-flight send
+        return false;
     }
 
     return true;
   }
 
-  // Recv-like buffer: local reads and writes both matter.
   if (!isModOrRefSet(MR))
     return false;
 
@@ -646,27 +842,6 @@ bool MDMPPass::isHardBarrierCallName(StringRef Name) {
   return isMDMPBarrier || isMPIBarrier || isMPIP2P || isMPITopology;
 }
 
-bool MDMPPass::isMDMPInternalAllocaAccess(Instruction *I) {
-  Value *Ptr = nullptr;
-
-  if (auto *LI = dyn_cast<LoadInst>(I))
-    Ptr = LI->getPointerOperand();
-  else if (auto *SI = dyn_cast<StoreInst>(I))
-    Ptr = SI->getPointerOperand();
-  else
-    return false;
-
-  const Value *Obj = getUnderlyingObject(Ptr);
-  auto *AI = dyn_cast<AllocaInst>(Obj);
-  if (!AI)
-    return false;
-
-  StringRef N = AI->getName();
-  return N == "mdmp_req_token" ||
-    N == "mdmp_wait_ids_scratch" ||
-    N == "mdmp_progress_counter";
-}
-
 void MDMPPass::collectLeafLoops(Loop *L, SmallVectorImpl<Loop *> &Out) {
   if (L->getSubLoops().empty()) {
     Out.push_back(L);
@@ -730,55 +905,10 @@ bool MDMPPass::requestWindowSuggestsLoopProgressRelaxed(const RequestWindowInfo 
   return false;
 }
 
-bool MDMPPass::loopMayConflictWithTrackedBuffers(Loop *L, ArrayRef<TrackedBuffer> Buffers, AAResults &AA, MemorySSA &MSSA, const DataLayout &DL) {                                                                                                                                       
+bool MDMPPass::loopMayConflictWithTrackedBuffers(Loop *L, ArrayRef<TrackedBuffer> Buffers, AAResults &AA, MemorySSA &MSSA, const DataLayout &DL) {
+                                                 
   if (!L)
     return true;
-
-  auto sameBasePreciseOverlap = [&](const MemoryLocation &A,
-                                    const MemoryLocation &B) -> bool {
-    int64_t OffA = 0, OffB = 0;
-    const Value *BaseA = GetPointerBaseWithConstantOffset(A.Ptr, OffA, DL);
-    const Value *BaseB = GetPointerBaseWithConstantOffset(B.Ptr, OffB, DL);
-
-    if (!BaseA || !BaseB)
-      return false;
-
-    const Value *UA = getUnderlyingObject(BaseA);
-    const Value *UB = getUnderlyingObject(BaseB);
-    if (UA != UB)
-      return false;
-
-    auto SA = getPreciseSizeBytes(A.Size);
-    auto SB = getPreciseSizeBytes(B.Size);
-    if (!SA || !SB)
-      return false;
-
-    int64_t AStart = OffA;
-    int64_t AEnd   = OffA + static_cast<int64_t>(*SA);
-    int64_t BStart = OffB;
-    int64_t BEnd   = OffB + static_cast<int64_t>(*SB);
-
-    return !(AEnd <= BStart || BEnd <= AStart);
-  };
-
-  auto asyncBufferSetsDefinitelyConflict =
-    [&](ArrayRef<TrackedBuffer> A, ArrayRef<TrackedBuffer> B) -> bool {
-      for (const TrackedBuffer &TA : A) {
-	for (const TrackedBuffer &TB : B) {
-	  if (areDefinitelyDisjoint(TA.Loc, TB.Loc, DL))
-	    continue;
-
-	  // Strong proof #1: same underlying object + precise overlapping ranges.
-	  if (sameBasePreciseOverlap(TA.Loc, TB.Loc))
-	    return true;
-
-	  // Strong proof #2: LLVM proves exact aliasing.
-	  if (AA.alias(TA.Loc, TB.Loc) == AliasResult::MustAlias)
-	    return true;
-	}
-      }
-      return false;
-    };
 
   for (BasicBlock *LoopBB : L->getBlocksVector()) {
     for (Instruction &I : *LoopBB) {
@@ -790,26 +920,19 @@ bool MDMPPass::loopMayConflictWithTrackedBuffers(Loop *L, ArrayRef<TrackedBuffer
       if (isIgnorableIntrinsicForMDMP(Inst))
         continue;
 
-      // Any hard barrier inside the loop means we should not carry the request
-      // around the backedge.
       if (isHardBarrierInstForWaitPlacement(Inst))
         return true;
 
-      // For later async MDMP ops, allow pipelining unless we have strong proof
-      // that they really touch the same bytes.
       if (isAsyncMDMPInstForWaitPlacement(Inst)) {
         auto *CB = dyn_cast<CallBase>(Inst);
         if (!CB)
           return true;
 
         auto OtherBuffers = getTrackedBuffersForAsyncRuntimeCall(CB);
-
-        // If we cannot reconstruct the async op's buffer set (e.g. mdmp_commit),
-        // stay conservative.
         if (!OtherBuffers)
           return true;
 
-        if (asyncBufferSetsDefinitelyConflict(*OtherBuffers, Buffers))
+        if (asyncTrackedBuffersDefinitelyConflict(*OtherBuffers, Buffers, AA, DL))
           return true;
 
         continue;
@@ -980,6 +1103,10 @@ std::optional<uint64_t> MDMPPass::getPreciseSizeBytes(LocationSize S) {
 }
 
 bool MDMPPass::areDefinitelyDisjoint(const MemoryLocation &A, const MemoryLocation &B, const DataLayout &DL) {
+                                     
+  if (locationsDefinitelyDisjointByProvenance(A, B, DL))
+    return true;
+
   int64_t OffA = 0, OffB = 0;
   const Value *BaseA = GetPointerBaseWithConstantOffset(A.Ptr, OffA, DL);
   const Value *BaseB = GetPointerBaseWithConstantOffset(B.Ptr, OffB, DL);
@@ -990,51 +1117,21 @@ bool MDMPPass::areDefinitelyDisjoint(const MemoryLocation &A, const MemoryLocati
   const Value *UA = getUnderlyingObject(BaseA);
   const Value *UB = getUnderlyingObject(BaseB);
 
-  const Value *DirectOwnerA = nullptr, *DirectOwnerB = nullptr;
-  const Value *FieldOwnerA = nullptr, *FieldOwnerB = nullptr;
-  int64_t DirectOffA = 0, DirectOffB = 0;
-  int64_t FieldOffA = 0, FieldOffB = 0;
-  
-  bool ADirect = getDirectIdentifiedAccessInfo(A, DL, DirectOwnerA, DirectOffA);
-  bool BDirect = getDirectIdentifiedAccessInfo(B, DL, DirectOwnerB, DirectOffB);
-  
-  bool AField = getLoadedFieldPointeeInfo(A, DL, FieldOwnerA, FieldOffA);
-  bool BField = getLoadedFieldPointeeInfo(B, DL, FieldOwnerB, FieldOffB);
-  
-  // Rule A: direct aggregate metadata vs pointee loaded from its field
-  if (ADirect && BField && DirectOwnerA == FieldOwnerB)
-    return true;
-  if (BDirect && AField && DirectOwnerB == FieldOwnerA)
-    return true;
-  
-  // Rule B: different loaded fields of same aggregate
-  if (AField && BField &&
-      FieldOwnerA == FieldOwnerB &&
-      FieldOffA != FieldOffB)
-    return true;
-  
-  // Rule C: separate local identified object vs pointee loaded from different aggregate
-  if (ADirect && BField &&
-    DirectOwnerA != FieldOwnerB &&
-    isa<AllocaInst>(DirectOwnerA))
-    return true;
-  if (BDirect && AField &&
-      DirectOwnerB != FieldOwnerA &&
-      isa<AllocaInst>(DirectOwnerB))
-    return true;
-    
-  // If the IR contains two different load instructions that load from the 
-  // exact same struct field (e.g., domain.commDataRecv), they represent the 
-  // exact same underlying heap array. We must unify them here!
+  // If the IR contains two different load instructions that load from the
+  // exact same struct field, treat them as naming the same underlying root.
   if (UA != UB) {
     if (auto *LA = dyn_cast<LoadInst>(UA)) {
       if (auto *LB = dyn_cast<LoadInst>(UB)) {
-        int64_t OffsetA = 0, OffsetB = 0;
-        const Value *BasePtrA = GetPointerBaseWithConstantOffset(LA->getPointerOperand(), OffsetA, DL);
-        const Value *BasePtrB = GetPointerBaseWithConstantOffset(LB->getPointerOperand(), OffsetB, DL);
-        
-        if (BasePtrA && BasePtrB && BasePtrA == BasePtrB && OffsetA == OffsetB) {
-          UB = UA; // Treat them as the exact same object
+        int64_t FieldOffA = 0, FieldOffB = 0;
+        const Value *FieldBaseA =
+            GetPointerBaseWithConstantOffset(LA->getPointerOperand(), FieldOffA, DL);
+        const Value *FieldBaseB =
+            GetPointerBaseWithConstantOffset(LB->getPointerOperand(), FieldOffB, DL);
+
+        if (FieldBaseA && FieldBaseB &&
+            FieldBaseA == FieldBaseB &&
+            FieldOffA == FieldOffB) {
+          UB = UA;
         }
       }
     }
@@ -1047,7 +1144,7 @@ bool MDMPPass::areDefinitelyDisjoint(const MemoryLocation &A, const MemoryLocati
     auto SA = getPreciseSizeBytes(A.Size);
     auto SB = getPreciseSizeBytes(B.Size);
     if (!SA || !SB)
-      return false; // Falls through to Alias Analysis
+      return false;
 
     int64_t AStart = OffA;
     int64_t AEnd   = OffA + static_cast<int64_t>(*SA);
@@ -1120,25 +1217,32 @@ bool MDMPPass::operandsAvailableBefore(CallInst *CI, Instruction *InsertBefore, 
 }
 
 bool MDMPPass::instructionConflictsWithTrackedBuffer(Instruction *I, const TrackedBuffer &Buf, AAResults &AA, const DataLayout &DL) {
-
+                                                     
   if (isMDMPInternalAllocaAccess(I))
     return false;
-  
+
+  if (auto *MTI = dyn_cast<MemTransferInst>(I))
+    return memTransferConflictsWithTrackedBuffer(MTI, Buf, AA, DL);
+
+  if (auto *MSI = dyn_cast<MemSetInst>(I))
+    return memSetConflictsWithTrackedBuffer(MSI, Buf, AA, DL);
+
   if (auto *LI = dyn_cast<LoadInst>(I)) {
-    // Local reads are okay while a send is in flight.
     if (Buf.isNetworkReadOnly)
       return false;
+
     return locationsMayOverlap(MemoryLocation::get(LI), Buf.Loc, AA, DL);
   }
 
   if (auto *SI = dyn_cast<StoreInst>(I)) {
-    // Local writes are never okay if they overlap the network buffer.
     return locationsMayOverlap(MemoryLocation::get(SI), Buf.Loc, AA, DL);
   }
 
-  auto MR = AA.getModRefInfo(I, Buf.Loc);
+  ModRefInfo MR = AA.getModRefInfo(I, Buf.Loc);
+
   if (Buf.isNetworkReadOnly)
     return isModSet(MR);
+
   return isModOrRefSet(MR);
 }
 
@@ -1506,6 +1610,7 @@ bool MDMPPass::transformFunctionsToCalls(Function &F, AAResults &AA, DominatorTr
     BasicBlock &EntryBB = F.getEntryBlock();
     IRBuilder<> EntryBuilder(&*EntryBB.getFirstInsertionPt());
     AllocaInst *Alloc = EntryBuilder.CreateAlloca(Type::getInt32Ty(Ctx), nullptr, "mdmp_req_token");
+    markMDMPInternalAlloca(Alloc);
     EntryBuilder.CreateStore(ConstantInt::getSigned(Type::getInt32Ty(Ctx), -1), Alloc);
 
     // Store the true token immediately after the async call
@@ -1922,8 +2027,8 @@ void MDMPPass::injectWaitsForRegion(ArrayRef<AsyncRequest> Requests, Instruction
     IRBuilder<> EntryBuilder(&*EntryBB.getFirstInsertionPt());
 
     WaitIDsScratchTy = ArrayType::get(I32Ty, MaxBatchSize);
-    WaitIDsScratch =
-      EntryBuilder.CreateAlloca(WaitIDsScratchTy, nullptr, "mdmp_wait_ids_scratch");
+    WaitIDsScratch = EntryBuilder.CreateAlloca(WaitIDsScratchTy, nullptr, "mdmp_wait_ids_scratch");
+    markMDMPInternalAlloca(WaitIDsScratch);
   }
 
   for (auto &KV : GroupedWaits) {
@@ -2086,6 +2191,8 @@ void MDMPPass::injectThrottledProgress(ArrayRef<AsyncRequest> Requests,
 
   AllocaInst *CounterAlloc =
     EntryBuilder.CreateAlloca(I32Ty, nullptr, "mdmp_progress_counter");
+  markMDMPInternalAlloca(CounterAlloc);
+
   EntryBuilder.CreateStore(Zero, CounterAlloc);
 
   auto InsertThrottledProgressBefore = [&](Instruction *InsertPt, StringRef Kind) {
