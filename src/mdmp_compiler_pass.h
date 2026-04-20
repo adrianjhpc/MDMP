@@ -93,6 +93,8 @@ namespace llvm {
 
     bool instructionTouchesAnyTrackedBufferPhase2(Instruction *I, ArrayRef<TrackedBuffer> Buffers, AAResults &AA, MemorySSA &MSSA, const DataLayout &DL);
 
+    bool functionContainsMDMPRelevantCall(Function &F);
+
     Instruction *findFirstTrueConflictInBlock(BasicBlock *BB, BasicBlock::iterator StartIt, Instruction *RegionEnd, ArrayRef<TrackedBuffer> Buffers, AAResults &AA, MemorySSA &MSSA, const DataLayout &DL);
     
     bool isIgnorableIntrinsicForMDMP(Instruction *I);
@@ -176,6 +178,10 @@ namespace llvm {
 
     std::vector<TrackedBuffer> buildBcastBuffers(Value *Buf, Value *Count, Value *Type, Value *Bytes);
 
+    std::optional<std::vector<TrackedBuffer>> getTrackedBuffersForAsyncRuntimeCall(CallBase *CB);
+
+    bool trackedBufferSetsMayOverlap(ArrayRef<TrackedBuffer> A, ArrayRef<TrackedBuffer> B, AAResults &AA, const DataLayout &DL);                                                                                     
+    
     bool inlineThinMDMPWrappers(Module &M);
     
     // Core function processor requiring Alias, Dominator, and Loop analyses

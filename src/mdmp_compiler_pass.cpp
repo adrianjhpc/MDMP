@@ -287,6 +287,22 @@ bool MDMPPass::isAsyncMDMPInstForWaitPlacement(Instruction *Inst) {
   return false;
 }
 
+bool MDMPPass::functionContainsMDMPRelevantCall(Function &F) {
+  for (BasicBlock &BB : F) {
+    for (Instruction &I : BB) {
+      if (auto *CB = dyn_cast<CallBase>(&I)) {
+        if (Function *Callee = CB->getCalledFunction()) {
+          StringRef N = Callee->getName();
+          if (N.starts_with("__mdmp_marker_") ||
+              N.starts_with("mdmp_"))
+            return true;
+        }
+      }
+    }
+  }
+  return false;
+}
+
 bool MDMPPass::instructionTouchesAnyTrackedBufferPhase2(Instruction *I, ArrayRef<TrackedBuffer> Buffers, AAResults &AA, MemorySSA &MSSA, const DataLayout &DL) {
                                                      
   for (const TrackedBuffer &Buf : Buffers) {
@@ -306,6 +322,7 @@ Instruction *MDMPPass::findFirstTrueConflictInBlock(BasicBlock *BB, BasicBlock::
     if (!Inst->mayReadOrWriteMemory())
       continue;
 
+    
     if (isHardBarrierInstForWaitPlacement(Inst))
       return Inst;
 
@@ -322,35 +339,25 @@ Instruction *MDMPPass::findFirstTrueConflictInBlock(BasicBlock *BB, BasicBlock::
 
     // Check if this async call uses our tracked buffers
     if (isAsyncMDMPInstForWaitPlacement(Inst)) {
-      bool overlaps = false;
-      if (auto *CB = dyn_cast<CallBase>(Inst)) {
-        for (Value *Arg : CB->args()) {
-          if (Arg->getType()->isPointerTy()) {
-            MemoryLocation ArgLoc(Arg, LocationSize::beforeOrAfterPointer());
-            
-            for (const TrackedBuffer &Buf : Buffers) {
-              AliasResult AR = AA.alias(ArgLoc, Buf.Loc);
-              
-              // Only block pipelining of async network calls if LLVM mathematically 
-              // guarantees they are touching the exact same bytes.
-              // We safely ignore MayAlias to allow concurrent halo exchanges on 
-              // different indices of the same large array.
-              if (AR == AliasResult::MustAlias) {
-                overlaps = true;
-                break;
-              }
-            }
-          }
-          if (overlaps) break;
-        }
-      }
-      
-      if (overlaps) 
-        return Inst; // They write to the exact same bytes! Force a Wait here.
-        
-      continue; // Safe to pipeline, they use different indices or buffers.
-    }
+      auto *CB = dyn_cast<CallBase>(Inst);
 
+      // Be conservative only if we cannot classify the async op.
+      if (!CB)
+	return Inst;
+      
+      auto OtherBuffers = getTrackedBuffersForAsyncRuntimeCall(CB);
+      
+      // If we cannot reconstruct the async op's buffer set (e.g. mdmp_commit),
+      // stay conservative.
+      if (!OtherBuffers)
+	return Inst;
+      
+      if (trackedBufferSetsMayOverlap(*OtherBuffers, Buffers, AA, DL))
+	return Inst;
+      
+      continue;
+    }
+    
     if (instructionTouchesAnyTrackedBufferPhase2(Inst, Buffers, AA, MSSA, DL)) {
       errs() << "[MDMP DEBUG] Conflict detected!\n";
       errs() << "    Instruction: " << *Inst << "\n";
@@ -829,24 +836,6 @@ bool MDMPPass::areDefinitelyDisjoint(const MemoryLocation &A, const MemoryLocati
   if (UA != UB && isIdentifiedObject(UA) && isIdentifiedObject(UB))
     return true;
 
-  if (UA != UB) {
-    // Stack vs Non-Stack
-    if ((isa<AllocaInst>(UA) && !isa<AllocaInst>(UB)) ||
-        (!isa<AllocaInst>(UA) && isa<AllocaInst>(UB))) {
-        return true;
-    }
-
-    auto isDynamicBase = [](const Value *V) {
-        return isa<LoadInst>(V) || isa<Argument>(V) || 
-               isa<PHINode>(V)  || isa<CallBase>(V) ||
-               isa<GlobalValue>(V);
-    };
-
-    if (isDynamicBase(UA) && isDynamicBase(UB)) {
-        return true;
-    }
-  }
-
   if (UA == UB) {
     auto SA = getPreciseSizeBytes(A.Size);
     auto SB = getPreciseSizeBytes(B.Size);
@@ -1002,6 +991,83 @@ std::vector<MDMPPass::TrackedBuffer> MDMPPass::buildBcastBuffers(Value *Buf, Val
 }
 
 
+std::optional<std::vector<MDMPPass::TrackedBuffer>> MDMPPass::getTrackedBuffersForAsyncRuntimeCall(CallBase *CB) {
+  if (!CB)
+    return std::nullopt;
+
+  Function *F = CB->getCalledFunction();
+  if (!F)
+    return std::nullopt;
+
+  StringRef Name = F->getName();
+
+  if (Name == "mdmp_send" || Name == "mdmp_recv" ||
+      Name == "mdmp_register_send" || Name == "mdmp_register_recv") {
+    bool IsSend = (Name.contains("send") && !Name.contains("recv"));
+    return buildSendRecvBuffers(CB->getArgOperand(0),  // buf
+                                CB->getArgOperand(1),  // count
+                                CB->getArgOperand(2),  // type
+                                CB->getArgOperand(3),  // bytes
+                                IsSend);
+  }
+
+  if (Name == "mdmp_reduce" || Name == "mdmp_register_reduce") {
+    return buildReduceBuffers(CB->getArgOperand(0),  // sendbuf
+                              CB->getArgOperand(1),  // recvbuf
+                              CB->getArgOperand(2),  // count
+                              CB->getArgOperand(3),  // type
+                              CB->getArgOperand(4)); // bytes
+  }
+
+  if (Name == "mdmp_gather" || Name == "mdmp_register_gather") {
+    return buildGatherBuffers(CB->getArgOperand(0),  // sendbuf
+                              CB->getArgOperand(1),  // sendcount
+                              CB->getArgOperand(2),  // recvbuf
+                              CB->getArgOperand(3),  // type
+                              CB->getArgOperand(4)); // bytes
+  }
+
+  if (Name == "mdmp_allreduce" || Name == "mdmp_register_allreduce") {
+    return buildAllreduceBuffers(CB->getArgOperand(0),
+                                 CB->getArgOperand(1),
+                                 CB->getArgOperand(2),
+                                 CB->getArgOperand(3),
+                                 CB->getArgOperand(4));
+  }
+
+  if (Name == "mdmp_allgather" || Name == "mdmp_register_allgather") {
+    return buildAllgatherBuffers(CB->getArgOperand(0),
+                                 CB->getArgOperand(1),
+                                 CB->getArgOperand(2),
+                                 CB->getArgOperand(3),
+                                 CB->getArgOperand(4));
+  }
+
+  if (Name == "mdmp_bcast" || Name == "mdmp_register_bcast") {
+    return buildBcastBuffers(CB->getArgOperand(0),
+                             CB->getArgOperand(1),
+                             CB->getArgOperand(2),
+                             CB->getArgOperand(3));
+  }
+
+  // mdmp_commit cannot be reconstructed from call operands alone.
+  if (Name == "mdmp_commit")
+    return std::nullopt;
+
+  return std::nullopt;
+}
+
+bool MDMPPass::trackedBufferSetsMayOverlap(ArrayRef<TrackedBuffer> A, ArrayRef<TrackedBuffer> B, AAResults &AA, const DataLayout &DL) {                                                                                      
+                                           
+  for (const TrackedBuffer &TA : A) {
+    for (const TrackedBuffer &TB : B) {
+      if (locationsMayOverlap(TA.Loc, TB.Loc, AA, DL))
+        return true;
+    }
+  }
+  return false;
+}
+
 bool MDMPPass::inlineThinMDMPWrappers(Module &M) {
   bool Changed = false;
   InlineFunctionInfo IFI;
@@ -1039,8 +1105,11 @@ bool MDMPPass::inlineThinMDMPWrappers(Module &M) {
                 if (auto *CCB = dyn_cast<CallBase>(&CI)) {
                   if (Function *Target = CCB->getCalledFunction()) {
                     if (isAsyncMDMPOpName(Target->getName())) {
+		      bool CallerIsMDMPRelevant = functionContainsMDMPRelevantCall(*Target);
+		      if (!CallerIsMDMPRelevant)
+			continue;
                       HasMDMPCall = true;
-                    }
+                    }		    
                   }
                 }
               }

@@ -18,7 +18,7 @@
     template<> struct MDMPTypeTraits<int64_t> { static const int type = 5; };
     template<> struct MDMPTypeTraits<long long> { static const int type = 5; }; 
 
-    #define MDMP_DEDUCE_TYPE(ptr) MDMPTypeTraits<typename std::remove_reference<decltype(*(ptr))>::type>::type
+    #define MDMP_DEDUCE_TYPE(ptr) MDMPTypeTraits<std::remove_cv_t<std::remove_reference_t<decltype(*(ptr))>>>::type
 
     extern "C" {
 #else
