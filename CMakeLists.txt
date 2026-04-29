@@ -1,9 +1,6 @@
 cmake_minimum_required(VERSION 3.13)
 project(MDMPImplementation LANGUAGES CXX C)
 
-# ==========================================
-# NEW: Enable the global CTest test runner
-# ==========================================
 include(CTest)
 enable_testing()
 
