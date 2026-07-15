@@ -12,6 +12,7 @@
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/Analysis/AliasAnalysis.h"
+#include "llvm/Analysis/CaptureTracking.h" 
 #include "llvm/Analysis/MemoryLocation.h"
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/ValueTracking.h"
@@ -110,7 +111,9 @@ namespace llvm {
     bool isMDMPInternalAllocaAccess(Instruction *I);
     
     void markMDMPInternalAlloca(AllocaInst *AI);
-    
+
+    bool mdmpAllocaAddressEscapes(const Value *V);   
+ 
     MDMPLocationProvenance classifyMemoryLocationProvenance(const MemoryLocation &Loc, const DataLayout &DL);
     
     bool locationsDefinitelyDisjointByProvenance(const MemoryLocation &A, const MemoryLocation &B, const DataLayout &DL);

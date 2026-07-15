@@ -49,8 +49,8 @@ bool MDMPPass::isMDMPInternalAlloca(const Value *V) {
   // Fallback for older IR already relying on names.
   StringRef N = AI->getName();
   return N == "mdmp_req_token" ||
-         N == "mdmp_wait_ids_scratch" ||
-         N == "mdmp_progress_counter";
+    N == "mdmp_wait_ids_scratch" ||
+    N == "mdmp_progress_counter";
 }
 
 void MDMPPass::markMDMPInternalAlloca(AllocaInst *AI) {
@@ -58,6 +58,13 @@ void MDMPPass::markMDMPInternalAlloca(AllocaInst *AI) {
     return;
 
   AI->setMetadata("mdmp.internal", MDNode::get(AI->getContext(), {}));
+}
+
+bool MDMPPass::mdmpAllocaAddressEscapes(const Value *V) {
+  auto *AI = dyn_cast_or_null<AllocaInst>(V);
+  if (!AI)
+    return true;
+  return PointerMayBeCaptured(AI, /*ReturnCaptures=*/true, /*StoreCaptures=*/true);
 }
 
 bool MDMPPass::isMDMPInternalAllocaAccess(Instruction *I) {
@@ -156,13 +163,15 @@ bool MDMPPass::locationsDefinitelyDisjointByProvenance(const MemoryLocation &A, 
   if (PA.Kind == MDMPLocKind::DirectObjectBytes &&
       PB.Kind == MDMPLocKind::LoadedFieldPointee &&
       PA.Owner != PB.FieldOwner &&
-      isa<AllocaInst>(PA.Owner))
+      isa<AllocaInst>(PA.Owner) &&
+      !mdmpAllocaAddressEscapes(PA.Owner))
     return true;
 
   if (PB.Kind == MDMPLocKind::DirectObjectBytes &&
       PA.Kind == MDMPLocKind::LoadedFieldPointee &&
       PB.Owner != PA.FieldOwner &&
-      isa<AllocaInst>(PB.Owner))
+      isa<AllocaInst>(PB.Owner) &&
+      !mdmpAllocaAddressEscapes(PB.Owner))
     return true;
 
   return false;
@@ -190,9 +199,9 @@ bool MDMPPass::sameStorageRootPreciseOverlap(const MemoryLocation &A, const Memo
       if (auto *LB = dyn_cast<LoadInst>(UB)) {
         int64_t FieldOffA = 0, FieldOffB = 0;
         const Value *FieldBaseA =
-            GetPointerBaseWithConstantOffset(LA->getPointerOperand(), FieldOffA, DL);
+	  GetPointerBaseWithConstantOffset(LA->getPointerOperand(), FieldOffA, DL);
         const Value *FieldBaseB =
-            GetPointerBaseWithConstantOffset(LB->getPointerOperand(), FieldOffB, DL);
+	  GetPointerBaseWithConstantOffset(LB->getPointerOperand(), FieldOffB, DL);
 
         if (FieldBaseA && FieldBaseB &&
             FieldBaseA == FieldBaseB &&
@@ -449,7 +458,7 @@ bool MDMPPass::getLoadedFieldPointeeInfo(const MemoryLocation &Loc, const DataLa
 
   int64_t FieldOff = 0;
   const Value *FieldBase =
-      GetPointerBaseWithConstantOffset(LI->getPointerOperand(), FieldOff, DL);
+    GetPointerBaseWithConstantOffset(LI->getPointerOperand(), FieldOff, DL);
   if (!FieldBase)
     return false;
 
@@ -640,47 +649,48 @@ Instruction *MDMPPass::findFirstTrueConflictInBlock(BasicBlock *BB, BasicBlock::
     }
 
     if (instructionTouchesAnyTrackedBufferPhase2(Inst, Buffers, AA, MSSA, DL)) {
-      errs() << "[MDMP DEBUG] Conflict detected!\n";
-      errs() << "    Instruction: " << *Inst << "\n";
-      if (Inst->getParent()) {
-        errs() << "    In Block:    " << Inst->getParent()->getName() << "\n";
-        if (Inst->getFunction())
-          errs() << "    In Function: " << Inst->getFunction()->getName() << "\n";
-      }
+      if (mdmpEnvFlagEnabled("MDMP_CONFLICT_DEBUG", false)) {
+	errs() << "[MDMP DEBUG] Conflict detected!\n";
+	errs() << "    Instruction: " << *Inst << "\n";
+	if (Inst->getParent()) {
+	  errs() << "    In Block:    " << Inst->getParent()->getName() << "\n";
+	  if (Inst->getFunction())
+	    errs() << "    In Function: " << Inst->getFunction()->getName() << "\n";
+	}
 
-      if (auto *LI = dyn_cast<LoadInst>(Inst)) {
-        errs() << "    Load Ptr:      " << *LI->getPointerOperand() << "\n";
-        errs() << "    Underlying:    "
-               << *getUnderlyingObject(LI->getPointerOperand()) << "\n";
-      }
+	if (auto *LI = dyn_cast<LoadInst>(Inst)) {
+	  errs() << "    Load Ptr:      " << *LI->getPointerOperand() << "\n";
+	  errs() << "    Underlying:    "
+		 << *getUnderlyingObject(LI->getPointerOperand()) << "\n";
+	}
 
-      if (auto *SI = dyn_cast<StoreInst>(Inst)) {
-        errs() << "    Store Ptr:     " << *SI->getPointerOperand() << "\n";
-        errs() << "    Underlying:    "
-               << *getUnderlyingObject(SI->getPointerOperand()) << "\n";
-      }
+	if (auto *SI = dyn_cast<StoreInst>(Inst)) {
+	  errs() << "    Store Ptr:     " << *SI->getPointerOperand() << "\n";
+	  errs() << "    Underlying:    "
+		 << *getUnderlyingObject(SI->getPointerOperand()) << "\n";
+	}
 
-      if (auto *MTI = dyn_cast<MemTransferInst>(Inst)) {
-        errs() << "    MemTransfer Src: " << *MTI->getSource() << "\n";
-        errs() << "    MemTransfer Dst: " << *MTI->getDest() << "\n";
-        errs() << "    Src Underlying:  "
-               << *getUnderlyingObject(MTI->getSource()) << "\n";
-        errs() << "    Dst Underlying:  "
-               << *getUnderlyingObject(MTI->getDest()) << "\n";
-      }
+	if (auto *MTI = dyn_cast<MemTransferInst>(Inst)) {
+	  errs() << "    MemTransfer Src: " << *MTI->getSource() << "\n";
+	  errs() << "    MemTransfer Dst: " << *MTI->getDest() << "\n";
+	  errs() << "    Src Underlying:  "
+		 << *getUnderlyingObject(MTI->getSource()) << "\n";
+	  errs() << "    Dst Underlying:  "
+		 << *getUnderlyingObject(MTI->getDest()) << "\n";
+	}
 
-      if (auto *MSI = dyn_cast<MemSetInst>(Inst)) {
-        errs() << "    MemSet Dst:     " << *MSI->getDest() << "\n";
-        errs() << "    Dst Underlying: "
-               << *getUnderlyingObject(MSI->getDest()) << "\n";
-      }
+	if (auto *MSI = dyn_cast<MemSetInst>(Inst)) {
+	  errs() << "    MemSet Dst:     " << *MSI->getDest() << "\n";
+	  errs() << "    Dst Underlying: "
+		 << *getUnderlyingObject(MSI->getDest()) << "\n";
+	}
 
-      for (const TrackedBuffer &Buf : Buffers) {
-        errs() << "    Tracked Ptr:    " << *Buf.Loc.Ptr << "\n";
-        errs() << "    Buf Underlying: "
-               << *getUnderlyingObject(Buf.Loc.Ptr) << "\n";
+	for (const TrackedBuffer &Buf : Buffers) {
+	  errs() << "    Tracked Ptr:    " << *Buf.Loc.Ptr << "\n";
+	  errs() << "    Buf Underlying: "
+		 << *getUnderlyingObject(Buf.Loc.Ptr) << "\n";
+	}
       }
-
       return Inst;
     }
   }
@@ -1063,6 +1073,7 @@ std::optional<uint64_t> MDMPPass::getStaticMPITypeBytes(Value *TypeCodeV) {
   case 2: return 4; // float
   case 3: return 1; // char
   case 4: return 1; // byte
+  case 5: return 8; // int64
   default: return std::nullopt;
   }
 }
@@ -1124,9 +1135,9 @@ bool MDMPPass::areDefinitelyDisjoint(const MemoryLocation &A, const MemoryLocati
       if (auto *LB = dyn_cast<LoadInst>(UB)) {
         int64_t FieldOffA = 0, FieldOffB = 0;
         const Value *FieldBaseA =
-            GetPointerBaseWithConstantOffset(LA->getPointerOperand(), FieldOffA, DL);
+	  GetPointerBaseWithConstantOffset(LA->getPointerOperand(), FieldOffA, DL);
         const Value *FieldBaseB =
-            GetPointerBaseWithConstantOffset(LB->getPointerOperand(), FieldOffB, DL);
+	  GetPointerBaseWithConstantOffset(LB->getPointerOperand(), FieldOffB, DL);
 
         if (FieldBaseA && FieldBaseB &&
             FieldBaseA == FieldBaseB &&
