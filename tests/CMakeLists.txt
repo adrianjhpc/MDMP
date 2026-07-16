@@ -131,6 +131,26 @@ add_mdmp_test(mdmp_test_bcast_race test_mdmp_bcast_race.cpp)
 add_mdmp_test(mdmp_Test_bcast_race_global_struct test_mdmp_bcast_race_global_struct.cpp)
 add_mdmp_test(mdmp_test_multitype test_mdmp_multitype.cpp)
 add_mdmp_test(mdmp_test_abort test_mdmp_abort.cpp)
+add_mdmp_test(mdmp_test_readonly_send_drain test_mdmp_readonly_send_drain.cpp)
+
+set_tests_properties(mdmp_test_readonly_send_drain PROPERTIES
+  # A deadlock manifests as a hang; the timeout turns that into a FAIL.
+  TIMEOUT 60
+  # Do NOT set MDMP_WAIT_IMPLICIT_BATCH here: we are testing the DEFAULT,
+  # which must be liveness-safe when no progress thread exists.
+  FAIL_REGULAR_EXPRESSION "FAILED;FATAL;deadlock"
+  PASS_REGULAR_EXPRESSION "readonly_send_drain PASSED"
+)
+
+add_mdmp_test(mdmp_test_readonly_send_drain_batch test_mdmp_readonly_send_drain.cpp)
+
+set_tests_properties(mdmp_test_readonly_send_drain_batch PROPERTIES
+  TIMEOUT 60
+  ENVIRONMENT "MDMP_WAIT_IMPLICIT_BATCH=1"
+  ENVIRONMENT "LD_LIBRARY_PATH=${CMAKE_BINARY_DIR}/src:/usr/lib64/mpich/lib:$ENV{LD_LIBRARY_PATH}"
+  PASS_REGULAR_EXPRESSION "readonly_send_drain PASSED"
+)
+
 # Tell CTest to expect a non-zero exit code (because MPI_Abort forcefully kills the process)
 set_tests_properties(mdmp_test_abort PROPERTIES WILL_FAIL TRUE)
 
