@@ -19,13 +19,13 @@
 extern "C" {
 #endif
 
-#define MDMP_MAX_REQUESTS 8192
+#define MDMP_MAX_REQUESTS 32768
 #define MDMP_MAX_DECLARATIVE_REQS 1024
 #define MDMP_DECLARATIVE_WAIT -1
 #define MDMP_PROCESS_NOT_INVOLVED -2
 
   constexpr int MDMP_WAIT_MANY_TINY_CUTOFF   = 8;
-  constexpr int MDMP_WAIT_MANY_STACK_CUTOFF  = 32;
+  constexpr int MDMP_WAIT_MANY_STACK_CUTOFF  = 64;
   constexpr int MDMP_WAIT_MANY_MPI_BATCH_MIN = 16;
   
   void mdmp_init();

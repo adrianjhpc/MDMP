@@ -984,6 +984,20 @@ SmallVector<MDMPPass::RequestWindowInfo, 8> MDMPPass::analyseRequestWindows(Arra
     RequestWindowInfo Info;
     Info.Req = &Req;
 
+    // If this batch belongs to an explicit communication region, the region
+    // body is ONE atomic "post-all-then-wait" phase. Do NOT search for internal
+    // consumers: intra-region accesses (pack stores into commDataSend, address
+    // plumbing for the next recv, later sends reusing the same buffer,
+    // recv-vs-recv) are not true consumers. Stopping at any of them serializes
+    // posts -> "post one, wait" -> deadlock. Every request in the region simply
+    // waits at the region end, after every recv and send has been posted.
+    if (RegionEnd) {
+      Info.WaitPoints.push_back(RegionEnd);
+      Info.LiveBlocks.insert(Req.StartPoint->getParent());
+      Infos.push_back(std::move(Info));
+      continue;
+    }
+
     SmallPtrSet<BasicBlock *, 16> VisitedFromBegin;
     SmallPtrSet<BasicBlock *, 16> VisitedPartial;
     SmallVector<TraversalState, 16> Worklist;

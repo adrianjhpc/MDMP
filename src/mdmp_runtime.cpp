@@ -1169,7 +1169,18 @@ void mdmp_commregion_end() {
   std::unique_lock<std::mutex> lock(mdmp_mpi_mutex, std::defer_lock);
   if (mdmp_runtime_active) lock.lock();
   mdmp_wait_all_declarative_batches_unlocked();
+  for (int i = 0; i < mdmp_imper_active_count; ) {
+    int slot = mdmp_imper_active_slots[i];
+    if (mdmp_request_pool[slot] != MPI_REQUEST_NULL) {
+      mdmp_check_mpi(MPI_Wait(&mdmp_request_pool[slot], MPI_STATUS_IGNORE),
+                     "MPI_Wait(commregion_end drain)");
+      mdmp_request_pool[slot] = MPI_REQUEST_NULL;
+      mdmp_note_requests_completed(1);
+    }
+    mdmp_release_imperative_slot_unlocked(slot);
+  }
 }
+
 
 void mdmp_abort(int error_code) {
   fflush(stdout); 
